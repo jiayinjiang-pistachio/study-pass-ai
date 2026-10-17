@@ -1,0 +1,311 @@
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36" version="29.6.6">
+  <diagram name="第 1 页" id="g1Wfj9j-EcbeqajFAgMK">
+    <mxGraphModel dx="1720" dy="2102" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-3" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-2" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="用户输入问题，发送" vertex="1">
+          <mxGeometry height="60" width="120" x="100" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-5" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-4" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-14" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;curved=0;" target="UOFtIIv55UNp7rl_IXMA-13" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="300" y="300" />
+              <mxPoint x="300" y="140" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-15" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;curved=0;" target="UOFtIIv55UNp7rl_IXMA-16">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="300" y="300" />
+              <mxPoint x="300" y="470" />
+            </Array>
+            <mxPoint x="420" y="470" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-2" parent="1" style="rhombus;whiteSpace=wrap;html=1;rounded=1;" value="是否选择模式" vertex="1">
+          <mxGeometry height="80" width="145" x="87.5" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-10" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-9" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-4" parent="1" style="whiteSpace=wrap;html=1;rounded=1;" value="快速回答" vertex="1">
+          <mxGeometry height="60" width="120" x="100" y="420" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-6" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="否" vertex="1">
+          <mxGeometry height="30" width="60" x="140" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-8" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="UOFtIIv55UNp7rl_IXMA-1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-7" parent="1" style="strokeWidth=2;html=1;shape=mxgraph.flowchart.terminator;whiteSpace=wrap;" value="学习模块" vertex="1">
+          <mxGeometry height="60" width="100" x="110" y="-20" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-36" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-41">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="580" y="590" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-9" parent="1" style="whiteSpace=wrap;html=1;rounded=1;" value="直接生成答案" vertex="1">
+          <mxGeometry height="60" width="120" x="100" y="560" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-19" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-18" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-13" parent="1" style="whiteSpace=wrap;html=1;rounded=1;" value="知识精讲" vertex="1">
+          <mxGeometry height="60" width="120" x="400" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-21" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-16" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-20" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-16" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="刷题评测" vertex="1">
+          <mxGeometry height="60" width="120" x="400" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-17" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="是" vertex="1">
+          <mxGeometry height="30" width="60" x="233" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-18" parent="1" style="whiteSpace=wrap;html=1;rounded=1;" value="AI输出结构化知识卡片+一对一语音播客讲解" vertex="1">
+          <mxGeometry height="60" width="150" x="600" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-23" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-20" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-22" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-20" parent="1" style="whiteSpace=wrap;html=1;rounded=1;" value="用户输入某个岗位、某些技术栈题目需求，或者上传简历" vertex="1">
+          <mxGeometry height="60" width="120" x="600" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-25" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-22" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-24" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-22" parent="1" style="whiteSpace=wrap;html=1;rounded=1;" value="AI需要二次跟用户确认题型、题目难度、题量" vertex="1">
+          <mxGeometry height="60" width="130" x="800" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-27" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-24" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-26" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-24" parent="1" style="whiteSpace=wrap;html=1;rounded=1;" value="用户确认好内容后，AI生成题库" vertex="1">
+          <mxGeometry height="60" width="120" x="1015" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-29" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-26" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-28" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-26" parent="1" style="whiteSpace=wrap;html=1;rounded=1;" value="用户进行答题，提交答案" vertex="1">
+          <mxGeometry height="60" width="120" x="1215" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-32" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-28" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;curved=0;entryX=0.4;entryY=0.933;entryDx=0;entryDy=0;entryPerimeter=0;" target="UOFtIIv55UNp7rl_IXMA-13">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1475" y="320" />
+              <mxPoint x="448" y="320" />
+            </Array>
+            <mxPoint x="450" y="270" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-37" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-28" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;curved=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" target="UOFtIIv55UNp7rl_IXMA-41">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1480" y="500" />
+              <mxPoint x="1480" y="590" />
+            </Array>
+            <mxPoint x="1525" y="480" as="sourcePoint" />
+            <mxPoint x="780" y="590" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-39" connectable="0" parent="UOFtIIv55UNp7rl_IXMA-37" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" value="一键存入笔记模块" vertex="1">
+          <mxGeometry relative="1" x="-0.0389" y="-5" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-28" parent="1" style="whiteSpace=wrap;html=1;rounded=1;" value="Ai进行评分，并抽取薄弱点，对薄弱点进行讲解" vertex="1">
+          <mxGeometry height="60" width="120" x="1415" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-33" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="针对薄弱点，可以调用知识精讲功能，进一步进行讲解" vertex="1">
+          <mxGeometry height="30" width="220" x="900" y="300" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-40" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;span style=&quot;font-size: 11px; white-space: nowrap; background-color: rgb(255, 255, 255);&quot;&gt;一键存入笔记模块&lt;/span&gt;" vertex="1">
+          <mxGeometry height="30" width="60" x="350" y="570" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-41" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="笔记模块" vertex="1">
+          <mxGeometry height="60" width="120" x="615" y="560" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-44" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-42" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-43" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-42" parent="1" style="strokeWidth=2;html=1;shape=mxgraph.flowchart.terminator;whiteSpace=wrap;" value="面试模块" vertex="1">
+          <mxGeometry height="60" width="100" x="110" y="820" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-46" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-43" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-45" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-43" parent="1" style="whiteSpace=wrap;html=1;strokeWidth=2;" value="用户输入问题，发送" vertex="1">
+          <mxGeometry height="60" width="120" x="100" y="960" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-48" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-45" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-47" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-60" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-45" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="UOFtIIv55UNp7rl_IXMA-50">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="330" y="1140" />
+              <mxPoint x="330" y="830" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-62" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-45" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="UOFtIIv55UNp7rl_IXMA-55">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="330" y="1140" />
+              <mxPoint x="330" y="1040" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-63" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-45" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="UOFtIIv55UNp7rl_IXMA-57">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-64" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-45" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.75;entryDx=0;entryDy=0;" target="UOFtIIv55UNp7rl_IXMA-58">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="330" y="1140" />
+              <mxPoint x="330" y="1255" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-45" parent="1" style="rhombus;whiteSpace=wrap;html=1;strokeWidth=2;" value="是否选择模式" vertex="1">
+          <mxGeometry height="80" width="200" x="60" y="1100" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-47" parent="1" style="whiteSpace=wrap;html=1;strokeWidth=2;" value="快速回答（默认）" vertex="1">
+          <mxGeometry height="60" width="120" x="100" y="1270" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-49" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="否" vertex="1">
+          <mxGeometry height="30" width="60" x="140" y="1200" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-67" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-50" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-66" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-50" parent="1" style="whiteSpace=wrap;html=1;strokeWidth=2;" value="简历优化" vertex="1">
+          <mxGeometry height="60" width="120" x="400" y="800" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-75" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-55" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-74" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-55" parent="1" style="whiteSpace=wrap;html=1;" value="模拟面试" vertex="1">
+          <mxGeometry height="60" width="120" x="410" y="1010" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-85" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-57" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-84" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-57" parent="1" style="whiteSpace=wrap;html=1;" value="面试复盘" vertex="1">
+          <mxGeometry height="60" width="120" x="410" y="1110" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-58" parent="1" style="whiteSpace=wrap;html=1;" value="知识精讲" vertex="1">
+          <mxGeometry height="60" width="120" x="410" y="1210" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-65" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="是" vertex="1">
+          <mxGeometry height="30" width="60" x="260" y="1120" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-69" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-66" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-68" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-66" parent="1" style="whiteSpace=wrap;html=1;strokeWidth=2;" value="用户上传简历，或者输入简历资料" vertex="1">
+          <mxGeometry height="60" width="120" x="600" y="800" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-71" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-68" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-70" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-68" parent="1" style="whiteSpace=wrap;html=1;strokeWidth=2;" value="AI对简历进行深度分析" vertex="1">
+          <mxGeometry height="60" width="160" x="800" y="800" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-70" parent="1" style="whiteSpace=wrap;html=1;strokeWidth=2;" value="对简历的优缺点进行评判" vertex="1">
+          <mxGeometry height="60" width="120" x="1060" y="800" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-93" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-72" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;curved=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="UOFtIIv55UNp7rl_IXMA-55">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1410" y="960" />
+              <mxPoint x="470" y="960" />
+            </Array>
+            <mxPoint x="1385" y="960" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-94" connectable="0" parent="UOFtIIv55UNp7rl_IXMA-93" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" value="优化简历后，直接进行模拟面试" vertex="1">
+          <mxGeometry relative="1" x="0.0083" y="-6" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-72" parent="1" style="strokeWidth=2;html=1;shape=mxgraph.flowchart.terminator;whiteSpace=wrap;" value="重新生成一份优化后的简历，简历可以下载为word文档" vertex="1">
+          <mxGeometry height="80" width="190" x="1290" y="790" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-73" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-70" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;entryPerimeter=0;" target="UOFtIIv55UNp7rl_IXMA-72">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-77" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-74" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-76" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-74" parent="1" style="whiteSpace=wrap;html=1;" value="用户上传简历或者在提示词中体现简历信息" vertex="1">
+          <mxGeometry height="60" width="140" x="610" y="1010" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-79" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-76" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-78" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-76" parent="1" style="whiteSpace=wrap;html=1;" value="AI提取用户简历信息" vertex="1">
+          <mxGeometry height="60" width="120" x="840" y="1010" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-81" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-78" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-80" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-78" parent="1" style="whiteSpace=wrap;html=1;" value="调用语音识别和语音合成模型进行一对一的语音面试" vertex="1">
+          <mxGeometry height="60" width="160" x="1040" y="1010" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-80" parent="1" style="whiteSpace=wrap;html=1;" value="面试完后调用面试复盘功能" vertex="1">
+          <mxGeometry height="60" width="120" x="1300" y="1010" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-91" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-82" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;curved=0;entryX=0.995;entryY=0.659;entryDx=0;entryDy=0;entryPerimeter=0;" target="UOFtIIv55UNp7rl_IXMA-89">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1650" y="1254" />
+            </Array>
+            <mxPoint x="1290" y="1260" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-82" parent="1" style="strokeWidth=2;html=1;shape=mxgraph.flowchart.terminator;whiteSpace=wrap;" value="总结面试中的表现，抽取薄弱点，并给出改进建议" vertex="1">
+          <mxGeometry height="80" width="180" x="1530" y="1000" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-83" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-80" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;entryPerimeter=0;" target="UOFtIIv55UNp7rl_IXMA-82">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-87" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-84" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-88" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="810" y="1140" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-84" parent="1" style="whiteSpace=wrap;html=1;" value="用户可以上传真实的语音音频，让AI进行复盘分析" vertex="1">
+          <mxGeometry height="60" width="120" x="610" y="1110" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-88" parent="1" style="strokeWidth=2;html=1;shape=mxgraph.flowchart.terminator;whiteSpace=wrap;" value="生成复盘结果，并给出改进建议" vertex="1">
+          <mxGeometry height="85" width="200" x="827" y="1097.5" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-89" parent="1" style="strokeWidth=2;html=1;shape=mxgraph.flowchart.terminator;whiteSpace=wrap;" value="针对难点问题，AI输出结构化知识卡片+一对一语音播客讲解" vertex="1">
+          <mxGeometry height="90" width="220" x="600" y="1195" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-90" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-58" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;entryPerimeter=0;" target="UOFtIIv55UNp7rl_IXMA-89">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-97" edge="1" parent="1" source="UOFtIIv55UNp7rl_IXMA-95" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="UOFtIIv55UNp7rl_IXMA-96" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-95" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="笔记模块" vertex="1">
+          <mxGeometry height="60" width="120" x="210" y="1460" as="geometry" />
+        </mxCell>
+        <mxCell id="UOFtIIv55UNp7rl_IXMA-96" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="面试模块中，AI生成的有价值的内容，可以一键添加到笔记中存储" vertex="1">
+          <mxGeometry height="100" width="210" x="460" y="1440" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
