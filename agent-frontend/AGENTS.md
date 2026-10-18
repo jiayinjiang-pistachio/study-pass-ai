@@ -28,10 +28,17 @@
 | 语言 | TypeScript `~6.0` | 严格模式，禁止 `any` |
 | 构建 | Vite `^8.3` | 别名 `@` → `src` |
 | 类型检查 | `vue-tsc` | 构建前置检查（`vue-tsc -b`） |
+| 路由 | vue-router `^5.4` | history 模式，路由以模块名命名 |
+| 状态管理 | Pinia `^4.1` | setup 风格 store |
+| UI 组件库 | Element Plus `^2.14` + `@element-plus/icons-vue` | **全量引入**（见下方说明） |
+| 样式 | SCSS（`sass`） | 组件 `<style lang="scss" scoped>` + 全局设计 token |
+| 接口 Mock | `mockjs`（devDependency） | **仅开发环境**，通过拦截 XHR 生效 |
 | 包管理 | **pnpm** | 仓库内已有 `pnpm-lock.yaml`，禁止混用 npm/yarn |
 | Node | 见 `.nvmrc`/团队约定 | 类型依赖 `@types/node` 24 |
 
-> 当前脚手架**尚未引入**路由、状态管理、请求库、ESLint/Prettier、测试框架。下文凡涉及这些的部分均标注为「**约定 / 待引入**」，引入前需先在团队内确认。
+> **尚未引入**：ESLint / Prettier、单元测试框架、Git hook。下文凡涉及这些的部分均标注为「**待引入**」，引入前需先在团队内确认。
+>
+> **Element Plus 目前为全量引入**，产物 JS 约 1 MB（gzip 约 330 KB）。后续若要瘦身，可改用 `unplugin-vue-components` 按需引入（需新增 devDependencies，先确认）。
 
 ---
 
@@ -39,26 +46,32 @@
 
 ```
 src/
-├── api/          # 接口层，按业务模块拆分（learn.ts / interview.ts / note.ts ...）
-├── assets/       # 需要经构建处理的静态资源（图片、svg、字体）
-├── components/   # 可复用组件（基础组件 / 业务通用组件）
-├── composables/  # 组合式函数，命名 useXxx.ts
-├── layouts/      # 布局组件
-├── router/       # 路由配置（待引入）
-├── stores/       # Pinia 状态（待引入）
-├── styles/       # 全局样式、设计变量（tokens）
-├── types/        # 全局类型定义
-├── utils/        # 纯工具函数
-├── views/        # 页面级组件（与路由一一对应）
+├── api/              # 接口层：request.ts（统一请求）+ 按业务拆分（conversation.ts / interview.ts）
+├── assets/           # 需要经构建处理的静态资源（图片、svg、字体）
+├── components/       # 可复用组件
+│   ├── common/       # 通用展示组件（EmptyState / LoadingDots）
+│   ├── layout/       # 顶栏相关（TopNavBar / ModuleTabs）
+│   ├── sidebar/      # 会话侧栏（ConversationSidebar / ConversationList / ConversationItem）
+│   └── chat/         # 聊天区（ChatMessageList / ChatMessageItem / ChatInputBar）
+├── composables/      # 组合式函数，命名 useXxx.ts
+├── layouts/          # 布局组件（AppShell.vue）
+├── mock/             # 接口 Mock（仅开发环境加载，见 §7.2）
+├── router/           # 路由配置
+├── stores/           # Pinia 状态（conversation / chat）
+├── styles/           # 全局样式与设计 token（_tokens.scss / index.scss）
+├── types/            # 全局类型定义
+├── utils/            # 纯工具函数（需要时创建）
+├── views/            # 页面级组件（与路由一一对应）
 ├── App.vue
 ├── main.ts
-└── env.d.ts      # 环境变量类型声明
+└── env.d.ts          # 环境变量类型声明
 ```
 
 规则：
 - 新增目录前先确认是否真的必要，避免过度拆分。
 - 页面放 `views/`，可复用组件放 `components/`，**不要把页面塞进 `components/`**。
 - 一次性使用的组件就近放在其所属目录下，不强行抽到全局 `components/`。
+- 组件按领域归入 `components/` 下的子目录（layout / sidebar / chat / common），新增领域时再开子目录。
 
 ---
 
@@ -69,6 +82,7 @@ src/
 | 组件文件 | PascalCase | `KnowledgeCard.vue` |
 | 页面文件 | PascalCase | `InterviewReview.vue` |
 | 组合式函数 | camelCase，`use` 前缀 | `useAudioPlayer.ts` |
+| Pinia Store | camelCase，`useXxxStore` | `useConversationStore` |
 | 工具/接口文件 | camelCase | `request.ts`、`learn.ts` |
 | 目录 | 小写单词或 kebab-case | `components/`、`mock-interview/` |
 | 变量 / 函数 | camelCase | `questionList`、`fetchQuiz()` |
@@ -112,7 +126,19 @@ src/
 
 ### 4.3 状态与逻辑复用
 - 跨组件复用逻辑一律抽成 `composables/useXxx.ts`，不要在组件间复制粘贴。
-- 全局共享状态（用户信息、主题、当前会话等）用 Pinia（**待引入**），不要用 `provide/inject` 兜全局状态。
+- 全局共享状态（用户信息、主题、当前会话、消息等）一律用 **Pinia setup 风格 store**，不要用 `provide/inject` 兜全局状态，也不要在模块里放裸的单例响应式对象。
+  - 统一用 `defineStore('xxx', () => { ... })` 写法，store 文件放 `src/stores/`。
+  - 组件里读取 store 时用 `storeToRefs(store)` 解构响应式状态，方法直接 `store.xxx()` 调用。
+  - store 只负责状态与业务动作，**网络请求一律走 `src/api/`**（见 §7），不在 store 里裸写请求。
+  - 不要在 store 之外再维护一份同义状态（例如既用路由表示当前 Tab、又用 store 存一份当前 Tab），避免双份事实来源。
+
+### 4.4 路由约定
+- 用 **vue-router** history 模式，`src/router/index.ts` 统一配置；路由以模块名命名（`study` / `interview` / `note`），名称复用 `ModuleKey` 常量。
+- 页面组件放 `src/views/`，路由一律**懒加载**（`component: () => import('@/views/Xxx.vue')`）。
+- **当前模块 / Tab 的唯一事实来源是路由**，不要再用 store 或组件本地状态另存一份。
+- 切换模块用 `RouterLink`（配 `active-class` 控制高亮），不要在 `@click` 里手写 `router.push` 拼字符串路径。
+- 未匹配路径需配置兜底重定向（`/:pathMatch(.*)*`）。
+- history 模式在**生产环境需要服务端配置 SPA fallback**（所有路径回退到 `index.html`），部署时不要遗漏。
 
 ---
 
@@ -151,14 +177,25 @@ src/
 
 ---
 
-## 7. 接口 / 请求层约定（待引入请求库）
+## 7. 接口 / 请求层与 Mock 约定
 
-- 所有网络请求**统一走 `src/api/`**，禁止在组件中裸写 `fetch` / `axios`。
+### 7.1 请求层（`src/api/`）
+
+- 所有网络请求**统一走 `src/api/`**，禁止在组件或 store 中裸写 `fetch` / `XMLHttpRequest` / `axios`。
+- 统一入口 `src/api/request.ts`，基于 **原生 `XMLHttpRequest`** 封装（**不引入 axios**）：
+  - 原因：开发期 mock 层用 **Mock.js**，它通过拦截 `XMLHttpRequest` 生效，**拦截不到 `fetch`**；用 XHR 可让同一套请求代码在 mock 与真实后端下行为一致。
 - 请求基址来自 `import.meta.env.VITE_API_PREFIX`（默认 `/api`），**禁止硬编码后端 host 或端口**。
-- 统一封装拦截器：处理 baseURL、超时、鉴权头、错误提示、统一响应结构解包。
-- 每个接口定义明确的请求 / 响应类型。
-- 流式接口（AI 对话、语音播报等）需封装为独立的 SSE/流式工具，并处理中断与错误重连。
-- 请求层落地前，先在团队内确认选型（如 axios / fetch 封装），再统一引入。
+- 统一响应结构约定为信封 `{ code, message, data }`：`code === 0` 视为成功并**解包返回 `data`**，否则抛 `ApiError`（携带 `code` / `message`）。
+- 每个接口在 `src/api/xxx.ts` 中定义明确的请求 / 响应类型，并按业务域拆分文件（如 `conversation.ts` / `interview.ts`）。
+- 流式接口（AI 对话、语音播报等）需封装为独立的 SSE / 流式工具，并处理中断与错误重连。
+
+### 7.2 Mock 层（`src/mock/`，仅开发环境）
+
+- **仅开发环境加载**：在 `main.ts` 中以 `if (import.meta.env.DEV) await import('./mock')` 动态引入，**生产构建不含 mockjs**。
+- 用 `Mock.mock(rurl, rtype, handler)` 拦截请求：`rurl` 支持字符串或正则，`rtype` 为小写方法名；正则捕获组可用于提取路径参数（如会话 id）。
+- 用 `Mock.setup({ timeout })` 模拟网络延迟；用 `Mock.Random`（`guid` / `integer` / `pick` 等）生成易变字段（id、时间戳、AI 随机回复）。
+- **业务关键文案保持固定**（如欢迎语、示例对话），不要用随机值，避免还原度与可测性下降。
+- 接真实后端时：删除/停用 `src/mock/` 的拦截即可，`src/api/` 与业务代码无需改动。
 
 ---
 
@@ -210,6 +247,7 @@ pnpm preview     # 预览生产构建（默认 4173）
 ```
 
 - 提交前必须保证 `pnpm build` 无错误、无类型报错。
+- `pnpm dev` 会自动加载 mock 层（`src/mock/`，仅 DEV），无需手动切换；`pnpm build` / `pnpm preview` 不含 mock。
 - **待引入（引入前需团队确认）**：
   - ESLint + Prettier 统一风格与自动修复；
   - 单元测试（Vitest）/ 组件测试框架；
@@ -233,7 +271,8 @@ pnpm preview     # 预览生产构建（默认 4173）
 
 - ❌ 硬编码后端地址 / 端口 / 密钥。
 - ❌ 使用 `any`、TS `enum`、`namespace`、构造函数参数属性。
-- ❌ 在组件中裸写 `fetch` / `axios`，绕过 `src/api/`。
+- ❌ 在组件或 store 中裸写 `fetch` / `XMLHttpRequest` / `axios`，绕过 `src/api/`。
+- ❌ 除路由外再维护一份「当前模块 / Tab」状态（双份事实来源）。
 - ❌ 在模板里写复杂逻辑或副作用。
 - ❌ 组件间复制粘贴逻辑（应抽 composable）。
 - ❌ 提交 `node_modules/`、`dist/`、`.env`、本地配置。

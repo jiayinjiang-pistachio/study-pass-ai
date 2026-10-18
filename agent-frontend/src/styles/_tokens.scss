@@ -1,0 +1,37 @@
+// 设计 token —— 唯一来源（仅变量与 mixin，不产生任何 CSS 输出）
+// 组件内统一通过 CSS 变量 var(--xxx) 使用，见 index.scss
+
+// 颜色
+$color-brand: #f5c518;
+$color-brand-light: #ffd24c;
+$color-brand-soft: #fce9a8;
+$color-bg-page: #faf6ec;
+$color-surface: #ffffff;
+$color-bubble-user: #e9e9e9;
+$color-text: #1f2329;
+$color-text-muted: #8a9099;
+$color-text-secondary: #5f6672;
+$color-border: #efefef;
+$color-divider: #f0f0f0;
+$color-hover: #f7f7f7;
+
+// 圆角
+$radius-bubble: 12px;
+$radius-control: 8px;
+$radius-pill: 10px;
+
+// 尺寸
+$navbar-height: 72px;
+$sidebar-width: 320px;
+$avatar-size: 38px;
+$content-max-width: 760px;
+
+// 断点
+$bp-md: 1024px;
+$bp-sm: 768px;
+
+@mixin ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

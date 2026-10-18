@@ -1,0 +1,101 @@
+@use './tokens' as *;
+
+/* ===== Reset ===== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei',
+    'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: $color-text;
+  background: $color-bg-page;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+button {
+  font-family: inherit;
+}
+
+/* ===== 设计 token → CSS 变量（供组件与 Element Plus 复用） ===== */
+:root {
+  --color-brand: #{$color-brand};
+  --color-brand-light: #{$color-brand-light};
+  --color-brand-soft: #{$color-brand-soft};
+  --color-bg-page: #{$color-bg-page};
+  --color-surface: #{$color-surface};
+  --color-bubble-user: #{$color-bubble-user};
+  --color-text: #{$color-text};
+  --color-text-muted: #{$color-text-muted};
+  --color-text-secondary: #{$color-text-secondary};
+  --color-border: #{$color-border};
+  --color-divider: #{$color-divider};
+  --color-hover: #{$color-hover};
+
+  --radius-bubble: #{$radius-bubble};
+  --radius-control: #{$radius-control};
+  --radius-pill: #{$radius-pill};
+
+  --navbar-height: #{$navbar-height};
+  --sidebar-width: #{$sidebar-width};
+  --avatar-size: #{$avatar-size};
+  --content-max-width: #{$content-max-width};
+
+  /* Element Plus 主题对齐品牌色 */
+  --el-color-primary: #{$color-brand};
+  --el-border-radius-base: #{$radius-control};
+  --el-font-family: inherit;
+}
+
+/* ===== 通用工具类 ===== */
+.text-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 自定义滚动条（内容区 / 侧栏） */
+.scroll-area {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #d9d9d9 transparent;
+
+  &::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: #d9d9d9;
+    border-radius: 3px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
