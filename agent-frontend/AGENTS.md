@@ -199,7 +199,7 @@ src/
 - 统一入口 `src/api/request.ts`，基于 **原生 `XMLHttpRequest`** 封装（**不引入 axios**）：
   - 原因：开发期 mock 层用 **Mock.js**，它通过拦截 `XMLHttpRequest` 生效，**拦截不到 `fetch`**；用 XHR 可让同一套请求代码在 mock 与真实后端下行为一致。
 - 请求基址来自 `import.meta.env.VITE_API_PREFIX`（默认 `/api`），**禁止硬编码后端 host 或端口**。
-- 统一响应结构约定为信封 `{ code, message, data }`：`code === 0` 视为成功并**解包返回 `data`**，否则抛 `ApiError`（携带 `code` / `message`）。
+- 统一响应结构约定为信封 `{ code, message, data }`：`code === 200` 视为成功并**解包返回 `data`**，否则抛 `ApiError`（携带 `code` / `message`）。后端错误响应的 `code` 复用 HTTP 状态码（404 / 409 / 422 / 500），并额外带 `detail`（面向开发者定位）。
 - 每个接口在 `src/api/xxx.ts` 中定义明确的请求 / 响应类型，并按业务域拆分文件（如 `conversation.ts` / `interview.ts` / `note.ts`）。
 - 流式接口（AI 对话、语音播报等）需封装为独立的 SSE / 流式工具，并处理中断与错误重连。
 

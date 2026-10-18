@@ -25,23 +25,42 @@ uvicorn app.main:app --reload --port 8000
 
 ```
 app/
-├── main.py              # 应用入口：创建 FastAPI 实例、注册路由
-├── core/security.py     # 通用能力：密码哈希（passlib + bcrypt）
-├── routers/user.py      # ① 路由层：HTTP 契约
-├── schemas/user.py      # ② 校验层：Pydantic v2 请求 / 响应模型
+├── main.py                   # 应用入口：创建 FastAPI 实例、配置日志、注册异常处理器与路由
+├── core/
+│   ├── security.py           # 通用能力：密码哈希（passlib + bcrypt）
+│   ├── exceptions.py         # 自定义异常：BusinessException / SystemException
+│   ├── logging.py            # 日志配置
+│   └── handlers.py           # 全局异常处理器（统一错误响应）
+├── routers/user.py           # ① 路由层：HTTP 契约
+├── schemas/
+│   ├── user.py               # ② 校验层：Pydantic v2 请求 / 响应模型
+│   └── response.py           # 统一响应信封
 ├── services/user_service.py  # ③ 业务层：业务规则
-└── db/memory.py         # ④ 数据库层：内存字典模拟
+└── db/memory.py              # ④ 数据库层：内存字典模拟
 ```
 
 ## 用户接口
 
 | 方法 | 路径 | 说明 | 成功码 |
 | --- | --- | --- | --- |
-| POST | `/api/users` | 创建用户 | 201 |
+| POST | `/api/users` | 创建用户 | 200 |
 | GET | `/api/users` | 用户列表 | 200 |
 | GET | `/api/users/{id}` | 用户详情 | 200 |
 | PUT | `/api/users/{id}` | 更新用户 | 200 |
-| DELETE | `/api/users/{id}` | 删除用户 | 204 |
+| DELETE | `/api/users/{id}` | 删除用户 | 200 |
+
+### 统一响应信封
+
+所有接口（成功 / 失败）返回同一结构，`code` 复用 HTTP 状态码：
+
+```jsonc
+// 成功
+{ "code": 200, "message": "ok", "data": { /* 业务数据，可为 null */ } }
+// 失败（HTTP 状态码同为 404）
+{ "code": 404, "message": "用户 1 不存在", "detail": "user_id=1" }
+```
+
+`message` 面向用户（中文），`detail` 面向开发者（定位用，可为 null）。
 
 ### 示例
 
@@ -65,6 +84,7 @@ curl -X DELETE http://127.0.0.1:8000/api/users/1
 
 ## 说明
 
+- **统一错误处理**：业务层抛 `BusinessException`（4xx）/ `SystemException`（5xx），由全局处理器统一转成错误信封；业务错误记 `WARNING`、系统错误记 `ERROR`（含堆栈，供定位）。日志级别可用环境变量 `LOG_LEVEL` 覆盖。
 - **密码安全**：明文仅作为入参，落库前经 `passlib[bcrypt]` 单向哈希；响应模型不含 `password`。
 - **数据存储**：数据库层为内存字典，进程重启即清空，仅用于开发 / 演示；替换真实数据库时只改 `app/db/`。
 - **依赖锁定**：`bcrypt` 锁定 `4.0.1`（`passlib 1.7.4` 与 `bcrypt>=4.1` 不兼容），详见 `requirements.txt` 注释。

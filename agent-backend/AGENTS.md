@@ -58,13 +58,17 @@ HTTP 请求
 ```
 agent-backend/
 ├── app/
-│   ├── main.py              # 应用入口：创建 FastAPI 实例、注册路由
-│   ├── core/                # 跨层通用能力（安全、配置等），不依赖业务
-│   │   └── security.py      #   密码哈希封装
+│   ├── main.py              # 应用入口：创建 FastAPI 实例、配置日志、注册异常处理器与路由
+│   ├── core/                # 跨层通用能力（安全、配置、异常、日志等），不依赖业务
+│   │   ├── security.py      #   密码哈希封装
+│   │   ├── exceptions.py    #   自定义异常：BusinessException / SystemException
+│   │   ├── logging.py       #   日志配置（setup_logging）
+│   │   └── handlers.py      #   全局异常处理器（统一转错误响应信封）
 │   ├── routers/             # ① 路由层，按业务模块拆分
 │   │   └── user.py
 │   ├── schemas/             # ② 校验层，按业务模块拆分
-│   │   └── user.py
+│   │   ├── user.py
+│   │   └── response.py      #   统一响应信封（ResponseModel / ErrorResponse / ok）
 │   ├── services/            # ③ 业务层，按业务模块拆分
 │   │   └── user_service.py
 │   └── db/                  # ④ 数据库层
@@ -88,9 +92,11 @@ agent-backend/
 
 ### 2.3 错误处理约定
 
-- 业务错误在 **services 层**统一抛 `HTTPException`（如 404 不存在、409 冲突），由 FastAPI 转换为标准响应体；路由层因此保持极薄，不做 try/except。
-- 参数错误由 **schemas 层**自动产生 `422`，不手写校验代码。
-- 响应体格式保持 FastAPI 默认的 `{"detail": "..."}`，不自定义包装结构。
+- 业务错误在 **services 层**统一抛 `BusinessException`（可预期，4xx，如 404 不存在、409 冲突），系统级故障抛 `SystemException`（不可预期，5xx）；两类异常定义在 `app/core/exceptions.py`，均携带 `message`（面向用户）与 `detail`（面向开发者定位）。
+- 异常由 `app/core/handlers.py` 的**全局异常处理器**统一转成错误响应信封 `{code, message, detail}`（`code` 复用 HTTP 状态码）；路由层因此保持极薄，**不做 try/except**。
+- 参数错误由 **schemas 层**自动产生，全局处理器把 `RequestValidationError` 转成 `422` 信封，不手写校验代码。
+- 框架 `HTTPException`（如 404 路由不存在）与未捕获的 `Exception` 也由全局处理器兜底成同一信封，避免泄漏内部细节。
+- 日志约定：业务 / 参数错误记 `WARNING`，系统 / 未捕获错误记 `ERROR`（含堆栈，供后端定位）。
 
 ---
 
@@ -106,7 +112,9 @@ agent-backend/
 | 常量 | UPPER_SNAKE_CASE | `PASSWORD_MIN_LENGTH` |
 | 私有函数 | 下划线前缀 | `_ensure_unique()` |
 
-**校验模型命名**：入参用 `XxxCreate` / `XxxUpdate`，出参用 `XxxOut`，公共字段抽 `XxxBase`。
+**校验模型命名**：入参用 `XxxCreate` / `XxxUpdate`，出参用 `XxxOut`，公共字段抽 `XxxBase`；统一响应信封固定用 `ResponseModel` / `ErrorResponse`（见 §6）。
+
+**异常类命名**：自定义异常统一以 `Exception` 结尾（`BusinessException` / `SystemException`），放 `app/core/exceptions.py`。
 
 ---
 
@@ -125,6 +133,7 @@ agent-backend/
 - **密码绝不落明文**：一律经 `app/core/security.py` 的 `hash_password()` 处理后存储，出参模型不含 `password`。
 - 哈希算法只在此模块配置，业务层不感知算法细节。
 - 密钥、Token、数据库口令等敏感信息**只放环境变量 / 后端配置**，禁止硬编码、禁止提交。
+- 错误响应的 `detail` 仅用于后端定位，**禁止回传堆栈、密码、Token 等敏感信息**；面向用户的提示放 `message`。
 - 输入校验交给 schemas 层，不手写字符串拼接式校验。
 
 ---
@@ -132,17 +141,31 @@ agent-backend/
 ## 6. 接口约定
 
 - 路径统一以 `/api` 开头，资源用复数名词（`/api/users`）。
+- **统一响应信封**（成功 / 失败结构一致，定义在 `app/schemas/response.py`）：
+
+  ```jsonc
+  // 成功
+  { "code": 200, "message": "ok", "data": { /* 业务数据，可为 null */ } }
+  // 失败
+  { "code": 404, "message": "用户 1 不存在", "detail": "user_id=1" }
+  ```
+
+  `code` **复用 HTTP 状态码**（成功 `200`；错误 `404` / `409` / `422` / `500`），与响应的 HTTP 状态码一致。
+
 - RESTful 语义与状态码：
 
   | 操作 | 方法 + 路径 | 成功状态码 |
   | --- | --- | --- |
-  | 新增 | `POST /api/users` | `201` |
+  | 新增 | `POST /api/users` | `200` |
   | 列表 | `GET /api/users` | `200` |
   | 详情 | `GET /api/users/{id}` | `200` |
   | 更新 | `PUT /api/users/{id}` | `200` |
-  | 删除 | `DELETE /api/users/{id}` | `204` |
+  | 删除 | `DELETE /api/users/{id}` | `200` |
 
-- 每个路由**必须声明 `response_model`**，保证出参被裁剪且有文档。
+  > 统一信封下成功一律 `200`：删除不用 `204`（无响应体，前端无法解析信封）；新增不用 `201`（避免 body.code 与 HTTP 状态码不一致）。
+
+- 每个路由**必须声明 `response_model`**，出参信封用 `ResponseModel[XxxOut]`（列表用 `ResponseModel[list[XxxOut]]`），保证出参被裁剪且有文档。
+- 路由返回值统一用 `ok(data)` 包成成功信封，**不要手写 `{"code": ...}`**。
 - 每个路由**必须写 `summary`**，便于 `/docs` 阅读。
 - 需要跨域直连时再引入 `CORSMiddleware`；当前前端走 Vite 代理（同源），默认不开启。
 
@@ -226,6 +249,8 @@ uvicorn app.main:app --reload --port 8000
 - ❌ 使用 Pydantic v1 语法（`class Config` / `.dict()`）。
 - ❌ 硬编码端口 / 密钥 / 数据库口令。
 - ❌ 直接读写 `db` 层内部字典，绕过其函数。
-- ❌ 在路由中手写 `try/except` 处理业务错误（应抛 `HTTPException`）。
+- ❌ 在路由中手写 `try/except` 处理业务错误（应抛 `BusinessException` / `SystemException`，交全局处理器）。
+- ❌ 在错误响应的 `detail` 中回传堆栈 / 密码 / Token 等敏感信息。
+- ❌ 手写 `{"code": ...}` 拼装成功响应（应用 `ok(data)` + `response_model=ResponseModel[...]`）。
 - ❌ 提交 `.venv/`、`__pycache__/`、`.env`。
 - ❌ 未授权情况下 push / 强推 / 改历史。

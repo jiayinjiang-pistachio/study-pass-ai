@@ -200,7 +200,7 @@ export interface Note {
 
 ```ts
 export interface ApiEnvelope<T> {
-  code: number      // 0 = 成功
+  code: number      // 200 = 成功；错误复用 HTTP 状态码（404 / 409 / 422 / 500）
   message: string
   data: T
 }

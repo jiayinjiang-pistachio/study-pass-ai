@@ -14,7 +14,7 @@ const conversations: Conversation[] = seed.conversations
 const messages: Record<string, ChatMessage[]> = seed.messages
 
 function ok<T>(data: T): { code: number; message: string; data: T } {
-  return { code: 0, message: 'ok', data }
+  return { code: 200, message: 'ok', data }
 }
 
 function fail(message: string, code = 1): { code: number; message: string; data: null } {

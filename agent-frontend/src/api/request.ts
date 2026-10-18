@@ -51,7 +51,7 @@ export function request<T>(url: string, options: RequestOptions = {}): Promise<T
 
       try {
         const envelope = JSON.parse(xhr.responseText) as ApiEnvelope<T>
-        if (envelope.code !== 0) {
+        if (envelope.code !== 200) {
           reject(new ApiError(envelope.message || '请求失败', envelope.code))
           return
         }

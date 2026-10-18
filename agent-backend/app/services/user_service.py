@@ -1,13 +1,14 @@
 """业务层：用户业务规则（唯一性校验、密码哈希、字段组装）。
 
-本层不关心 HTTP 细节，只做业务判断；错误统一抛 HTTPException，
-由 FastAPI 转成对应状态码与响应体，路由层因此可以保持极薄。
+本层不关心 HTTP 细节，只做业务判断；错误统一抛 BusinessException，
+由全局异常处理器转成标准错误响应体，路由层因此可以保持极薄。
 """
 
 from datetime import datetime, timezone
 
-from fastapi import HTTPException, status
+from fastapi import status
 
+from ..core.exceptions import BusinessException
 from ..core.security import hash_password
 from ..db import memory as db
 from ..schemas.user import UserCreate, UserUpdate
@@ -18,11 +19,19 @@ def _ensure_unique(username: str | None, email: str | None, exclude_id: int | No
     if username is not None:
         existed = db.find_by_username(username)
         if existed and existed["id"] != exclude_id:
-            raise HTTPException(status.HTTP_409_CONFLICT, detail="用户名已被占用")
+            raise BusinessException(
+                "用户名已被占用",
+                http_status=status.HTTP_409_CONFLICT,
+                detail=f"username={username}",
+            )
     if email is not None:
         existed = db.find_by_email(email)
         if existed and existed["id"] != exclude_id:
-            raise HTTPException(status.HTTP_409_CONFLICT, detail="邮箱已被注册")
+            raise BusinessException(
+                "邮箱已被注册",
+                http_status=status.HTTP_409_CONFLICT,
+                detail=f"email={email}",
+            )
 
 
 def create_user(payload: UserCreate) -> dict:
@@ -48,7 +57,11 @@ def get_user(user_id: int) -> dict:
     """按 id 查询用户，不存在则 404。"""
     user = db.get(user_id)
     if user is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"用户 {user_id} 不存在")
+        raise BusinessException(
+            f"用户 {user_id} 不存在",
+            http_status=status.HTTP_404_NOT_FOUND,
+            detail=f"user_id={user_id}",
+        )
     return user
 
 
@@ -66,4 +79,8 @@ def update_user(user_id: int, payload: UserUpdate) -> dict:
 def delete_user(user_id: int) -> None:
     """删除用户，不存在则 404。"""
     if not db.delete(user_id):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"用户 {user_id} 不存在")
+        raise BusinessException(
+            f"用户 {user_id} 不存在",
+            http_status=status.HTTP_404_NOT_FOUND,
+            detail=f"user_id={user_id}",
+        )
