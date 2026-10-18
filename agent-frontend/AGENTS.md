@@ -31,6 +31,7 @@
 | 路由 | vue-router `^5.4` | history 模式，路由以模块名命名 |
 | 状态管理 | Pinia `^4.1` | setup 风格 store |
 | UI 组件库 | Element Plus `^2.14` + `@element-plus/icons-vue` | **全量引入**（见下方说明） |
+| 富文本编辑器 | wangEditor-next `@wangeditor-next/editor` + `@wangeditor-next/editor-for-vue` `^6.5` | 仅笔记本模块使用（约定见 §4.5） |
 | 样式 | SCSS（`sass`） | 组件 `<style lang="scss" scoped>` + 全局设计 token |
 | 接口 Mock | `mockjs`（devDependency） | **仅开发环境**，通过拦截 XHR 生效 |
 | 包管理 | **pnpm** | 仓库内已有 `pnpm-lock.yaml`，禁止混用 npm/yarn |
@@ -39,6 +40,8 @@
 > **尚未引入**：ESLint / Prettier、单元测试框架、Git hook。下文凡涉及这些的部分均标注为「**待引入**」，引入前需先在团队内确认。
 >
 > **Element Plus 目前为全量引入**，产物 JS 约 1 MB（gzip 约 330 KB）。后续若要瘦身，可改用 `unplugin-vue-components` 按需引入（需新增 devDependencies，先确认）。
+>
+> **wangEditor-next 仅被笔记本路由引用**，构建时自动拆进 `NoteRoom` 异步 chunk（约 640 KB / gzip 200 KB），不影响学习室 / 面试间的首屏体积。
 
 ---
 
@@ -46,22 +49,22 @@
 
 ```
 src/
-├── api/              # 接口层：request.ts（统一请求）+ 按业务拆分（conversation.ts / interview.ts）
+├── api/              # 接口层：request.ts（统一请求）+ 按业务拆分（conversation.ts / interview.ts / note.ts）
 ├── assets/           # 需要经构建处理的静态资源（图片、svg、字体）
 ├── components/       # 可复用组件
 │   ├── common/       # 通用展示组件（EmptyState / LoadingDots）
 │   ├── layout/       # 顶栏相关（TopNavBar / ModuleTabs）
-│   ├── sidebar/      # 会话侧栏（ConversationSidebar / ConversationList / ConversationItem）
+│   ├── sidebar/      # 侧栏（ConversationSidebar / ConversationList / NoteList / SidebarItem）
 │   └── chat/         # 聊天区（ChatMessageList / ChatMessageItem / ChatInputBar）
-├── composables/      # 组合式函数，命名 useXxx.ts
+├── composables/      # 组合式函数，命名 useXxx.ts（useAutoScroll / useCurrentModule）
 ├── layouts/          # 布局组件（AppShell.vue）
-├── mock/             # 接口 Mock（仅开发环境加载，见 §7.2）
+├── mock/             # 接口 Mock（仅开发环境加载，见 §7.2；index.ts / data.ts / notes.ts）
 ├── router/           # 路由配置
-├── stores/           # Pinia 状态（conversation / chat）
+├── stores/           # Pinia 状态（conversation / chat / note）
 ├── styles/           # 全局样式与设计 token（_tokens.scss / index.scss）
-├── types/            # 全局类型定义
+├── types/            # 全局类型定义（conversation / chat / note）
 ├── utils/            # 纯工具函数（需要时创建）
-├── views/            # 页面级组件（与路由一一对应）
+├── views/            # 页面级组件（与路由一一对应：StudyRoom / InterviewRoom / NoteRoom）
 ├── App.vue
 ├── main.ts
 └── env.d.ts          # 环境变量类型声明
@@ -135,10 +138,21 @@ src/
 ### 4.4 路由约定
 - 用 **vue-router** history 模式，`src/router/index.ts` 统一配置；路由以模块名命名（`study` / `interview` / `note`），名称复用 `ModuleKey` 常量。
 - 页面组件放 `src/views/`，路由一律**懒加载**（`component: () => import('@/views/Xxx.vue')`）。
-- **当前模块 / Tab 的唯一事实来源是路由**，不要再用 store 或组件本地状态另存一份。
+- **当前模块 / Tab 的唯一事实来源是路由**，不要再用 store 或组件本地状态另存一份。组件统一用 `useCurrentModule()`（读路由 `name`）派生当前模块。
+- **模块决定数据源**：学习室 / 面试间（`study` / `interview`）展示会话（`stores/conversation.ts`），笔记本（`note`）展示笔记（`stores/note.ts`）；侧栏据此切换列表与「新建」按钮文案。会话的选中态按模块分别记录（`conversation.activeByModule`），保证切模块时各自高亮不互相串用。
 - 切换模块用 `RouterLink`（配 `active-class` 控制高亮），不要在 `@click` 里手写 `router.push` 拼字符串路径。
 - 未匹配路径需配置兜底重定向（`/:pathMatch(.*)*`）。
 - history 模式在**生产环境需要服务端配置 SPA fallback**（所有路径回退到 `index.html`），部署时不要遗漏。
+
+### 4.5 富文本编辑器（wangEditor-next）
+
+笔记本模块的正文编辑统一用 wangEditor-next，`Editor` / `Toolbar` 组件来自 `@wangeditor-next/editor-for-vue`：
+
+- **必须**在引入处 `import '@wangeditor-next/editor/dist/css/style.css'`，否则编辑器无样式。
+- 内容用 `v-model` 双向绑定；外部切换文档时直接改绑定的 ref 即可（组件内部会自动 `setHtml`），不要手动写实例内容。
+- `onCreated` / `onChange` 等回调**只能**通过组件事件（`@onCreated` / `@onChange`）监听，写进 `defaultConfig` 会直接抛错。
+- 组件卸载时**必须**调用 `editor.destroy()`，否则残留 DOM 与事件监听。
+- 工具栏能力用 `toolbarKeys` 显式声明，只保留设计稿需要的按钮；`uploadImage` 依赖后端上传接口，未接入前用 `insertImage`（填图片 URL）代替。
 
 ---
 
@@ -186,7 +200,7 @@ src/
   - 原因：开发期 mock 层用 **Mock.js**，它通过拦截 `XMLHttpRequest` 生效，**拦截不到 `fetch`**；用 XHR 可让同一套请求代码在 mock 与真实后端下行为一致。
 - 请求基址来自 `import.meta.env.VITE_API_PREFIX`（默认 `/api`），**禁止硬编码后端 host 或端口**。
 - 统一响应结构约定为信封 `{ code, message, data }`：`code === 0` 视为成功并**解包返回 `data`**，否则抛 `ApiError`（携带 `code` / `message`）。
-- 每个接口在 `src/api/xxx.ts` 中定义明确的请求 / 响应类型，并按业务域拆分文件（如 `conversation.ts` / `interview.ts`）。
+- 每个接口在 `src/api/xxx.ts` 中定义明确的请求 / 响应类型，并按业务域拆分文件（如 `conversation.ts` / `interview.ts` / `note.ts`）。
 - 流式接口（AI 对话、语音播报等）需封装为独立的 SSE / 流式工具，并处理中断与错误重连。
 
 ### 7.2 Mock 层（`src/mock/`，仅开发环境）

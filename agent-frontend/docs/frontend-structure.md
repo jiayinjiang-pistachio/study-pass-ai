@@ -1,9 +1,9 @@
 # 前端页面结构与组件拆分设计
 
 > **状态**：已实现（对应当前代码，随代码演进）
-> **范围**：应用骨架（顶栏 + 侧栏）+「面试间」页面
-> **关联规范**：编码与协作约定见仓库根目录 [`AGENTS.md`](../AGENTS.md)，本文件只描述结构设计。
-> **最后更新**：2026-10-17
+> **范围**：应用骨架（顶栏 + 侧栏）+「学习室」「面试间」「笔记本」三个页面
+> **关联规范**：编码与协作约定见 [`AGENTS.md`](../AGENTS.md)，本文件只描述结构设计。
+> **最后更新**：2026-10-18
 
 ---
 
@@ -11,9 +11,13 @@
 
 ### 1.1 布局总览
 
+三个模块共用「顶栏 + 侧栏」骨架，仅右侧内容区随路由切换。
+
+**聊天页（学习室 `/study` / 面试间 `/interview`）**
+
 ```
 ┌───────────────────────────────────────────────────────────────────┐
-│ [Logo] 学面通AI      [学习室] [面试间●] [笔记本]                    │  ← 顶栏 (全宽, 72px)
+│ [Logo] 学面通AI      [学习室●] [面试间] [笔记本]                    │  ← 顶栏 (全宽, 72px)
 ├──────────────────┬────────────────────────────────────────────────┤
 │  ＋ 新建会话      │  消息列表（可滚动，米色底 #FAF6EC）              │
 │                  │   🤖 AI 气泡（白底描边）        刚刚            │
@@ -26,16 +30,34 @@
 └──────────────────┴────────────────────────────────────────────────┘
 ```
 
+**笔记本（`/note`，无底部输入区）**
+
+```
+┌───────────────────────────────────────────────────────────────────┐
+│ [Logo] 学面通AI      [学习室] [面试间] [笔记本●]                    │  ← 顶栏 (全宽, 72px)
+├──────────────────┬────────────────────────────────────────────────┤
+│  ＋ 新建笔记      │   ┌────────────────────────────────────────┐   │
+│                  │   │ [B][I][U][列表][缩进] | [链接][图][🗑]   │   │  ← 工具栏 (wangEditor)
+│  历史笔记         │   ├────────────────────────────────────────┤   │
+│  ▪ 前端技术面试准备│   │ 前端技术面试准备                        │   │  ← 标题输入
+│  ▪ 数据库优化策略  │   ├────────────────────────────────────────┤   │
+│  ▪ 系统架构设计    │   │ 富文本正文（卡片内独立滚动）             │   │  ← 编辑器
+│  ▪ …             │   └────────────────────────────────────────┘   │
+│  (固定 320px)     │                                                │
+└──────────────────┴────────────────────────────────────────────────┘
+```
+
 ### 1.2 三层结构
 
 | 层级 | 组成 | 说明 |
 | --- | --- | --- |
 | **全局骨架层** | 顶栏 + 左栏 | 三个模块（学习室 / 面试间 / 笔记本）共用，仅右侧内容区随路由切换 |
-| **侧栏层** | 会话历史 | 新建按钮 + 会话列表 + 行内操作（编辑 / 下载 / 删除） |
-| **内容层** | `RouterView` 渲染的页面 | `InterviewRoom`（面试间）／ `PlaceholderView`（学习室、笔记本占位） |
+| **侧栏层** | 会话 / 笔记列表 | 新建按钮（文案随模块变化）+ 列表 + 行内操作（编辑 / 下载 / 删除） |
+| **内容层** | `RouterView` 渲染的页面 | `StudyRoom`（学习室）／ `InterviewRoom`（面试间）为聊天页；`NoteRoom`（笔记本）为富文本编辑页 |
 
 > - 顶栏 Tab 高亮态：当前模块以金黄色底（`--color-brand-soft`）高亮，由 `RouterLink` 的 `active-class` 驱动。
-> - 内容区由 **Vue Router** 决定渲染哪个页面（`/interview` → `InterviewRoom`，`/study`、`/note` → `PlaceholderView`）。
+> - 内容区由 **Vue Router** 决定渲染哪个页面（`/study` → `StudyRoom`，`/interview` → `InterviewRoom`，`/note` → `NoteRoom`）。
+> - **侧栏数据源随当前模块切换**：学习室 / 面试间展示会话（`conversation` store），笔记本展示笔记（`note` store）；当前模块由 `useCurrentModule()` 读路由 `name` 得出，侧栏据此切换列表与「新建」按钮文案。
 
 ---
 
@@ -49,21 +71,30 @@ App.vue
    ├─ components/layout/TopNavBar.vue         # 顶栏容器
    │  ├─ (内联) Logo + 「学面通AI」标题        # 黄色圆形 logo，静态展示
    │  └─ components/layout/ModuleTabs.vue     # 学习室 / 面试间 / 笔记本（RouterLink × 3）
-   ├─ components/sidebar/ConversationSidebar.vue   # 左栏
-   │  ├─ (内联) ＋新建会话按钮
-   │  └─ components/sidebar/ConversationList.vue
-   │     └─ components/sidebar/ConversationItem.vue  # 图标 + 标题 + 行内重命名 + hover 操作组
+   ├─ components/sidebar/ConversationSidebar.vue   # 左栏（按当前模块切换列表与按钮文案）
+   │  ├─ (内联) ＋新建会话 / ＋新建笔记 按钮
+   │  ├─ components/sidebar/ConversationList.vue   # 学习室 / 面试间（按模块过滤）
+   │  │  └─ components/sidebar/SidebarItem.vue     # 图标 + 标题 + 行内重命名 + hover 操作组
+   │  └─ components/sidebar/NoteList.vue           # 笔记本
+   │     └─ components/sidebar/SidebarItem.vue     # 会话 / 笔记共用同一列表项组件
    └─ <RouterView />                          # 内容区
+      ├─ views/StudyRoom.vue                  # 学习室（与面试间同构）
+      │  ├─ components/chat/ChatMessageList.vue
+      │  └─ components/chat/ChatInputBar.vue
       ├─ views/InterviewRoom.vue              # 面试间页面
       │  ├─ components/chat/ChatMessageList.vue
       │  │  ├─ components/chat/ChatMessageItem.vue   # 单条消息（按 role 分派样式）
       │  │  ├─ components/common/LoadingDots.vue     # AI 思考中（replying 时）
       │  │  └─ components/common/EmptyState.vue      # 无消息时
       │  └─ components/chat/ChatInputBar.vue  # 底部输入区
-      └─ views/PlaceholderView.vue            # 学习室 / 笔记本占位（el-empty）
+      └─ views/NoteRoom.vue                   # 笔记本（富文本编辑，无底部输入区）
+         ├─ (内联) 标题输入 + 删除笔记按钮
+         └─ @wangeditor-next/editor-for-vue   # Toolbar + Editor（wangEditor-next）
 ```
 
 > 设计稿中的 `AppLogo` / `NewConversationButton` / `ConversationActions` / `MessageAvatar` / `MessageBubble` / `MessageMeta` / `AttachmentButton` / `SendButton` 未单独拆文件：它们要么被内联进父组件（Logo、新建按钮、头像、气泡、时间、附件、发送按钮），要么改用 Element Plus 组件替代（确认弹窗 `ElMessageBox`、空状态 `el-empty`、图标 `@element-plus/icons-vue`）。**当前阶段不做过度拆分**。
+>
+> 会话与笔记的列表项结构一致（图标 + 标题 + 行内重命名 + hover 操作组），因此合并为通用的 `SidebarItem`，由 `ConversationList` / `NoteList` 各自连接对应 store，避免复制粘贴。原先的 `ConversationItem` 与占位页 `PlaceholderView` 已删除。
 
 ### 2.2 通用组件（`src/components/common/`）
 
@@ -79,31 +110,31 @@ App.vue
 | 目录 | 内容 | 备注 |
 | --- | --- | --- |
 | `src/router/` | `index.ts` | history 模式；路由名复用 `ModuleKey`；页面懒加载；`/` 与未匹配路径重定向到面试间 |
-| `src/stores/` | `conversation`（会话列表 / 当前会话）、`chat`（消息 / 发送态） | **Pinia setup 风格** store |
-| `src/api/` | `request.ts`（统一请求，XHR 封装）、`conversation.ts`（会话 CRUD）、`interview.ts`（面试对话） | 请求统一走此层，禁止组件/store 裸调 |
-| `src/mock/` | `index.ts`（Mock.js 拦截）、`data.ts`（种子数据与固定文案） | **仅开发环境**动态加载 |
-| `src/composables/` | `useAutoScroll`（滚动贴底 + 「回到最新」） | 逻辑复用 |
-| `src/types/` | `chat.ts`、`conversation.ts` | 类型定义 |
+| `src/stores/` | `conversation`（会话列表 / 各模块选中态）、`chat`（消息 / 发送态）、`note`（笔记列表 / 当前笔记 / 内容） | **Pinia setup 风格** store |
+| `src/api/` | `request.ts`（统一请求，XHR 封装）、`conversation.ts`（会话 CRUD）、`interview.ts`（对话消息）、`note.ts`（笔记 CRUD 与内容保存） | 请求统一走此层，禁止组件/store 裸调 |
+| `src/mock/` | `index.ts`（Mock.js 拦截）、`data.ts`（会话种子数据与固定文案，分学习 / 面试两组）、`notes.ts`（笔记种子数据与拦截） | **仅开发环境**动态加载 |
+| `src/composables/` | `useAutoScroll`（滚动贴底 + 「回到最新」）、`useCurrentModule`（从路由 `name` 派生当前模块） | 逻辑复用 |
+| `src/types/` | `chat.ts`、`conversation.ts`、`note.ts` | 类型定义 |
 
 ### 2.4 目录落位
 
 ```
 src/
-├── api/              # request.ts / conversation.ts / interview.ts
+├── api/              # request.ts / conversation.ts / interview.ts / note.ts
 ├── assets/           # 需构建处理的静态资源
 ├── components/
 │   ├── common/       # EmptyState / LoadingDots
 │   ├── layout/       # TopNavBar / ModuleTabs
-│   ├── sidebar/      # ConversationSidebar / ConversationList / ConversationItem
+│   ├── sidebar/      # ConversationSidebar / ConversationList / NoteList / SidebarItem
 │   └── chat/         # ChatMessageList / ChatMessageItem / ChatInputBar
-├── composables/      # useAutoScroll.ts
+├── composables/      # useAutoScroll.ts / useCurrentModule.ts
 ├── layouts/          # AppShell.vue
-├── mock/             # index.ts / data.ts（仅 DEV）
+├── mock/             # index.ts / data.ts / notes.ts（仅 DEV）
 ├── router/           # index.ts
-├── stores/           # conversation.ts / chat.ts
+├── stores/           # conversation.ts / chat.ts / note.ts
 ├── styles/           # _tokens.scss（变量）/ index.scss（reset + CSS 变量）
-├── types/            # chat.ts / conversation.ts
-├── views/            # InterviewRoom.vue / PlaceholderView.vue
+├── types/            # chat.ts / conversation.ts / note.ts
+├── views/            # StudyRoom.vue / InterviewRoom.vue / NoteRoom.vue
 ├── App.vue
 ├── main.ts
 └── env.d.ts
@@ -151,7 +182,16 @@ export interface Conversation {
   id: string
   title: string
   icon: string        // 每条会话左侧的图标标识（当前为 emoji）
-  module: ModuleKey
+  module: ModuleKey   // 仅 study / interview；笔记本用独立的 Note
+  updatedAt: number
+}
+
+// src/types/note.ts
+export interface Note {
+  id: string
+  title: string
+  icon: string
+  content: string     // 富文本 HTML
   updatedAt: number
 }
 ```
@@ -179,19 +219,19 @@ export interface ApiEnvelope<T> {
 | # | 交互 | 状态 | 说明 |
 | --- | --- | --- | --- |
 | 1 | 点击「学习室 / 面试间 / 笔记本」→ 切换高亮 + 内容区 | ✅ | Vue Router + `RouterLink active-class` |
-| 2 | 切换 Tab 保留各模块会话与滚动位置 | ⬜ | 模块为独立路由，切换即重建 |
+| 2 | 切换 Tab 保留各模块选中态与滚动位置 | ⚠️ | 各模块选中项已分别记录（`conversation.activeByModule`）；滚动位置未保留，切换即重建 |
 | 3 | Logo 点击 → 回首页 / 默认模块 | ⬜ | 当前 Logo 为静态展示 |
 
 ### B. 侧栏 · 会话
 
 | # | 交互 | 状态 | 说明 |
 | --- | --- | --- | --- |
-| 4 | 「＋新建会话」→ 新建并置顶选中 | ✅ | `store.create()` → `POST /conversations` |
-| 5 | 点击会话项 → 切换并加载消息历史 | ✅ | `store.select()` + `ChatMessageList` 监听 `activeConversationId` |
+| 4 | 「＋新建会话 / ＋新建笔记」→ 新建并置顶选中 | ✅ | 按钮文案随模块变化；会话走 `conversation.create(module)`，笔记走 `note.create()` |
+| 5 | 点击会话项 → 切换并加载消息历史 | ✅ | `conversation.select(module, id)` + `ChatMessageList` 按当前模块读 `activeByModule` |
 | 6 | hover 显示 编辑 / 下载 / 删除 | ✅ | CSS `:hover` 显示操作组 |
-| 7 | 行内重命名（回车 / 失焦保存，Esc 取消） | ✅ | `ConversationItem` 内联输入框 |
+| 7 | 行内重命名（回车 / 失焦保存，Esc 取消） | ✅ | `SidebarItem` 内联输入框（会话 / 笔记共用） |
 | 8 | 下载 → 导出会话为文件 | ⚠️ | 点击仅 `ElMessage.info('功能开发中')` 占位 |
-| 9 | 删除 → 二次确认 → 更新列表 | ✅ | `ElMessageBox.confirm`；删当前会话则切相邻项或空 |
+| 9 | 删除 → 二次确认 → 更新列表 | ✅ | `ElMessageBox.confirm`（确认文案按「会话 / 笔记」区分）；删当前项则切首项或空 |
 | 10 | 列表按 `updatedAt` 倒序；长标题截断 | ⚠️ | 截断已实现（`.text-ellipsis`）；排序依赖接口返回顺序，前端不重排 |
 | 11 | 空状态：无会话时展示引导 | ⬜ | 列表为空时无引导 |
 
@@ -229,13 +269,24 @@ export interface ApiEnvelope<T> {
 | 29 | 语音输入（ASR）/ 语音播报（TTS） | ⬜ | — |
 | 30 | 面试结束 → 生成复盘报告 | ⬜ | — |
 
-### F. 全局
+### F. 笔记本（富文本编辑，`/note`）
 
 | # | 交互 | 状态 | 说明 |
 | --- | --- | --- | --- |
-| 31 | 加载态 / 错误态 / 空态统一处理 | ⚠️ | loading 已实现；错误态未统一；空态仅消息列表 |
-| 32 | 窄屏响应式：侧栏收起为抽屉 | ⚠️ | `< 768px` 时侧栏 `display: none`，未做抽屉 |
-| 33 | 键盘可达性与焦点管理 | ⚠️ | 重命名输入框有焦点处理；未系统化 |
+| 31 | 底部**无**聊天输入区 | ✅ | 笔记本只做富文本编辑，不接对话 |
+| 32 | 工具栏：加粗 / 斜体 / 下划线 / 列表 / 缩进 / 链接 / 插入图片 | ✅ | wangEditor `Toolbar`，`toolbarKeys` 显式声明 |
+| 33 | 标题行内编辑（回车 / 失焦保存） | ✅ | 卡片顶部 `<input>` → `note.rename()` |
+| 34 | 正文编辑 → 防抖自动保存（约 600ms） | ✅ | `@onChange` → `note.saveContent()` |
+| 35 | 切换侧栏笔记 → 编辑器内容随之切换 | ✅ | `watch(activeNoteId)` 改绑定 ref（组件内部自动 `setHtml`） |
+| 36 | 删除笔记 → 二次确认 → 删除当前笔记 | ✅ | 工具栏行尾垃圾桶按钮 + `ElMessageBox.confirm` |
+
+### G. 全局
+
+| # | 交互 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| 37 | 加载态 / 错误态 / 空态统一处理 | ⚠️ | loading 已实现；错误态未统一；空态仅消息列表 |
+| 38 | 窄屏响应式：侧栏收起为抽屉 | ⚠️ | `< 768px` 时侧栏 `display: none`，未做抽屉 |
+| 39 | 键盘可达性与焦点管理 | ⚠️ | 重命名输入框有焦点处理；未系统化 |
 
 ---
 
@@ -264,6 +315,7 @@ export interface ApiEnvelope<T> {
 | `--sidebar-width` | `320px` | 侧栏宽度 |
 | `--avatar-size` | `38px` | 消息头像尺寸 |
 | `--content-max-width` | `760px` | 内容区最大宽度 |
+| `--editor-max-width` | `880px` | 笔记本编辑器卡片最大宽度 |
 
 > 渐变（新建按钮 / Logo）直接用 `linear-gradient(..., var(--color-brand-light), var(--color-brand))`，不单设变量。
 > 响应式断点在 SCSS 中以 `$bp-md: 1024px` / `$bp-sm: 768px` 维护（未映射为 CSS 变量）。
@@ -273,7 +325,9 @@ export interface ApiEnvelope<T> {
 ## 6. 本轮实现约定
 
 - **路由**：`vue-router` history 模式，Tab 切换由路由驱动；路由名复用 `ModuleKey`；页面懒加载；`/` 与未匹配路径重定向到面试间。
-- **状态**：`Pinia` setup 风格 store（`conversation` / `chat`）；**当前模块的唯一事实来源是路由**，store 不再存一份当前 Tab。
+- **状态**：`Pinia` setup 风格 store（`conversation` / `chat` / `note`）；**当前模块的唯一事实来源是路由**，store 不再存一份当前 Tab。
+- **模块决定数据源**：学习室 / 面试间展示会话（`conversation` store，选中态按模块分别记录于 `activeByModule`），笔记本展示笔记（`note` store，独立数据源）；侧栏由 `useCurrentModule()` 读路由 `name` 切换列表与按钮文案。
+- **富文本编辑器**：笔记本正文用 **wangEditor-next**（`@wangeditor-next/editor` + `-for-vue`）。约定：必须引入其 CSS；内容用 `v-model` 绑定，外部切换笔记只需改绑定的 ref（组件内部自动 `setHtml`）；`onCreated` / `onChange` 只能走组件事件（写进 `defaultConfig` 会抛错）；组件卸载须调用 `editor.destroy()`；`toolbarKeys` 显式声明，图片用 `insertImage`（`uploadImage` 依赖后端上传接口）。
 - **请求层**：`src/api/` 基于原生 `XMLHttpRequest` 统一封装（**刻意不用 axios**：Mock.js 只拦截 XHR，不拦截 `fetch`），响应信封 `{ code, message, data }` 自动解包。
 - **Mock**：`mockjs` 通过 `Mock.mock` 拦截 XHR，**仅开发环境**动态加载（`main.ts` 中 `import.meta.env.DEV` 守卫）；`Mock.Random` 只用于易变字段（id / 时间戳 / AI 随机回复），业务关键文案保持固定；接真实后端时删除 mock 拦截即可，业务代码无需改动。
 - **UI 库**：Element Plus **全量引入**（`app.use(ElementPlus)` + 引入其 CSS），主题通过 `--el-color-primary` 对齐品牌色。
@@ -292,3 +346,6 @@ export interface ApiEnvelope<T> {
 | 4 | 发送快捷键 | Enter 发送 / Shift+Enter 换行 | ✅ 已落地 |
 | 5 | 面试流程范围 | 本轮仅打通「对话」；语音 / 复盘 / 状态机后续迭代 | ⬜ 待迭代 |
 | 6 | Element Plus 引入方式 | 全量引入（后续可评估按需引入瘦身） | ⬜ 待评估 |
+| 7 | 笔记本富文本编辑器选型 | **wangEditor-next**（`-for-vue` 提供 `Editor` / `Toolbar`，`v-model` 开箱即用；仅笔记本路由引用，构建自动拆入 `NoteRoom` 异步 chunk） | ✅ 已落地 |
+| 8 | 笔记数据来源 | **独立数据源**（`note` store + `src/api/note.ts` + `mock/notes.ts`），与会话分离，侧栏按模块切换 | ✅ 已落地 |
+| 9 | 侧栏按模块过滤 | 由 `useCurrentModule()` 读路由 `name` 决定列表与文案；会话选中态按模块记录于 `activeByModule`，避免串用 | ✅ 已落地 |
