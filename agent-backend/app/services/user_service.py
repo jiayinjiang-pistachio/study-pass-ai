@@ -1,0 +1,69 @@
+"""业务层：用户业务规则（唯一性校验、密码哈希、字段组装）。
+
+本层不关心 HTTP 细节，只做业务判断；错误统一抛 HTTPException，
+由 FastAPI 转成对应状态码与响应体，路由层因此可以保持极薄。
+"""
+
+from datetime import datetime, timezone
+
+from fastapi import HTTPException, status
+
+from ..core.security import hash_password
+from ..db import memory as db
+from ..schemas.user import UserCreate, UserUpdate
+
+
+def _ensure_unique(username: str | None, email: str | None, exclude_id: int | None = None) -> None:
+    """校验用户名 / 邮箱唯一性；exclude_id 用于更新时排除自身。"""
+    if username is not None:
+        existed = db.find_by_username(username)
+        if existed and existed["id"] != exclude_id:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="用户名已被占用")
+    if email is not None:
+        existed = db.find_by_email(email)
+        if existed and existed["id"] != exclude_id:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="邮箱已被注册")
+
+
+def create_user(payload: UserCreate) -> dict:
+    """创建用户：唯一性校验 → 密码哈希 → 落库。"""
+    _ensure_unique(payload.username, payload.email)
+    record = {
+        "username": payload.username,
+        "email": payload.email,
+        "full_name": payload.full_name,
+        "password": hash_password(payload.password),  # 只存哈希，不保留明文
+        "is_active": True,
+        "created_at": datetime.now(timezone.utc),
+    }
+    return db.insert(record)
+
+
+def list_users() -> list[dict]:
+    """查询用户列表。"""
+    return db.list_all()
+
+
+def get_user(user_id: int) -> dict:
+    """按 id 查询用户，不存在则 404。"""
+    user = db.get(user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"用户 {user_id} 不存在")
+    return user
+
+
+def update_user(user_id: int, payload: UserUpdate) -> dict:
+    """更新用户：只更新显式传入且非空的字段；若改密码则重新哈希。"""
+    get_user(user_id)  # 先确保用户存在，不存在直接 404
+    # exclude_unset：区分「未传」与「传了值」；exclude_none：显式传 null 视为不更新
+    fields = payload.model_dump(exclude_unset=True, exclude_none=True)
+    _ensure_unique(fields.get("username"), fields.get("email"), exclude_id=user_id)
+    if "password" in fields:
+        fields["password"] = hash_password(fields["password"])
+    return db.update(user_id, fields)
+
+
+def delete_user(user_id: int) -> None:
+    """删除用户，不存在则 404。"""
+    if not db.delete(user_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"用户 {user_id} 不存在")

@@ -1,0 +1,11 @@
+# 学面通 AI · agent-backend 依赖（以本文件为准，安装：pip install -r requirements.txt）
+fastapi==0.143.3
+uvicorn==0.54.0
+pydantic==2.14.1
+email-validator==2.3.0
+
+# 密码哈希：passlib 统一入口 + bcrypt 算法后端
+passlib==1.7.4
+# 注意：bcrypt 必须锁 4.0.x。bcrypt>=4.1 移除 __about__ 且 5.x 对 >72 字节密码改为抛错，
+# 会导致 passlib 1.7.4 初始化后端时直接报错。升级 passlib 前不要放开此锁。
+bcrypt==4.0.1
