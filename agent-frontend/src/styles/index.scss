@@ -66,6 +66,7 @@ button {
   --sidebar-width: #{$sidebar-width};
   --avatar-size: #{$avatar-size};
   --content-max-width: #{$content-max-width};
+  --editor-max-width: #{$editor-max-width};
 
   /* Element Plus 主题对齐品牌色 */
   --el-color-primary: #{$color-brand};
@@ -78,6 +79,17 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 侧栏列表（会话 / 笔记共用） */
+.sidebar-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 -6px;
+  padding: 0 6px;
 }
 
 /* 自定义滚动条（内容区 / 侧栏） */

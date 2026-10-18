@@ -2,15 +2,26 @@
 import { nextTick, ref } from 'vue'
 import { Delete, Download, Edit } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { Conversation } from '@/types/conversation'
-import { useConversationStore } from '@/stores/conversation'
 
+/**
+ * 侧栏列表项（会话 / 笔记共用）。
+ * 只负责展示与交互，具体的数据操作由父组件监听事件后调用对应 store。
+ */
 const props = defineProps<{
-  conversation: Conversation
+  id: string
+  title: string
+  icon: string
   active: boolean
+  /** 用于删除确认文案，如「会话」「笔记」 */
+  entityLabel: string
 }>()
 
-const conversationStore = useConversationStore()
+const emit = defineEmits<{
+  select: [id: string]
+  rename: [id: string, title: string]
+  remove: [id: string]
+  export: [id: string]
+}>()
 
 const editing = ref(false)
 const draft = ref('')
@@ -18,12 +29,12 @@ const inputRef = ref<HTMLInputElement | null>(null)
 
 function handleSelect(): void {
   if (editing.value) return
-  conversationStore.select(props.conversation.id)
+  emit('select', props.id)
 }
 
 async function startEdit(): Promise<void> {
   editing.value = true
-  draft.value = props.conversation.title
+  draft.value = props.title
   await nextTick()
   inputRef.value?.focus()
   inputRef.value?.select()
@@ -32,25 +43,21 @@ async function startEdit(): Promise<void> {
 function commitEdit(): void {
   if (!editing.value) return
   editing.value = false
-  void conversationStore.rename(props.conversation.id, draft.value)
+  emit('rename', props.id, draft.value)
 }
 
 function cancelEdit(): void {
   editing.value = false
 }
 
-function handleDownload(): void {
-  ElMessage.info(`导出「${props.conversation.title}」功能开发中`)
-}
-
-async function handleDelete(): Promise<void> {
+async function handleRemove(): Promise<void> {
   try {
-    await ElMessageBox.confirm(`确定删除会话「${props.conversation.title}」吗？`, '删除确认', {
+    await ElMessageBox.confirm(`确定删除${props.entityLabel}「${props.title}」吗？`, '删除确认', {
       confirmButtonText: '删除',
       cancelButtonText: '取消',
       type: 'warning',
     })
-    await conversationStore.remove(props.conversation.id)
+    emit('remove', props.id)
     ElMessage.success('已删除')
   } catch {
     /* 用户取消，无需处理 */
@@ -59,31 +66,33 @@ async function handleDelete(): Promise<void> {
 </script>
 
 <template>
-  <li class="conv-item" :class="{ 'is-active': active }" @click="handleSelect">
-    <span class="conv-item__icon">{{ conversation.icon }}</span>
+  <li class="sidebar-item" :class="{ 'is-active': active }" @click="handleSelect">
+    <span class="sidebar-item__icon">{{ icon }}</span>
 
     <input
       v-if="editing"
       ref="inputRef"
       v-model="draft"
-      class="conv-item__input"
+      class="sidebar-item__input"
       @click.stop
       @keydown.enter.prevent="commitEdit"
       @keydown.esc="cancelEdit"
       @blur="commitEdit"
     />
-    <span v-else class="conv-item__title text-ellipsis">{{ conversation.title }}</span>
+    <span v-else class="sidebar-item__title text-ellipsis">{{ title }}</span>
 
-    <span v-if="!editing" class="conv-item__actions" @click.stop>
-      <el-icon class="conv-item__action" title="重命名" @click="startEdit"><Edit /></el-icon>
-      <el-icon class="conv-item__action" title="导出" @click="handleDownload"><Download /></el-icon>
-      <el-icon class="conv-item__action" title="删除" @click="handleDelete"><Delete /></el-icon>
+    <span v-if="!editing" class="sidebar-item__actions" @click.stop>
+      <el-icon class="sidebar-item__action" title="重命名" @click="startEdit"><Edit /></el-icon>
+      <el-icon class="sidebar-item__action" title="导出" @click="emit('export', id)">
+        <Download />
+      </el-icon>
+      <el-icon class="sidebar-item__action" title="删除" @click="handleRemove"><Delete /></el-icon>
     </span>
   </li>
 </template>
 
 <style lang="scss" scoped>
-.conv-item {
+.sidebar-item {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -97,7 +106,7 @@ async function handleDelete(): Promise<void> {
   &:hover {
     background: var(--color-hover);
 
-    .conv-item__actions {
+    .sidebar-item__actions {
       display: flex;
     }
   }

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -d @wangeditor-next+basic-modules@6.5.0*/node_modules/@wangeditor-next/basic-modules)",
+      "Bash(grep -oE 'registerMenu[^;]{0,400}' __TRACKED_VAR__/dist/index.mjs)"
+    ]
+  }
+}

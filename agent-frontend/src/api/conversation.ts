@@ -1,6 +1,6 @@
 import { request } from './request'
 import type { ChatMessage } from '@/types/chat'
-import type { Conversation } from '@/types/conversation'
+import type { Conversation, ModuleKey } from '@/types/conversation'
 
 export function fetchConversations(): Promise<Conversation[]> {
   return request<Conversation[]>('/conversations')
@@ -10,8 +10,8 @@ export function fetchMessages(conversationId: string): Promise<ChatMessage[]> {
   return request<ChatMessage[]>(`/conversations/${conversationId}/messages`)
 }
 
-export function createConversation(): Promise<Conversation> {
-  return request<Conversation>('/conversations', { method: 'POST' })
+export function createConversation(module: ModuleKey): Promise<Conversation> {
+  return request<Conversation>('/conversations', { method: 'POST', body: { module } })
 }
 
 export function renameConversation(id: string, title: string): Promise<Conversation> {

@@ -8,8 +8,7 @@ const router = createRouter({
     {
       path: '/study',
       name: ModuleKey.Study,
-      component: () => import('@/views/PlaceholderView.vue'),
-      props: { module: ModuleKey.Study },
+      component: () => import('@/views/StudyRoom.vue'),
     },
     {
       path: '/interview',
@@ -19,8 +18,7 @@ const router = createRouter({
     {
       path: '/note',
       name: ModuleKey.Note,
-      component: () => import('@/views/PlaceholderView.vue'),
-      props: { module: ModuleKey.Note },
+      component: () => import('@/views/NoteRoom.vue'),
     },
     { path: '/:pathMatch(.*)*', redirect: { name: ModuleKey.Interview } },
   ],

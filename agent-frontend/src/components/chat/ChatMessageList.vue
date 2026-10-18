@@ -6,16 +6,18 @@ import ChatMessageItem from './ChatMessageItem.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import LoadingDots from '@/components/common/LoadingDots.vue'
 import { useAutoScroll } from '@/composables/useAutoScroll'
+import { useCurrentModule } from '@/composables/useCurrentModule'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
 
 const chatStore = useChatStore()
 const conversationStore = useConversationStore()
 const { messagesMap, loading, replying } = storeToRefs(chatStore)
-const { activeConversationId } = storeToRefs(conversationStore)
+const module = useCurrentModule()
 
 const scroller = ref<HTMLElement | null>(null)
 
+const activeConversationId = computed(() => conversationStore.activeByModule[module.value])
 const messages = computed(() => messagesMap.value[activeConversationId.value] ?? [])
 
 const { showScrollToBottom, scrollToBottom } = useAutoScroll(scroller, () => messages.value)

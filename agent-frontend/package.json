@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "@wangeditor-next/editor": "^6.5.0",
+    "@wangeditor-next/editor-for-vue": "^6.5.0",
     "element-plus": "^2.14.7",
     "pinia": "^4.1.0",
     "vue": "^3.5.42",

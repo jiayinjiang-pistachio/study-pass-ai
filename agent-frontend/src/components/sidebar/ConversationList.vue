@@ -1,31 +1,42 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
-import ConversationItem from './ConversationItem.vue'
+import { ElMessage } from 'element-plus'
+import SidebarItem from './SidebarItem.vue'
+import { useCurrentModule } from '@/composables/useCurrentModule'
 import { useConversationStore } from '@/stores/conversation'
 
 const conversationStore = useConversationStore()
-const { conversations, activeConversationId, loading } = storeToRefs(conversationStore)
+const { conversations, activeByModule, loading } = storeToRefs(conversationStore)
+const module = useCurrentModule()
+
+const list = computed(() => conversationStore.listOf(module.value))
+const activeId = computed(() => activeByModule.value[module.value])
+
+function handleSelect(id: string): void {
+  conversationStore.select(module.value, id)
+}
+
+function handleExport(id: string): void {
+  const target = conversations.value.find((item) => item.id === id)
+  ElMessage.info(`导出「${target?.title ?? ''}」功能开发中`)
+}
 </script>
 
 <template>
-  <ul v-loading="loading" class="conv-list scroll-area">
-    <ConversationItem
-      v-for="item in conversations"
+  <ul v-loading="loading" class="sidebar-list scroll-area">
+    <SidebarItem
+      v-for="item in list"
       :key="item.id"
-      :conversation="item"
-      :active="item.id === activeConversationId"
+      :id="item.id"
+      :title="item.title"
+      :icon="item.icon"
+      :active="item.id === activeId"
+      entity-label="会话"
+      @select="handleSelect"
+      @rename="conversationStore.rename"
+      @remove="conversationStore.remove"
+      @export="handleExport"
     />
   </ul>
 </template>
-
-<style lang="scss" scoped>
-.conv-list {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: 0 -6px;
-  padding: 0 6px;
-}
-</style>

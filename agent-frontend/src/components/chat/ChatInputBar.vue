@@ -3,6 +3,7 @@ import { computed, nextTick, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { Paperclip, Promotion } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { useCurrentModule } from '@/composables/useCurrentModule'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
 
@@ -11,8 +12,9 @@ const MAX_HEIGHT = 120
 const chatStore = useChatStore()
 const conversationStore = useConversationStore()
 const { replying } = storeToRefs(chatStore)
-const { activeConversationId } = storeToRefs(conversationStore)
+const module = useCurrentModule()
 
+const activeConversationId = computed(() => conversationStore.activeByModule[module.value])
 const draft = ref('')
 const fieldRef = ref<HTMLTextAreaElement | null>(null)
 

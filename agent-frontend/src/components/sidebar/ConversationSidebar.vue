@@ -1,12 +1,27 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
 import ConversationList from './ConversationList.vue'
+import NoteList from './NoteList.vue'
+import { useCurrentModule } from '@/composables/useCurrentModule'
 import { useConversationStore } from '@/stores/conversation'
+import { useNoteStore } from '@/stores/note'
+import { ModuleKey } from '@/types/conversation'
 
 const conversationStore = useConversationStore()
+const noteStore = useNoteStore()
+const module = useCurrentModule()
+
+const isNote = computed(() => module.value === ModuleKey.Note)
+const createLabel = computed(() => (isNote.value ? '新建笔记' : '新建会话'))
+const listLabel = computed(() => (isNote.value ? '历史笔记' : '历史会话'))
 
 async function handleCreate(): Promise<void> {
-  await conversationStore.create()
+  if (isNote.value) {
+    await noteStore.create()
+  } else {
+    await conversationStore.create(module.value)
+  }
 }
 </script>
 
@@ -14,12 +29,13 @@ async function handleCreate(): Promise<void> {
   <aside class="sidebar">
     <button type="button" class="sidebar__create" @click="handleCreate">
       <el-icon><Plus /></el-icon>
-      <span>新建会话</span>
+      <span>{{ createLabel }}</span>
     </button>
 
-    <p class="sidebar__label">历史会话</p>
+    <p class="sidebar__label">{{ listLabel }}</p>
 
-    <ConversationList />
+    <NoteList v-if="isNote" />
+    <ConversationList v-else />
   </aside>
 </template>
 
