@@ -4,18 +4,16 @@
 由全局异常处理器转成标准错误响应体，路由层因此可以保持极薄。
 """
 
-from datetime import datetime, timezone
-
 from fastapi import status
 
 from ..core.exceptions import BusinessException
 from ..core.security import hash_password
-from ..db import memory as db
+from ..db import user_repo as db
 from ..schemas.user import UserCreate, UserUpdate
 
 
-def _ensure_unique(username: str | None, email: str | None, exclude_id: int | None = None) -> None:
-    """校验用户名 / 邮箱唯一性；exclude_id 用于更新时排除自身。"""
+def _ensure_unique(username: str | None, exclude_id: int | None = None) -> None:
+    """校验用户名唯一性；exclude_id 用于更新时排除自身。"""
     if username is not None:
         existed = db.find_by_username(username)
         if existed and existed["id"] != exclude_id:
@@ -24,26 +22,14 @@ def _ensure_unique(username: str | None, email: str | None, exclude_id: int | No
                 http_status=status.HTTP_409_CONFLICT,
                 detail=f"username={username}",
             )
-    if email is not None:
-        existed = db.find_by_email(email)
-        if existed and existed["id"] != exclude_id:
-            raise BusinessException(
-                "邮箱已被注册",
-                http_status=status.HTTP_409_CONFLICT,
-                detail=f"email={email}",
-            )
 
 
 def create_user(payload: UserCreate) -> dict:
-    """创建用户：唯一性校验 → 密码哈希 → 落库。"""
-    _ensure_unique(payload.username, payload.email)
+    """创建用户：唯一性校验 → 密码哈希 → 落库（create_time 由数据库填充）。"""
+    _ensure_unique(payload.username)
     record = {
         "username": payload.username,
-        "email": payload.email,
-        "full_name": payload.full_name,
         "password": hash_password(payload.password),  # 只存哈希，不保留明文
-        "is_active": True,
-        "created_at": datetime.now(timezone.utc),
     }
     return db.insert(record)
 
@@ -70,7 +56,7 @@ def update_user(user_id: int, payload: UserUpdate) -> dict:
     get_user(user_id)  # 先确保用户存在，不存在直接 404
     # exclude_unset：区分「未传」与「传了值」；exclude_none：显式传 null 视为不更新
     fields = payload.model_dump(exclude_unset=True, exclude_none=True)
-    _ensure_unique(fields.get("username"), fields.get("email"), exclude_id=user_id)
+    _ensure_unique(fields.get("username"), exclude_id=user_id)
     if "password" in fields:
         fields["password"] = hash_password(fields["password"])
     return db.update(user_id, fields)

@@ -9,3 +9,15 @@ passlib==1.7.4
 # 注意：bcrypt 必须锁 4.0.x。bcrypt>=4.1 移除 __about__ 且 5.x 对 >72 字节密码改为抛错，
 # 会导致 passlib 1.7.4 初始化后端时直接报错。升级 passlib 前不要放开此锁。
 bcrypt==4.0.1
+
+# 数据持久化：SQLAlchemy 2.0 ORM + MySQL 同步驱动
+SQLAlchemy==2.0.36
+PyMySQL==1.1.1
+# MySQL 8 默认认证插件 caching_sha2_password 需要 cryptography，缺失时 PyMySQL 连接直接报错
+cryptography==50.0.2
+
+# 表结构迁移：Alembic 管理 DDL 变更（改模型后一键同步到库）
+alembic==1.14.0
+
+# 从 .env 加载环境变量（MySQL 连接串等敏感配置）
+python-dotenv==1.0.1

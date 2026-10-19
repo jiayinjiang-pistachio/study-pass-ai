@@ -14,12 +14,33 @@ source .venv/bin/activate
 # 2. 安装依赖
 pip install -r requirements.txt
 
-# 3. 启动服务（默认 8000，与前端 Vite 代理对齐）
+# 3. 配置数据库连接（复制模板并填写真实 MySQL 连接串）
+cp .env.example .env
+
+# 4. 建表（首次执行；之后改模型再同步见下方「数据库迁移」）
+alembic upgrade head
+
+# 5. 启动服务（默认 8000，与前端 Vite 代理对齐）
 uvicorn app.main:app --reload --port 8000
 ```
 
 - Swagger UI：http://127.0.0.1:8000/docs
 - 健康检查：`GET /api/health`
+
+## 数据库迁移（Alembic）
+
+> 新手完整上手流程见 **[docs/database-guide.md](./docs/database-guide.md)**（环境准备、改表流程、命令速查、常见问题）。
+
+表结构由 SQLAlchemy 模型声明（`app/db/models.py`），迁移由 Alembic 管理。连接串从环境变量 `MYSQL_URL` 读取（见 `.env`），**不写入 `alembic.ini`**。
+
+```bash
+# 改完 models.py 后，一键生成迁移并同步到数据库
+scripts/db_sync.sh "调整 users 表字段"
+
+# 等价于手动两步：
+# alembic revision --autogenerate -m "调整 users 表字段"
+# alembic upgrade head
+```
 
 ## 目录结构（四层）
 
@@ -27,7 +48,8 @@ uvicorn app.main:app --reload --port 8000
 app/
 ├── main.py                   # 应用入口：创建 FastAPI 实例、配置日志、注册异常处理器与路由
 ├── core/
-│   ├── security.py           # 通用能力：密码哈希（passlib + bcrypt）
+│   ├── config.py             # 通用能力：读取环境变量（MYSQL_URL）
+│   ├── security.py           # 密码哈希（passlib + bcrypt）
 │   ├── exceptions.py         # 自定义异常：BusinessException / SystemException
 │   ├── logging.py            # 日志配置
 │   └── handlers.py           # 全局异常处理器（统一错误响应）
@@ -36,7 +58,14 @@ app/
 │   ├── user.py               # ② 校验层：Pydantic v2 请求 / 响应模型
 │   └── response.py           # 统一响应信封
 ├── services/user_service.py  # ③ 业务层：业务规则
-└── db/memory.py              # ④ 数据库层：内存字典模拟
+└── db/                       # ④ 数据库层：SQLAlchemy 2.0 + MySQL
+    ├── base.py               #   ORM 基类
+    ├── models.py             #   表结构声明（User）
+    ├── session.py            #   engine + Session 工厂
+    └── user_repo.py          #   users 表读写仓储（上层唯一入口）
+
+alembic/                      # 迁移脚本（versions/ 存版本）
+scripts/db_sync.sh            # 一键生成迁移并同步
 ```
 
 ## 用户接口
@@ -68,7 +97,7 @@ app/
 # 创建
 curl -X POST http://127.0.0.1:8000/api/users \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","email":"alice@example.com","password":"secret123","full_name":"Alice"}'
+  -d '{"username":"alice","password":"secret123"}'
 
 # 查询列表
 curl http://127.0.0.1:8000/api/users
@@ -76,7 +105,7 @@ curl http://127.0.0.1:8000/api/users
 # 更新（只更新传入字段）
 curl -X PUT http://127.0.0.1:8000/api/users/1 \
   -H 'Content-Type: application/json' \
-  -d '{"full_name":"Alice Chen"}'
+  -d '{"password":"newsecret123"}'
 
 # 删除
 curl -X DELETE http://127.0.0.1:8000/api/users/1
@@ -86,5 +115,6 @@ curl -X DELETE http://127.0.0.1:8000/api/users/1
 
 - **统一错误处理**：业务层抛 `BusinessException`（4xx）/ `SystemException`（5xx），由全局处理器统一转成错误信封；业务错误记 `WARNING`、系统错误记 `ERROR`（含堆栈，供定位）。日志级别可用环境变量 `LOG_LEVEL` 覆盖。
 - **密码安全**：明文仅作为入参，落库前经 `passlib[bcrypt]` 单向哈希；响应模型不含 `password`。
-- **数据存储**：数据库层为内存字典，进程重启即清空，仅用于开发 / 演示；替换真实数据库时只改 `app/db/`。
+- **数据存储**：`users` 表由 SQLAlchemy 2.0 声明、MySQL 持久化；表结构变更走 Alembic 迁移（`scripts/db_sync.sh`）。上层只经 `app/db/user_repo.py` 读写。
+- **User 表字段**：`id`（自增主键）、`username`（唯一索引）、`password`（bcrypt 哈希）、`create_time`（数据库自动填充当前时间）。
 - **依赖锁定**：`bcrypt` 锁定 `4.0.1`（`passlib 1.7.4` 与 `bcrypt>=4.1` 不兼容），详见 `requirements.txt` 注释。

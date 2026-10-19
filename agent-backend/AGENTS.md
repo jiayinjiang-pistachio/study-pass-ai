@@ -26,6 +26,9 @@
 | ASGI 服务器 | Uvicorn `0.54.x` | 开发用 `--reload` |
 | 数据校验 | Pydantic `v2` `2.14.x` | 请求 / 响应模型，统一在校验层定义 |
 | 密码哈希 | `passlib[bcrypt]` | 统一入口在 `app/core/security.py` |
+| ORM / 数据库 | SQLAlchemy `2.0.x` + PyMySQL | MySQL 同步驱动，模型声明于 `app/db/models.py` |
+| 表结构迁移 | Alembic `1.14.x` | 改模型后 `scripts/db_sync.sh` 一键同步 |
+| 配置读取 | `python-dotenv` | 从 `.env` 读取 `MYSQL_URL`，入口 `app/core/config.py` |
 | 语言 | Python `3.13` | 使用 `X | None` 现代联合类型写法 |
 | 包管理 | **venv + pip** | 仓库内已有 `.venv/`，依赖以 `requirements.txt` 为准 |
 
@@ -50,7 +53,7 @@ HTTP 请求
 ③ services/  业务层   ── 业务规则：唯一性校验、密码哈希、字段组装
    │
    ▼
-④ db/        数据库层 ── 数据存取（当前为内存字典）
+④ db/        数据库层 ── 数据存取（SQLAlchemy 2.0 + MySQL，Alembic 管理表结构）
 ```
 
 ### 2.1 目录结构
@@ -60,6 +63,7 @@ agent-backend/
 ├── app/
 │   ├── main.py              # 应用入口：创建 FastAPI 实例、配置日志、注册异常处理器与路由
 │   ├── core/                # 跨层通用能力（安全、配置、异常、日志等），不依赖业务
+│   │   ├── config.py        #   配置读取：从 .env 取 MYSQL_URL
 │   │   ├── security.py      #   密码哈希封装
 │   │   ├── exceptions.py    #   自定义异常：BusinessException / SystemException
 │   │   ├── logging.py       #   日志配置（setup_logging）
@@ -71,8 +75,17 @@ agent-backend/
 │   │   └── response.py      #   统一响应信封（ResponseModel / ErrorResponse / ok）
 │   ├── services/            # ③ 业务层，按业务模块拆分
 │   │   └── user_service.py
-│   └── db/                  # ④ 数据库层
-│       └── memory.py        #   内存字典实现
+│   └── db/                  # ④ 数据库层（SQLAlchemy 2.0 + MySQL）
+│       ├── base.py          #   ORM 基类（Alembic 感知表结构的入口）
+│       ├── models.py        #   表结构声明（User）
+│       ├── session.py       #   engine + Session 工厂
+│       └── user_repo.py     #   users 表读写仓储（上层唯一入口）
+├── alembic/                 # Alembic 迁移（versions/ 存版本脚本）
+│   └── env.py               #   注入 MYSQL_URL、暴露 Base.metadata
+├── scripts/
+│   └── db_sync.sh           # 改模型后一键生成迁移并同步
+├── alembic.ini              # Alembic 配置（连接串留空，由 env.py 注入）
+├── .env.example             # 环境变量模板（.env 被 gitignore）
 ├── requirements.txt
 ├── .gitignore
 ├── AGENTS.md                # 本规范
@@ -104,7 +117,7 @@ agent-backend/
 
 | 对象 | 规范 | 示例 |
 | --- | --- | --- |
-| 模块文件 | 小写单词 | `security.py`、`memory.py` |
+| 模块文件 | 小写单词 | `security.py`、`session.py` |
 | 业务 service 文件 | 小写 + `_service` 后缀 | `user_service.py` |
 | 路由 / 校验文件 | 与业务模块同名 | `user.py` |
 | 函数 / 变量 | snake_case | `create_user`、`hashed_password` |
@@ -173,10 +186,12 @@ agent-backend/
 
 ## 7. 数据库层约定
 
-- 当前用**内存字典**模拟，进程重启即清空，**仅用于开发 / 演示**。
-- 上层只能通过 `db` 模块暴露的函数读写，**禁止直接访问内部字典**。
-- `db` 层对外返回记录**副本**（`dict(row)`），避免调用方意外修改内存数据。
-- 替换为真实数据库时，**只改 `db/` 层**，上层调用签名保持不变。
+- 使用 **SQLAlchemy 2.0 + MySQL**（同步驱动 PyMySQL）持久化；表结构声明在 `app/db/models.py`。
+- 表结构变更**必须走 Alembic 迁移**：改完模型执行 `scripts/db_sync.sh "说明"`（等价于 `alembic revision --autogenerate` + `alembic upgrade head`）。**禁止在代码里用 `create_all` 建表**，避免与迁移职责重叠。
+- 连接串从环境变量 `MYSQL_URL` 读取（`app/core/config.py` 统一入口），**禁止写进 `alembic.ini` 或硬编码**。
+- 上层（services）只能通过 `app/db/xxx_repo.py` 暴露的函数读写，**禁止直接访问 Session / ORM 对象**。
+- `db` 层对外返回记录**副本**（普通 `dict`），不把会话内 ORM 对象交给调用方。
+- 更换存储实现时，**只改 `db/` 层**，上层调用签名保持不变。
 
 ---
 
@@ -200,6 +215,13 @@ source .venv/bin/activate
 
 # 安装依赖
 pip install -r requirements.txt
+
+# 配置数据库连接（复制模板为 .env，填写真实 MYSQL_URL）
+cp .env.example .env
+
+# 建表 / 同步表结构（改完 app/db/models.py 后执行）
+alembic upgrade head
+scripts/db_sync.sh "说明"     # 等价于 autogenerate + upgrade 的一键同步
 
 # 启动开发服务（默认 8000，与前端代理对齐）
 uvicorn app.main:app --reload --port 8000
