@@ -28,7 +28,8 @@
 | 密码哈希 | `passlib[bcrypt]` | 统一入口在 `app/core/security.py` |
 | ORM / 数据库 | SQLAlchemy `2.0.x` + PyMySQL | MySQL 同步驱动，模型声明于 `app/db/models.py` |
 | 表结构迁移 | Alembic `1.14.x` | 改模型后 `scripts/db_sync.sh` 一键同步 |
-| 配置读取 | `python-dotenv` | 从 `.env` 读取 `MYSQL_URL`，入口 `app/core/config.py` |
+| 配置读取 | `python-dotenv` | 分层加载：真实环境变量 > `.env.{APP_ENV}` > `.env`，入口 `app/core/config.py`（唯一读取入口） |
+| 日志 | Loguru `0.7.x` | 开发控制台 + 文件，生产只落文件；按大小滚动（10MB × 5），入口 `app/core/logging.py` |
 | 语言 | Python `3.13` | 使用 `X | None` 现代联合类型写法 |
 | 包管理 | **venv + pip** | 仓库内已有 `.venv/`，依赖以 `requirements.txt` 为准 |
 
@@ -63,10 +64,10 @@ agent-backend/
 ├── app/
 │   ├── main.py              # 应用入口：创建 FastAPI 实例、配置日志、注册异常处理器与路由
 │   ├── core/                # 跨层通用能力（安全、配置、异常、日志等），不依赖业务
-│   │   ├── config.py        #   配置读取：从 .env 取 MYSQL_URL
+│   │   ├── config.py        #   配置读取（唯一入口）：分层加载 .env / .env.{APP_ENV}
 │   │   ├── security.py      #   密码哈希封装
 │   │   ├── exceptions.py    #   自定义异常：BusinessException / SystemException
-│   │   ├── logging.py       #   日志配置（setup_logging）
+│   │   ├── logging.py       #   日志配置（Loguru + InterceptHandler）：控制台 + 文件滚动
 │   │   └── handlers.py      #   全局异常处理器（统一转错误响应信封）
 │   ├── routers/             # ① 路由层，按业务模块拆分
 │   │   └── user.py
@@ -85,7 +86,10 @@ agent-backend/
 ├── scripts/
 │   └── db_sync.sh           # 改模型后一键生成迁移并同步
 ├── alembic.ini              # Alembic 配置（连接串留空，由 env.py 注入）
-├── .env.example             # 环境变量模板（.env 被 gitignore）
+├── .env.example             # 基础环境变量模板（真实 .env 被 gitignore）
+├── .env.dev.example         # 开发环境覆盖模板（真实 .env.dev 被 gitignore）
+├── .env.prod.example        # 生产环境覆盖模板（真实 .env.prod 被 gitignore）
+├── logs/                    # 日志输出目录（运行期生成，被 gitignore）
 ├── requirements.txt
 ├── .gitignore
 ├── AGENTS.md                # 本规范
@@ -146,8 +150,12 @@ agent-backend/
 - **密码绝不落明文**：一律经 `app/core/security.py` 的 `hash_password()` 处理后存储，出参模型不含 `password`。
 - 哈希算法只在此模块配置，业务层不感知算法细节。
 - 密钥、Token、数据库口令等敏感信息**只放环境变量 / 后端配置**，禁止硬编码、禁止提交。
+- **配置读取只走 `app/core/config.py`**：其他层（含 `logging.py`）从该模块取类型化配置项，**禁止直接 `os.getenv`**。
+- 环境变量**分层加载**，优先级 `真实环境变量 > .env.{APP_ENV} > .env`（`APP_ENV` 取 `dev`（默认）/ `prod`）；生产密钥建议用真实环境变量注入，不落 `.env.prod`。
 - 错误响应的 `detail` 仅用于后端定位，**禁止回传堆栈、密码、Token 等敏感信息**；面向用户的提示放 `message`。
 - 输入校验交给 schemas 层，不手写字符串拼接式校验。
+
+> **日志体系**：`app/core/logging.py` 的 `setup_logging()` 在 `main.py` 启动时调用一次，底层用 **Loguru**。开发（`dev`）输出控制台 + 文件，生产（`prod`）只落文件；文件按大小滚动（10MB × 5）写入 `logs/app.log`（`LOG_DIR` 可覆盖，相对路径锚定仓库根）。标准库 `logging`（含 uvicorn 与项目内 `logging.getLogger`）经 `InterceptHandler` 汇入 Loguru，访问日志同样落文件且不重复；业务代码只管 `logging.getLogger(__name__)` 打日志，不要自行 `basicConfig` / 加 handler。业务错误记 `WARNING`、系统错误记 `ERROR`（见 §2.3）。
 
 ---
 
@@ -216,15 +224,19 @@ source .venv/bin/activate
 # 安装依赖
 pip install -r requirements.txt
 
-# 配置数据库连接（复制模板为 .env，填写真实 MYSQL_URL）
+# 配置环境变量（复制模板为 .env 填真实值；可选再复制 .env.dev / .env.prod 覆盖）
 cp .env.example .env
+# cp .env.dev.example .env.dev      # 开发覆盖：LOG_LEVEL=DEBUG、控制台日志
+# cp .env.prod.example .env.prod    # 生产覆盖：LOG_LEVEL=WARNING、只落文件
+# APP_ENV 决定叠加哪个覆盖文件：dev（默认）/ prod，可 export APP_ENV=prod 切换
 
 # 建表 / 同步表结构（改完 app/db/models.py 后执行）
 alembic upgrade head
 scripts/db_sync.sh "说明"     # 等价于 autogenerate + upgrade 的一键同步
 
 # 启动开发服务（默认 8000，与前端代理对齐）
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --reload-exclude 'logs/*' --port 8000
+# 日志落 logs/app.log（滚动），dev 同时输出控制台
 
 # 接口文档
 #   Swagger UI : http://127.0.0.1:8000/docs

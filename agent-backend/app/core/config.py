@@ -1,20 +1,60 @@
-"""应用配置：从环境变量 / .env 读取，集中管理敏感配置（如 MySQL 连接串）。
+"""应用配置：环境变量分层加载 + 类型化读取，是全局配置的唯一入口。
 
-约定（见 AGENTS.md §5）：数据库口令等只放环境变量，禁止硬编码、禁止提交。
-本模块是配置的唯一读取入口，其他层通过 get_mysql_url() 取连接串，不直接碰 os.getenv。
+分层优先级（高 → 低）：
+    1. 真实进程环境变量（CI / 生产部署注入，最高优先，不被文件覆盖）
+    2. .env.{APP_ENV}   环境专属覆盖（如 .env.prod）
+    3. .env             基础 / 共享配置（提交 .env.example 作模板）
+
+实现方式：先加载「环境专属文件」再加载「基础文件」，且都 override=False——
+先写入的不被覆盖，从而天然形成上述优先级，无需手动改写 os.environ。
+
+约定（见 AGENTS.md §5）：数据库口令等敏感信息只放环境变量 / 配置文件，
+禁止硬编码进业务代码；其他层一律通过本模块读取，不直接碰 os.getenv。
 """
 
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 # 仓库根目录：本文件位于 app/core/config.py，向上三级即 agent-backend/
 _ROOT = Path(__file__).resolve().parents[2]
-# 存在才加载，缺失不报错（CI / 生产可直接用真实环境变量）
-load_dotenv(_ROOT / ".env")
+
+
+def _resolve_app_env() -> str:
+    """确定运行环境：dev（默认）/ prod。真实环境变量优先，其次基础 .env。"""
+    # interpolate=False：避免口令中的 $ 被 dotenv 当作变量插值而破坏
+    base = dotenv_values(_ROOT / ".env", interpolate=False)
+    return (os.getenv("APP_ENV") or base.get("APP_ENV") or "dev").strip().lower()
+
+
+APP_ENV: str = _resolve_app_env()
+IS_PROD: bool = APP_ENV == "prod"
+
+# 先加载环境专属文件（值先落定），再加载基础文件补齐未覆盖项
+load_dotenv(_ROOT / f".env.{APP_ENV}", override=False)
+load_dotenv(_ROOT / ".env", override=False)
+
+# ---- 类型化配置项（业务 / 其他层只从这里读，禁止再直接 os.getenv）----
 
 MYSQL_URL: str | None = os.getenv("MYSQL_URL")
+
+# 日志：级别 / 目录 / 文件名 / 是否输出控制台（生产默认只落文件）
+LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_FILE_NAME: str = os.getenv("LOG_FILE_NAME", "app.log")
+LOG_TO_CONSOLE: bool = os.getenv(
+    "LOG_TO_CONSOLE", "false" if IS_PROD else "true"
+).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_log_dir() -> Path:
+    """日志目录：相对路径锚定到仓库根，规避 uvicorn 工作目录漂移。"""
+    raw = os.getenv("LOG_DIR", "logs")
+    path = Path(raw)
+    return path if path.is_absolute() else _ROOT / path
+
+
+LOG_DIR: Path = _resolve_log_dir()
 
 
 def get_mysql_url() -> str:

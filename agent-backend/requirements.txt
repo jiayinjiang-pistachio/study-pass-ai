@@ -21,3 +21,6 @@ alembic==1.14.0
 
 # 从 .env 加载环境变量（MySQL 连接串等敏感配置）
 python-dotenv==1.0.1
+
+# 日志：Loguru 统一控制台 + 文件滚动输出（app/core/logging.py）
+loguru==0.7.3
