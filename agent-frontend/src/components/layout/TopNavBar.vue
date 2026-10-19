@@ -1,5 +1,21 @@
 <script setup lang="ts">
+import { onMounted } from 'vue'
+import { useRouter } from 'vue-router'
+import { SwitchButton } from '@element-plus/icons-vue'
 import ModuleTabs from './ModuleTabs.vue'
+import { useAuthStore } from '@/stores/auth'
+
+const router = useRouter()
+const authStore = useAuthStore()
+
+onMounted(() => {
+  void authStore.loadUser()
+})
+
+async function handleLogout(): Promise<void> {
+  authStore.logout()
+  await router.replace({ name: 'login' })
+}
 </script>
 
 <template>
@@ -15,6 +31,15 @@ import ModuleTabs from './ModuleTabs.vue'
     </div>
 
     <ModuleTabs />
+
+    <div class="top-nav__user">
+      <span v-if="authStore.user" class="top-nav__username text-ellipsis">
+        {{ authStore.user.username }}
+      </span>
+      <el-button class="top-nav__logout" text :icon="SwitchButton" @click="handleLogout">
+        退出登录
+      </el-button>
+    </div>
   </header>
 </template>
 
@@ -53,9 +78,34 @@ import ModuleTabs from './ModuleTabs.vue'
     color: var(--color-text);
   }
 
+  &__user {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-left: auto;
+  }
+
+  &__username {
+    max-width: 140px;
+    font-size: 14px;
+    color: var(--color-text-secondary);
+  }
+
+  &__logout {
+    --el-button-text-color: var(--color-text-secondary);
+    --el-button-hover-text-color: var(--color-accent);
+    --el-button-hover-bg-color: var(--color-accent-soft);
+    --el-button-hover-link-text-color: var(--color-accent);
+    --el-button-active-color: var(--color-accent);
+  }
+
   @media (max-width: 768px) {
     gap: 20px;
     padding: 0 16px;
+
+    &__username {
+      display: none;
+    }
   }
 }
 </style>

@@ -60,11 +60,11 @@ src/
 ├── layouts/          # 布局组件（AppShell.vue）
 ├── mock/             # 接口 Mock（仅开发环境加载，见 §7.2；index.ts / data.ts / notes.ts）
 ├── router/           # 路由配置
-├── stores/           # Pinia 状态（conversation / chat / note）
+├── stores/           # Pinia 状态（auth / conversation / chat / note）
 ├── styles/           # 全局样式与设计 token（_tokens.scss / index.scss）
 ├── types/            # 全局类型定义（conversation / chat / note）
-├── utils/            # 纯工具函数（需要时创建）
-├── views/            # 页面级组件（与路由一一对应：StudyRoom / InterviewRoom / NoteRoom）
+├── utils/            # 纯工具函数（token.ts：本地令牌读写）
+├── views/            # 页面级组件（与路由一一对应：LoginView / StudyRoom / InterviewRoom / NoteRoom）
 ├── App.vue
 ├── main.ts
 └── env.d.ts          # 环境变量类型声明
@@ -143,6 +143,7 @@ src/
 - 切换模块用 `RouterLink`（配 `active-class` 控制高亮），不要在 `@click` 里手写 `router.push` 拼字符串路径。
 - 未匹配路径需配置兜底重定向（`/:pathMatch(.*)*`）。
 - history 模式在**生产环境需要服务端配置 SPA fallback**（所有路径回退到 `index.html`），部署时不要遗漏。
+- **鉴权路由**：`/login` 为公开路由，其余业务路由由 `router.beforeEach` 校验本地令牌；未登录跳登录页并携带 `redirect`，登录成功后回跳。`AppShell` 作为布局路由（嵌套子路由）承载业务页面，登录页不套布局。
 
 ### 4.5 富文本编辑器（wangEditor-next）
 
@@ -200,6 +201,8 @@ src/
   - 原因：开发期 mock 层用 **Mock.js**，它通过拦截 `XMLHttpRequest` 生效，**拦截不到 `fetch`**；用 XHR 可让同一套请求代码在 mock 与真实后端下行为一致。
 - 请求基址来自 `import.meta.env.VITE_API_PREFIX`（默认 `/api`），**禁止硬编码后端 host 或端口**。
 - 统一响应结构约定为信封 `{ code, message, data }`：`code === 200` 视为成功并**解包返回 `data`**，否则抛 `ApiError`（携带 `code` / `message`）。后端错误响应的 `code` 复用 HTTP 状态码（404 / 409 / 422 / 500），并额外带 `detail`（面向开发者定位）。
+- **鉴权与续期**：请求层自动为受保护接口附加 `Authorization: Bearer <access_token>`；收到 `401` 时用本地 `refresh_token` 调 `/api/auth/refresh`（并发请求共享同一次刷新）并重试一次，刷新失败则清理本地令牌并跳转登录页。令牌存于 localStorage，读写统一走 `src/utils/token.ts`。
+- **错误提示**：请求层统一弹出后端 `message`（短时间去重，可用 `silent` 关闭），调用方不要重复提示同一错误。
 - 每个接口在 `src/api/xxx.ts` 中定义明确的请求 / 响应类型，并按业务域拆分文件（如 `conversation.ts` / `interview.ts` / `note.ts`）。
 - 流式接口（AI 对话、语音播报等）需封装为独立的 SSE / 流式工具，并处理中断与错误重连。
 
