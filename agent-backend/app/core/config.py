@@ -67,3 +67,24 @@ def get_mysql_url() -> str:
             "环境变量 MYSQL_URL 未配置，请复制 .env.example 为 .env 并填写连接串"
         )
     return MYSQL_URL
+
+
+# ---- JWT 鉴权配置（密钥只走环境变量，禁止硬编码）----
+
+JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+JWT_SECRET: str | None = os.getenv("JWT_SECRET")
+
+
+def get_jwt_secret() -> str:
+    """返回 JWT 签名密钥。
+
+    未配置时立即报错（与 get_mysql_url 一致）：密钥缺失属于致命配置问题，
+    宁可启动失败，也不要带病运行或退回不安全的默认值。
+    """
+    if not JWT_SECRET:
+        raise RuntimeError(
+            "环境变量 JWT_SECRET 未配置，请在 .env 中设置一个足够随机的密钥"
+        )
+    return JWT_SECRET

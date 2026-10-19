@@ -26,6 +26,7 @@
 | ASGI 服务器 | Uvicorn `0.54.x` | 开发用 `--reload` |
 | 数据校验 | Pydantic `v2` `2.14.x` | 请求 / 响应模型，统一在校验层定义 |
 | 密码哈希 | `passlib[bcrypt]` | 统一入口在 `app/core/security.py` |
+| 令牌鉴权 | `PyJWT` `2.10.x` | HS256 签发 / 校验 Access、Refresh 令牌，入口 `app/core/security.py`；密钥走环境变量 `JWT_SECRET` |
 | ORM / 数据库 | SQLAlchemy `2.0.x` + PyMySQL | MySQL 同步驱动，模型声明于 `app/db/models.py` |
 | 表结构迁移 | Alembic `1.14.x` | 改模型后 `scripts/db_sync.sh` 一键同步 |
 | 配置读取 | `python-dotenv` | 分层加载：真实环境变量 > `.env.{APP_ENV}` > `.env`，入口 `app/core/config.py`（唯一读取入口） |
@@ -65,22 +66,24 @@ agent-backend/
 │   ├── main.py              # 应用入口：创建 FastAPI 实例、配置日志、注册异常处理器与路由
 │   ├── core/                # 跨层通用能力（安全、配置、异常、日志等），不依赖业务
 │   │   ├── config.py        #   配置读取（唯一入口）：分层加载 .env / .env.{APP_ENV}
-│   │   ├── security.py      #   密码哈希封装
+│   │   ├── security.py      #   安全能力：密码哈希（bcrypt）+ JWT 令牌签发/校验
 │   │   ├── exceptions.py    #   自定义异常：BusinessException / SystemException
 │   │   ├── logging.py       #   日志配置（Loguru + InterceptHandler）：控制台 + 文件滚动
 │   │   ├── handlers.py      #   全局异常处理器（统一转错误响应信封）
 │   │   └── rate_limit.py    #   进程内固定窗口限流（IP 维度），注册接口依赖
 │   ├── routers/             # ① 路由层，按业务模块拆分
-│   │   ├── user.py
-│   │   ├── auth.py          #   鉴权接口：注册 /api/auth/register
+│   │   ├── deps.py          #   路由层共享依赖：get_current_user（Bearer 鉴权）
+│   │   ├── user.py          #   用户 CRUD（整组需登录）
+│   │   ├── auth.py          #   鉴权接口：注册 / 登录 / 刷新令牌 / 当前用户
 │   │   └── health.py        #   健康检查（存活 + 数据库连通性），路径 /health
 │   ├── schemas/             # ② 校验层，按业务模块拆分
 │   │   ├── user.py
-│   │   ├── auth.py          #   注册入参（RegisterIn）：叠加弱密码强度校验
+│   │   ├── auth.py          #   注册 / 登录 / 刷新入参 + 令牌出参（RegisterIn / LoginIn / RefreshIn / TokenOut）
 │   │   ├── health.py        #   健康检查出参（HealthOut）
 │   │   └── response.py      #   统一响应信封（ResponseModel / ErrorResponse / ok）
 │   ├── services/            # ③ 业务层，按业务模块拆分
 │   │   ├── user_service.py
+│   │   ├── auth_service.py  #   鉴权业务：登录校验、签发 / 刷新令牌、解析当前用户
 │   │   └── health_service.py#   健康检查：数据库探活，异常转 SystemException(503)
 │   └── db/                  # ④ 数据库层（SQLAlchemy 2.0 + MySQL）
 │       ├── base.py          #   ORM 基类（Alembic 感知表结构的入口）
@@ -93,9 +96,9 @@ agent-backend/
 ├── scripts/
 │   └── db_sync.sh           # 改模型后一键生成迁移并同步
 ├── tests/                   # pytest 冒烟测试（连真实 MySQL，见 §9）
-│   ├── conftest.py          #   进程内 ASGI 客户端 + 测试数据清理
-│   ├── test_smoke.py        #   健康检查 + 用户 CRUD 冒烟用例
-│   └── test_auth.py         #   注册接口冒烟用例（弱密码 / 重复 / 限流）
+│   ├── conftest.py          #   进程内 ASGI 客户端 + 测试数据清理 + 鉴权夹具
+│   ├── test_smoke.py        #   健康检查 + 用户 CRUD 冒烟用例（CRUD 需鉴权）
+│   └── test_auth.py         #   鉴权冒烟用例（注册 / 登录 / 刷新 / me）
 ├── alembic.ini              # Alembic 配置（连接串留空，由 env.py 注入）
 ├── pytest.ini               # pytest 配置（asyncio_mode=auto、pythonpath=.）
 ├── .env.example             # 基础环境变量模板（真实 .env 被 gitignore）
@@ -166,6 +169,7 @@ agent-backend/
 - **配置读取只走 `app/core/config.py`**：其他层（含 `logging.py`）从该模块取类型化配置项，**禁止直接 `os.getenv`**。
 - 环境变量**分层加载**，优先级 `真实环境变量 > .env.{APP_ENV} > .env`（`APP_ENV` 取 `dev`（默认）/ `prod`）；生产密钥建议用真实环境变量注入，不落 `.env.prod`。
 - 错误响应的 `detail` 仅用于后端定位，**禁止回传堆栈、密码、Token 等敏感信息**；面向用户的提示放 `message`。
+- **JWT 密钥只走环境变量 `JWT_SECRET`**（入口 `app/core/config.py` 的 `get_jwt_secret()`，缺失即报错），禁止硬编码 / 提交；令牌算法与有效期也经环境变量可配（`JWT_ALGORITHM` / `ACCESS_TOKEN_EXPIRE_MINUTES` / `REFRESH_TOKEN_EXPIRE_DAYS`）。登录失败统一文案「用户名或密码错误」，不区分账号是否存在（防用户名枚举）。
 - 输入校验交给 schemas 层，不手写字符串拼接式校验。
 
 > **日志体系**：`app/core/logging.py` 的 `setup_logging()` 在 `main.py` 启动时调用一次，底层用 **Loguru**。开发（`dev`）输出控制台 + 文件，生产（`prod`）只落文件；文件按大小滚动（10MB × 5）写入 `logs/app.log`（`LOG_DIR` 可覆盖，相对路径锚定仓库根）。标准库 `logging`（含 uvicorn 与项目内 `logging.getLogger`）经 `InterceptHandler` 汇入 Loguru，访问日志同样落文件且不重复；业务代码只管 `logging.getLogger(__name__)` 打日志，不要自行 `basicConfig` / 加 handler。业务错误记 `WARNING`、系统错误记 `ERROR`（见 §2.3）。
@@ -184,7 +188,7 @@ agent-backend/
   { "code": 404, "message": "用户 1 不存在", "detail": "user_id=1" }
   ```
 
-  `code` **复用 HTTP 状态码**（成功 `200`；错误 `404` / `409` / `422` / `429` / `500`），与响应的 HTTP 状态码一致。
+  `code` **复用 HTTP 状态码**（成功 `200`；错误 `401` / `404` / `409` / `422` / `429` / `500`），与响应的 HTTP 状态码一致。
 
 - RESTful 语义与状态码：
 
@@ -196,9 +200,13 @@ agent-backend/
   | 更新 | `PUT /api/users/{id}` | `200` |
   | 删除 | `DELETE /api/users/{id}` | `200` |
   | 注册 | `POST /api/auth/register` | `200` |
+  | 登录 | `POST /api/auth/login` | `200` |
+  | 刷新令牌 | `POST /api/auth/refresh` | `200` |
+  | 当前用户 | `GET /api/auth/me` | `200` |
 
   > 统一信封下成功一律 `200`：删除不用 `204`（无响应体，前端无法解析信封）；新增不用 `201`（避免 body.code 与 HTTP 状态码不一致）。
 
+- **鉴权约定**：除注册 / 登录 / 刷新 / 健康检查外，接口需携带 `Authorization: Bearer <access_token>`；令牌缺失 / 过期 / 非法 / 类型不符一律返回 `401`（由 `core/security.decode_token` 与 `routers/deps.get_current_user` 抛 `BusinessException(401)`）。**刷新令牌只能用于 `/api/auth/refresh`**，不能访问受保护接口（`type` 声明区分）；访问令牌过期时由前端调 `/api/auth/refresh` 换新令牌后重试原请求。令牌为无状态 JWT，**暂不支持主动吊销 / 登出**（后续需要再引入黑名单或落库）。
 - **注册接口安全约定**（`POST /api/auth/register`）：复用 `user_service.create_user`（bcrypt 哈希，禁止明文入库）；弱密码（黑名单 / 缺字母 / 缺数字 / 含用户名）由**校验层** `schemas/auth.py` 拦截 → `422`；接口限流由 `core/rate_limit.py` 的依赖实现（固定窗口 + IP 维度，默认 5 次/min），超限抛 `BusinessException(429)`。限流为**进程内内存**实现，仅单机有效，多实例部署需换共享存储。
 - **系统接口**（运维探活）**有意不挂 `/api` 前缀**：`GET /health` 校验服务存活 + 数据库连通性，正常 `200`、数据库异常 `503`（由 `health_service` 抛 `SystemException(503)`）。这是对「路径以 `/api` 开头」的唯一例外，新增此类端点需在本文档登记。
 - 每个路由**必须声明 `response_model`**，出参信封用 `ResponseModel[XxxOut]`（列表用 `ResponseModel[list[XxxOut]]`），保证出参被裁剪且有文档。
@@ -245,6 +253,7 @@ cp .env.example .env
 # cp .env.dev.example .env.dev      # 开发覆盖：LOG_LEVEL=DEBUG、控制台日志
 # cp .env.prod.example .env.prod    # 生产覆盖：LOG_LEVEL=WARNING、只落文件
 # APP_ENV 决定叠加哪个覆盖文件：dev（默认）/ prod，可 export APP_ENV=prod 切换
+# 注意：.env 必须填 JWT_SECRET（缺失时服务启动即报错）
 
 # 建表 / 同步表结构（改完 app/db/models.py 后执行）
 alembic upgrade head

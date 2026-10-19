@@ -1,17 +1,24 @@
 """路由层：用户增删改查接口。
 
 统一前缀 /api（与前端 Vite 代理 /api → http://127.0.0.1:8000 对齐）。
+整组接口需登录：路由级挂 get_current_user，一处保护全部 CRUD。
 路由函数只做参数透传与状态码声明，业务逻辑全部委托给 user_service；
 返回值统一用 ok() 包成响应信封 {code, message, data}。
 """
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, status
 
 from ..schemas.response import ResponseModel, ok
 from ..schemas.user import UserCreate, UserOut, UserUpdate
 from ..services import user_service
+from .deps import get_current_user
 
-router = APIRouter(prefix="/api/users", tags=["users"])
+# 路由级依赖：本组所有接口都要求携带有效的访问令牌
+router = APIRouter(
+    prefix="/api/users",
+    tags=["users"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 @router.post("", response_model=ResponseModel[UserOut], status_code=status.HTTP_200_OK, summary="创建用户")

@@ -10,6 +10,9 @@ passlib==1.7.4
 # 会导致 passlib 1.7.4 初始化后端时直接报错。升级 passlib 前不要放开此锁。
 bcrypt==4.0.1
 
+# JWT 令牌：签发 / 校验 Access、Refresh 令牌（HS256 对称签名，见 app/core/security.py）
+PyJWT==2.10.1
+
 # 数据持久化：SQLAlchemy 2.0 ORM + MySQL 同步驱动
 SQLAlchemy==2.0.36
 PyMySQL==1.1.1

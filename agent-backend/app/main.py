@@ -7,6 +7,7 @@
 
 from fastapi import FastAPI
 
+from .core.config import get_jwt_secret
 from .core.handlers import register_exception_handlers
 from .core.logging import setup_logging
 from .routers import auth as auth_router
@@ -15,6 +16,9 @@ from .routers import user as user_router
 
 # 先配置日志，保证后续（含异常处理器）的日志都走统一格式
 setup_logging()
+
+# 启动即校验 JWT 密钥已配置：缺失属于致命配置问题，宁可启动失败也不带病运行
+get_jwt_secret()
 
 app = FastAPI(
     title="学面通 AI · agent-backend",

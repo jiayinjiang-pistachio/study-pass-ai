@@ -48,23 +48,25 @@ scripts/db_sync.sh "调整 users 表字段"
 app/
 ├── main.py                   # 应用入口：创建 FastAPI 实例、配置日志、注册异常处理器与路由
 ├── core/
-│   ├── config.py             # 通用能力：读取环境变量（MYSQL_URL）
-│   ├── security.py           # 密码哈希（passlib + bcrypt）
+│   ├── config.py             # 通用能力：读取环境变量（MYSQL_URL / JWT_SECRET 等）
+│   ├── security.py           # 密码哈希（passlib + bcrypt）+ JWT 令牌签发/校验
 │   ├── exceptions.py         # 自定义异常：BusinessException / SystemException
 │   ├── logging.py            # 日志配置
 │   ├── rate_limit.py         # 固定窗口 + IP 维度限流（注册接口依赖）
 │   └── handlers.py           # 全局异常处理器（统一错误响应）
 ├── routers/
-│   ├── user.py               # ① 路由层：HTTP 契约
-│   ├── auth.py               #   注册接口 /api/auth/register
+│   ├── deps.py               # ① 路由层共享依赖：get_current_user（Bearer 鉴权）
+│   ├── user.py               #   用户 CRUD（整组需登录）
+│   ├── auth.py               #   注册 / 登录 / 刷新令牌 / 当前用户
 │   └── health.py             #   健康检查（存活 + 数据库连通性）
 ├── schemas/
 │   ├── user.py               # ② 校验层：Pydantic v2 请求 / 响应模型
-│   ├── auth.py               #   注册入参（RegisterIn）：弱密码强度校验
+│   ├── auth.py               #   注册 / 登录 / 刷新入参 + 令牌出参
 │   ├── health.py             #   健康检查出参
 │   └── response.py           # 统一响应信封
 ├── services/
 │   ├── user_service.py       # ③ 业务层：业务规则
+│   ├── auth_service.py       #   鉴权业务：登录校验、签发 / 刷新令牌、解析当前用户
 │   └── health_service.py     #   健康检查：数据库探活，异常转 503
 └── db/                       # ④ 数据库层：SQLAlchemy 2.0 + MySQL
     ├── base.py               #   ORM 基类
@@ -100,8 +102,13 @@ pytest tests/test_smoke.py -v                # 运行冒烟测试
 | PUT | `/api/users/{id}` | 更新用户 | 200 |
 | DELETE | `/api/users/{id}` | 删除用户 | 200 |
 | POST | `/api/auth/register` | 用户注册 | 200 |
+| POST | `/api/auth/login` | 用户登录（签发双令牌） | 200 |
+| POST | `/api/auth/refresh` | 用刷新令牌换新令牌 | 200 |
+| GET | `/api/auth/me` | 当前登录用户 | 200 |
 
 系统接口（不带 `/api` 前缀）：`GET /health` —— 校验服务存活与数据库连通性，正常 200、数据库异常 503。
+
+> 除注册 / 登录 / 刷新 / 健康检查外，接口需携带 `Authorization: Bearer <access_token>`；令牌缺失 / 过期 / 非法一律 **401**。`/api/users` 整组接口需登录。
 
 ### 注册接口
 
@@ -117,6 +124,31 @@ curl -X POST http://127.0.0.1:8000/api/auth/register \
 # → {"code":200,"message":"ok","data":{"id":1,"username":"bob","create_time":"..."}}（无 password）
 # 弱密码 / 重复用户名 / 超限分别返回 422 / 409 / 429
 ```
+
+### 鉴权（JWT）
+
+> 实现原理（全景时序图、令牌结构、鉴权判定树、分层地图）见 **[docs/jwt-auth-guide.md](./docs/jwt-auth-guide.md)**。
+
+登录签发 **访问令牌（Access Token，默认 30 分钟）** 与 **刷新令牌（Refresh Token，默认 7 天）**，均为 HS256 无状态 JWT；签名密钥经环境变量 `JWT_SECRET` 注入（**缺失时服务启动即报错**）。
+
+```bash
+# 1) 登录拿双令牌
+curl -X POST http://127.0.0.1:8000/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"bob","password":"abc12345"}'
+# → {"code":200,"data":{"access_token":"...","refresh_token":"...","token_type":"bearer"}}
+
+# 2) 携带访问令牌访问受保护接口
+curl http://127.0.0.1:8000/api/auth/me -H "Authorization: Bearer <access_token>"   # 200
+curl http://127.0.0.1:8000/api/users                                               # 401（无令牌）
+
+# 3) 访问令牌过期（401）时，用刷新令牌换新令牌后重试原请求
+curl -X POST http://127.0.0.1:8000/api/auth/refresh \
+  -H 'Content-Type: application/json' -d '{"refresh_token":"<refresh_token>"}'      # 200 新 access_token
+```
+
+- 刷新令牌**只能**用于 `/api/auth/refresh`，不能访问受保护接口（`type` 声明区分）；访问令牌过期时，前端应调 `/api/auth/refresh` 换新令牌并自动重试原请求。
+- 令牌为无状态 JWT，**暂不支持主动吊销 / 登出**（后续需要再引入黑名单或落库）。
 
 ### 统一响应信封
 
@@ -155,6 +187,7 @@ curl -X DELETE http://127.0.0.1:8000/api/users/1
 
 - **统一错误处理**：业务层抛 `BusinessException`（4xx）/ `SystemException`（5xx），由全局处理器统一转成错误信封；业务错误记 `WARNING`、系统错误记 `ERROR`（含堆栈，供定位）。日志级别可用环境变量 `LOG_LEVEL` 覆盖。
 - **密码安全**：明文仅作为入参，落库前经 `passlib[bcrypt]` 单向哈希；响应模型不含 `password`。
+- **令牌鉴权**：JWT（PyJWT，HS256）由 `app/core/security.py` 统一签发 / 校验；密钥经环境变量 `JWT_SECRET` 注入，**缺失时启动报错**。受保护接口经 `app/routers/deps.py` 的 `get_current_user` 校验 `Authorization: Bearer`。
 - **数据存储**：`users` 表由 SQLAlchemy 2.0 声明、MySQL 持久化；表结构变更走 Alembic 迁移（`scripts/db_sync.sh`）。上层只经 `app/db/user_repo.py` 读写。
 - **User 表字段**：`id`（自增主键）、`username`（唯一索引）、`password`（bcrypt 哈希）、`create_time`（数据库自动填充当前时间）。
 - **依赖锁定**：`bcrypt` 锁定 `4.0.1`（`passlib 1.7.4` 与 `bcrypt>=4.1` 不兼容），详见 `requirements.txt` 注释。
