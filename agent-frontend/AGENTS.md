@@ -30,6 +30,7 @@
 | 类型检查 | `vue-tsc` | 构建前置检查（`vue-tsc -b`） |
 | 路由 | vue-router `^5.4` | history 模式，路由以模块名命名 |
 | 状态管理 | Pinia `^4.1` | setup 风格 store |
+| 请求库 | axios `^1.20` | 统一实例 + 拦截器；固定 `adapter: 'xhr'` 以兼容 Mock.js（见 §7） |
 | UI 组件库 | Element Plus `^2.14` + `@element-plus/icons-vue` | **全量引入**（见下方说明） |
 | 富文本编辑器 | wangEditor-next `@wangeditor-next/editor` + `@wangeditor-next/editor-for-vue` `^6.5` | 仅笔记本模块使用（约定见 §4.5） |
 | 样式 | SCSS（`sass`） | 组件 `<style lang="scss" scoped>` + 全局设计 token |
@@ -49,7 +50,7 @@
 
 ```
 src/
-├── api/              # 接口层：request.ts（统一请求）+ 按业务拆分（conversation.ts / interview.ts / note.ts）
+├── api/              # 接口层：request.ts（axios 统一请求）+ 按业务拆分（auth.ts / conversation.ts / interview.ts / note.ts）
 ├── assets/           # 需要经构建处理的静态资源（图片、svg、字体）
 ├── components/       # 可复用组件
 │   ├── common/       # 通用展示组件（EmptyState / LoadingDots）
@@ -197,8 +198,9 @@ src/
 ### 7.1 请求层（`src/api/`）
 
 - 所有网络请求**统一走 `src/api/`**，禁止在组件或 store 中裸写 `fetch` / `XMLHttpRequest` / `axios`。
-- 统一入口 `src/api/request.ts`，基于 **原生 `XMLHttpRequest`** 封装（**不引入 axios**）：
-  - 原因：开发期 mock 层用 **Mock.js**，它通过拦截 `XMLHttpRequest` 生效，**拦截不到 `fetch`**；用 XHR 可让同一套请求代码在 mock 与真实后端下行为一致。
+- 统一入口 `src/api/request.ts`，基于 **axios** 封装（唯一实例 + 请求 / 响应拦截器）：
+  - 请求拦截器自动附加 `Authorization: Bearer <access_token>`；响应拦截器统一解包信封、弹出全局错误提示。
+  - **必须固定 `adapter: 'xhr'`**：开发期 Mock.js 通过替换全局 `XMLHttpRequest` 拦截请求，显式固定适配器可避免未来切换到 fetch 适配器导致 Mock 失效（见 §7.2）。
 - 请求基址来自 `import.meta.env.VITE_API_PREFIX`（默认 `/api`），**禁止硬编码后端 host 或端口**。
 - 统一响应结构约定为信封 `{ code, message, data }`：`code === 200` 视为成功并**解包返回 `data`**，否则抛 `ApiError`（携带 `code` / `message`）。后端错误响应的 `code` 复用 HTTP 状态码（404 / 409 / 422 / 500），并额外带 `detail`（面向开发者定位）。
 - **鉴权与续期**：请求层自动为受保护接口附加 `Authorization: Bearer <access_token>`；收到 `401` 时用本地 `refresh_token` 调 `/api/auth/refresh`（并发请求共享同一次刷新）并重试一次，刷新失败则清理本地令牌并跳转登录页。令牌存于 localStorage，读写统一走 `src/utils/token.ts`。
@@ -209,6 +211,7 @@ src/
 ### 7.2 Mock 层（`src/mock/`，仅开发环境）
 
 - **仅开发环境加载**：在 `main.ts` 中以 `if (import.meta.env.DEV) await import('./mock')` 动态引入，**生产构建不含 mockjs**。
+- **与 axios 的兼容方式**：Mock.js 通过替换全局 `XMLHttpRequest` 生效，`src/api/request.ts` 的 axios 实例固定 `adapter: 'xhr'`，因此 Mock 对 axios 请求同样生效。**禁止把 axios 改为 fetch 适配器**；必须保证 `./mock` 在首个请求发出前加载。
 - 用 `Mock.mock(rurl, rtype, handler)` 拦截请求：`rurl` 支持字符串或正则，`rtype` 为小写方法名；正则捕获组可用于提取路径参数（如会话 id）。
 - 用 `Mock.setup({ timeout })` 模拟网络延迟；用 `Mock.Random`（`guid` / `integer` / `pick` 等）生成易变字段（id、时间戳、AI 随机回复）。
 - **业务关键文案保持固定**（如欢迎语、示例对话），不要用随机值，避免还原度与可测性下降。

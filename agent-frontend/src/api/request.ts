@@ -1,3 +1,5 @@
+import axios from 'axios'
+import type { AxiosError, AxiosResponse } from 'axios'
 import { ElMessage } from 'element-plus'
 import router from '@/router'
 import { clearTokens, getAccessToken, getRefreshToken, setTokens } from '@/utils/token'
@@ -6,6 +8,17 @@ const API_PREFIX = import.meta.env.VITE_API_PREFIX || '/api'
 const REQUEST_TIMEOUT = 15000
 /** 这些接口本身用于建立会话，不参与 401 自动续期 */
 const AUTH_FREE_PATHS = ['/auth/login', '/auth/register', '/auth/refresh']
+
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    /** 跳过 Authorization 注入与 401 续期（登录、注册、刷新令牌） */
+    skipAuth?: boolean
+    /** 关闭请求层统一错误提示，由调用方自行处理 */
+    silent?: boolean
+    /** 内部标记：401 后是否已重试过，避免刷新失败时死循环 */
+    _retry?: boolean
+  }
+}
 
 /** 后端统一响应结构 */
 export interface ApiEnvelope<T> {
@@ -38,69 +51,41 @@ export interface RequestOptions {
   silent?: boolean
 }
 
-/**
- * 底层发送。
- *
- * 这里刻意使用 XMLHttpRequest 而非 fetch：Mock.js 通过劫持 XMLHttpRequest 实现
- * 请求拦截，fetch 不会被拦截。接口层保持此签名，后续切换 axios 只需改本文件。
- */
-function send<T>(url: string, options: RequestOptions, accessToken: string | null): Promise<T> {
-  const { method = 'GET', body } = options
-  const fullUrl = `${API_PREFIX}${url}`
-
-  return new Promise<T>((resolve, reject) => {
-    const xhr = new XMLHttpRequest()
-    xhr.open(method, fullUrl)
-    xhr.timeout = REQUEST_TIMEOUT
-
-    if (body !== undefined) {
-      xhr.setRequestHeader('Content-Type', 'application/json')
-    }
-    if (accessToken) {
-      xhr.setRequestHeader('Authorization', `Bearer ${accessToken}`)
-    }
-
-    xhr.onload = () => {
-      let envelope: ApiEnvelope<T> | null = null
-      try {
-        envelope = JSON.parse(xhr.responseText) as ApiEnvelope<T>
-      } catch {
-        envelope = null
-      }
-
-      if (xhr.status < 200 || xhr.status >= 300) {
-        reject(
-          new ApiError(
-            envelope?.message || `请求失败（${xhr.status}）`,
-            envelope?.code ?? xhr.status,
-            envelope?.detail,
-          ),
-        )
-        return
-      }
-
-      if (!envelope) {
-        reject(new ApiError('响应解析失败', -1))
-        return
-      }
-
-      if (envelope.code !== 200) {
-        reject(new ApiError(envelope.message || '请求失败', envelope.code, envelope.detail))
-        return
-      }
-
-      resolve(envelope.data)
-    }
-
-    xhr.onerror = () => reject(new ApiError('网络异常，请稍后重试', -1))
-    xhr.ontimeout = () => reject(new ApiError('请求超时', -2))
-
-    xhr.send(body === undefined ? null : JSON.stringify(body))
-  })
+interface TokenPairResponse {
+  access_token: string
+  refresh_token: string
 }
 
+/**
+ * Mock.js 通过替换全局 XMLHttpRequest 实现请求拦截，因此这里固定使用 xhr 适配器。
+ * 不要改成 fetch 适配器，否则开发期 Mock 会失效。
+ */
+const http = axios.create({
+  baseURL: API_PREFIX,
+  timeout: REQUEST_TIMEOUT,
+  adapter: 'xhr',
+})
+
 function toApiError(error: unknown): ApiError {
-  return error instanceof ApiError ? error : new ApiError('请求失败', -1)
+  if (error instanceof ApiError) return error
+  if (!axios.isAxiosError(error)) return new ApiError('请求失败', -1)
+
+  const status = error.response?.status
+  const payload = error.response?.data as Partial<ApiEnvelope<unknown>> | undefined
+  if (payload && typeof payload === 'object') {
+    return new ApiError(
+      payload.message || `请求失败（${status ?? '未知'}）`,
+      payload.code ?? status ?? -1,
+      payload.detail,
+    )
+  }
+  if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+    return new ApiError('请求超时', -2)
+  }
+  if (status) {
+    return new ApiError(`请求失败（${status}）`, status)
+  }
+  return new ApiError('网络异常，请稍后重试', -1)
 }
 
 let lastToast = { message: '', at: 0 }
@@ -148,11 +133,15 @@ function refreshAccessToken(): Promise<string> {
         throw new ApiError('登录状态已失效', 401)
       }
 
-      const tokens = await send<{ access_token: string; refresh_token: string }>(
+      const response = await http.post<
+        ApiEnvelope<TokenPairResponse>,
+        AxiosResponse<TokenPairResponse>
+      >(
         '/auth/refresh',
-        { method: 'POST', body: { refresh_token: refreshToken }, auth: false },
-        null,
+        { refresh_token: refreshToken },
+        { skipAuth: true, silent: true },
       )
+      const tokens = response.data
       setTokens(tokens.access_token, tokens.refresh_token)
       return tokens.access_token
     })().finally(() => {
@@ -162,26 +151,48 @@ function refreshAccessToken(): Promise<string> {
   return refreshPromise
 }
 
-/**
- * 统一请求入口。
- *
- * 自动携带 Authorization: Bearer <access_token>；访问令牌过期（401）时用刷新
- * 令牌换新并重试一次，刷新失败则清理本地令牌并跳转登录页。
- */
-export async function request<T>(url: string, options: RequestOptions = {}): Promise<T> {
-  const { auth = true } = options
-  const useAuth = auth && !AUTH_FREE_PATHS.some((path) => url.startsWith(path))
-  const accessToken = useAuth ? getAccessToken() : null
+// 请求拦截：受保护接口自动携带访问令牌
+http.interceptors.request.use((config) => {
+  if (!config.skipAuth) {
+    const accessToken = getAccessToken()
+    if (accessToken) {
+      config.headers.set('Authorization', `Bearer ${accessToken}`)
+    }
+  }
+  return config
+})
 
-  try {
-    return await send<T>(url, options, accessToken)
-  } catch (error) {
+// 响应拦截：解包信封；401 时刷新令牌并重试一次；其余错误统一提示
+http.interceptors.response.use(
+  (response) => {
+    const envelope = response.data as ApiEnvelope<unknown> | null
+    if (!envelope || envelope.code !== 200) {
+      const apiError = new ApiError(
+        envelope?.message || '请求失败',
+        envelope?.code ?? response.status,
+        envelope?.detail,
+      )
+      if (!response.config.silent) notifyError(apiError.message)
+      return Promise.reject(apiError)
+    }
+    response.data = envelope.data
+    return response
+  },
+  async (error: AxiosError) => {
+    const config = error.config
+    const status = error.response?.status
     const apiError = toApiError(error)
 
-    if (useAuth && apiError.code === 401) {
+    if (status === 401 && config && !config.skipAuth) {
+      if (config._retry) {
+        handleAuthExpired('登录状态已过期，请重新登录')
+        return Promise.reject(apiError)
+      }
+      config._retry = true
+
       if (!getRefreshToken()) {
         handleAuthExpired('登录状态已失效，请重新登录')
-        throw apiError
+        return Promise.reject(apiError)
       }
 
       let newAccessToken: string
@@ -192,25 +203,34 @@ export async function request<T>(url: string, options: RequestOptions = {}): Pro
         handleAuthExpired(
           refreshApiError.code === 401 ? '登录状态已过期，请重新登录' : refreshApiError.message,
         )
-        throw refreshApiError
+        return Promise.reject(refreshApiError)
       }
 
-      try {
-        return await send<T>(url, options, newAccessToken)
-      } catch (retryError) {
-        const retryApiError = toApiError(retryError)
-        if (retryApiError.code === 401) {
-          handleAuthExpired('登录状态已过期，请重新登录')
-        } else if (!options.silent) {
-          notifyError(retryApiError.message)
-        }
-        throw retryApiError
-      }
+      config.headers.set('Authorization', `Bearer ${newAccessToken}`)
+      return http.request(config)
     }
 
-    if (!options.silent) {
-      notifyError(apiError.message)
-    }
-    throw apiError
-  }
+    if (!config?.silent) notifyError(apiError.message)
+    return Promise.reject(apiError)
+  },
+)
+
+/**
+ * 统一请求入口：解包信封并返回业务数据。
+ *
+ * 受保护接口自动携带 Authorization；401 时刷新令牌并重试一次，刷新失败则
+ * 清理本地令牌并跳转登录页。
+ */
+export async function request<T>(url: string, options: RequestOptions = {}): Promise<T> {
+  const { method = 'GET', body, auth = true, silent = false } = options
+  const skipAuth = !auth || AUTH_FREE_PATHS.some((path) => url.startsWith(path))
+
+  const response = await http.request<ApiEnvelope<T>, AxiosResponse<T>>({
+    url,
+    method,
+    data: body,
+    skipAuth,
+    silent,
+  })
+  return response.data
 }

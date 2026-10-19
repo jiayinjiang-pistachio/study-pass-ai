@@ -260,22 +260,30 @@ ok({新的 access_token, refresh_token, token_type:"bearer"})  → 200
 
 ---
 
-## 八、前端如何接「自动续期」
+## 八、前端如何接「自动续期」（已接入）
 
-后端已就绪（`401` 信号 + `/api/auth/refresh` 接口），前端在统一请求封装里加一层**响应拦截**即可（本项目 `agent-frontend/src/api/request.ts` 目前是原生 XHR 封装，**尚未接入**）：
+后端提供 `401` 信号与 `/api/auth/refresh` 接口；前端已在 `agent-frontend/src/api/request.ts` 的 **axios 响应拦截器**中实现自动续期：
 
 ```
-请求发出 ──► 响应状态 401？
-   ├─ 否 → 正常返回
-   └─ 是
-       ├─ 已有刷新在途？ → 把本请求挂入等待队列（避免并发重复刷新）
-       └─ 否
-           ├─ 用 refresh_token 调 POST /api/auth/refresh
-           ├─ 成功 → 存新 access_token，重放队列里的请求 + 原请求
-           └─ 失败（refresh 也 401）→ 清空令牌，跳登录页
+请求发出 ──► HTTP 401？
+   ├─ 否 → 正常解包返回 data
+   └─ 是（且不是 /auth/login、/auth/register、/auth/refresh）
+       ├─ 已有刷新在途？ → 复用同一个 refresh Promise
+       └─ 否 → 用 localStorage 的 refresh_token 调 POST /api/auth/refresh
+           ├─ 成功 → 保存新双令牌 → 用新 access 重试原请求一次
+           └─ 失败 → 清理 localStorage 令牌 → 跳 /login（携带 redirect）
 ```
 
-要点：**必须做「刷新去重」**——多个请求同时 401 时只刷新一次，其余等新令牌，否则会并发刷新、互相覆盖。
+实现要点：
+
+- **刷新去重**：并发 401 共享同一个刷新 Promise，只发一次 `/api/auth/refresh`。
+- **只重试一次**：原请求带 `_retry` 标记，重试后仍 401 直接清理并跳登录，避免死循环。
+- **令牌存储**：access / refresh 存在 localStorage，读写统一走 `src/utils/token.ts`。
+- **登录态入口**：`src/router/index.ts` 的前置守卫检查 access_token，未登录跳 `/login`；顶栏退出登录清理令牌并跳登录页。
+- **Mock 兼容**：axios 实例固定 `adapter: 'xhr'`，开发期 Mock.js 仍能拦截请求。
+- 登录失败、注册失败等错误由请求层统一弹 `ElMessage`，调用方不重复提示。
+
+> 说明：本节描述当前前端实现；后端仍是无状态 JWT，暂不支持主动吊销 / 登出。
 
 ---
 

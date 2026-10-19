@@ -1,9 +1,9 @@
 # 前端页面结构与组件拆分设计
 
 > **状态**：已实现（对应当前代码，随代码演进）
-> **范围**：应用骨架（顶栏 + 侧栏）+「学习室」「面试间」「笔记本」三个页面
+> **范围**：登录 / 注册页 + 应用骨架（顶栏 + 侧栏）+「学习室」「面试间」「笔记本」三个页面
 > **关联规范**：编码与协作约定见 [`AGENTS.md`](../AGENTS.md)，本文件只描述结构设计。
-> **最后更新**：2026-10-18
+> **最后更新**：2026-10-19
 
 ---
 
@@ -59,6 +59,27 @@
 > - 内容区由 **Vue Router** 决定渲染哪个页面（`/study` → `StudyRoom`，`/interview` → `InterviewRoom`，`/note` → `NoteRoom`）。
 > - **侧栏数据源随当前模块切换**：学习室 / 面试间展示会话（`conversation` store），笔记本展示笔记（`note` store）；当前模块由 `useCurrentModule()` 读路由 `name` 得出，侧栏据此切换列表与「新建」按钮文案。
 
+**认证页（`/login`，无骨架）**
+
+```
+┌───────────────────────────────────────────────────────────────────┐
+│                     奶油色背景（--color-bg-page）                   │
+│                    ┌─────────────────────────┐                     │
+│                    │  [橙色 Logo] 学面通AI    │                     │
+│                    │        ◯ 海滨插画        │                     │
+│                    │    登录   注册           │                     │
+│                    │  ───────────────         │                     │
+│                    │  [👤 用户名或邮箱      ] │                     │
+│                    │  [🔒 密码             ] │                     │
+│                    │  [🔒 确认密码]（注册态） │                     │
+│                    │  [      登录 / 注册     ] │  ← 橙色全宽按钮     │
+│                    └─────────────────────────┘                     │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+- `/login` 为公开路由，不套 `AppShell`；其余路由由前置守卫校验本地令牌，未登录跳登录页并携带 `redirect`，登录成功后回跳。
+- 登录 / 注册共用一张卡片，通过 Tab 切换；注册态多一个「确认密码」输入框。
+
 ---
 
 ## 2. 组件拆分
@@ -67,29 +88,32 @@
 
 ```
 App.vue
-└─ layouts/AppShell.vue                       # 顶栏 + 侧栏 + 内容区骨架
-   ├─ components/layout/TopNavBar.vue         # 顶栏容器
-   │  ├─ (内联) Logo + 「学面通AI」标题        # 黄色圆形 logo，静态展示
-   │  └─ components/layout/ModuleTabs.vue     # 学习室 / 面试间 / 笔记本（RouterLink × 3）
-   ├─ components/sidebar/ConversationSidebar.vue   # 左栏（按当前模块切换列表与按钮文案）
-   │  ├─ (内联) ＋新建会话 / ＋新建笔记 按钮
-   │  ├─ components/sidebar/ConversationList.vue   # 学习室 / 面试间（按模块过滤）
-   │  │  └─ components/sidebar/SidebarItem.vue     # 图标 + 标题 + 行内重命名 + hover 操作组
-   │  └─ components/sidebar/NoteList.vue           # 笔记本
-   │     └─ components/sidebar/SidebarItem.vue     # 会话 / 笔记共用同一列表项组件
-   └─ <RouterView />                          # 内容区
-      ├─ views/StudyRoom.vue                  # 学习室（与面试间同构）
-      │  ├─ components/chat/ChatMessageList.vue
-      │  └─ components/chat/ChatInputBar.vue
-      ├─ views/InterviewRoom.vue              # 面试间页面
-      │  ├─ components/chat/ChatMessageList.vue
-      │  │  ├─ components/chat/ChatMessageItem.vue   # 单条消息（按 role 分派样式）
-      │  │  ├─ components/common/LoadingDots.vue     # AI 思考中（replying 时）
-      │  │  └─ components/common/EmptyState.vue      # 无消息时
-      │  └─ components/chat/ChatInputBar.vue  # 底部输入区
-      └─ views/NoteRoom.vue                   # 笔记本（富文本编辑，无底部输入区）
-         ├─ (内联) 标题输入 + 删除笔记按钮
-         └─ @wangeditor-next/editor-for-vue   # Toolbar + Editor（wangEditor-next）
+└─ <RouterView />
+   ├─ views/LoginView.vue                     # 登录 / 注册（公开路由，无骨架）
+   └─ layouts/AppShell.vue                    # 顶栏 + 侧栏 + 内容区骨架（需登录）
+      ├─ components/layout/TopNavBar.vue      # 顶栏容器
+      │  ├─ (内联) Logo + 「学面通AI」标题     # 黄色圆形 logo，静态展示
+      │  ├─ components/layout/ModuleTabs.vue  # 学习室 / 面试间 / 笔记本（RouterLink × 3）
+      │  └─ (内联) 当前用户名 + 退出登录
+      ├─ components/sidebar/ConversationSidebar.vue   # 左栏（按当前模块切换列表与按钮文案）
+      │  ├─ (内联) ＋新建会话 / ＋新建笔记 按钮
+      │  ├─ components/sidebar/ConversationList.vue   # 学习室 / 面试间（按模块过滤）
+      │  │  └─ components/sidebar/SidebarItem.vue     # 图标 + 标题 + 行内重命名 + hover 操作组
+      │  └─ components/sidebar/NoteList.vue           # 笔记本
+      │     └─ components/sidebar/SidebarItem.vue     # 会话 / 笔记共用同一列表项组件
+      └─ <RouterView />                       # 内容区
+         ├─ views/StudyRoom.vue               # 学习室（与面试间同构）
+         │  ├─ components/chat/ChatMessageList.vue
+         │  └─ components/chat/ChatInputBar.vue
+         ├─ views/InterviewRoom.vue           # 面试间页面
+         │  ├─ components/chat/ChatMessageList.vue
+         │  │  ├─ components/chat/ChatMessageItem.vue   # 单条消息（按 role 分派样式）
+         │  │  ├─ components/common/LoadingDots.vue     # AI 思考中（replying 时）
+         │  │  └─ components/common/EmptyState.vue      # 无消息时
+         │  └─ components/chat/ChatInputBar.vue  # 底部输入区
+         └─ views/NoteRoom.vue                # 笔记本（富文本编辑，无底部输入区）
+            ├─ (内联) 标题输入 + 删除笔记按钮
+            └─ @wangeditor-next/editor-for-vue   # Toolbar + Editor（wangEditor-next）
 ```
 
 > 设计稿中的 `AppLogo` / `NewConversationButton` / `ConversationActions` / `MessageAvatar` / `MessageBubble` / `MessageMeta` / `AttachmentButton` / `SendButton` 未单独拆文件：它们要么被内联进父组件（Logo、新建按钮、头像、气泡、时间、附件、发送按钮），要么改用 Element Plus 组件替代（确认弹窗 `ElMessageBox`、空状态 `el-empty`、图标 `@element-plus/icons-vue`）。**当前阶段不做过度拆分**。
@@ -109,10 +133,11 @@ App.vue
 
 | 目录 | 内容 | 备注 |
 | --- | --- | --- |
-| `src/router/` | `index.ts` | history 模式；路由名复用 `ModuleKey`；页面懒加载；`/` 与未匹配路径重定向到面试间 |
-| `src/stores/` | `conversation`（会话列表 / 各模块选中态）、`chat`（消息 / 发送态）、`note`（笔记列表 / 当前笔记 / 内容） | **Pinia setup 风格** store |
-| `src/api/` | `request.ts`（统一请求，XHR 封装）、`conversation.ts`（会话 CRUD）、`interview.ts`（对话消息）、`note.ts`（笔记 CRUD 与内容保存） | 请求统一走此层，禁止组件/store 裸调 |
-| `src/mock/` | `index.ts`（Mock.js 拦截）、`data.ts`（会话种子数据与固定文案，分学习 / 面试两组）、`notes.ts`（笔记种子数据与拦截） | **仅开发环境**动态加载 |
+| `src/router/` | `index.ts` | history 模式；路由名复用 `ModuleKey`；页面懒加载；`/login` 公开，其余路由由前置守卫校验令牌 |
+| `src/stores/` | `auth`（令牌 / 当前用户 / 登录注册退出）、`conversation`（会话列表 / 各模块选中态）、`chat`（消息 / 发送态）、`note`（笔记列表 / 当前笔记 / 内容） | **Pinia setup 风格** store |
+| `src/api/` | `request.ts`（axios 实例 + 拦截器）、`auth.ts`（登录 / 注册 / 当前用户）、`conversation.ts`（会话 CRUD）、`interview.ts`（对话消息）、`note.ts`（笔记 CRUD 与内容保存） | 请求统一走此层，禁止组件/store 裸调 |
+| `src/mock/` | `index.ts`（Mock.js 拦截）、`data.ts`（会话种子数据与固定文案，分学习 / 面试两组）、`notes.ts`（笔记种子数据与拦截） | **仅开发环境**动态加载；axios 固定 xhr adapter 以被 Mock.js 拦截 |
+| `src/utils/` | `token.ts`（localStorage 令牌读写） | 请求层与路由守卫共用 |
 | `src/composables/` | `useAutoScroll`（滚动贴底 + 「回到最新」）、`useCurrentModule`（从路由 `name` 派生当前模块） | 逻辑复用 |
 | `src/types/` | `chat.ts`、`conversation.ts`、`note.ts` | 类型定义 |
 
@@ -120,7 +145,7 @@ App.vue
 
 ```
 src/
-├── api/              # request.ts / conversation.ts / interview.ts / note.ts
+├── api/              # request.ts（axios）/ auth.ts / conversation.ts / interview.ts / note.ts
 ├── assets/           # 需构建处理的静态资源
 ├── components/
 │   ├── common/       # EmptyState / LoadingDots
@@ -128,13 +153,14 @@ src/
 │   ├── sidebar/      # ConversationSidebar / ConversationList / NoteList / SidebarItem
 │   └── chat/         # ChatMessageList / ChatMessageItem / ChatInputBar
 ├── composables/      # useAutoScroll.ts / useCurrentModule.ts
-├── layouts/          # AppShell.vue
-├── mock/             # index.ts / data.ts / notes.ts（仅 DEV）
-├── router/           # index.ts
-├── stores/           # conversation.ts / chat.ts / note.ts
+├── layouts/          # AppShell.vue（业务页面布局）
+├── mock/             # index.ts / data.ts / notes.ts（仅 DEV，拦截 XHR）
+├── router/           # index.ts（含登录守卫）
+├── stores/           # auth.ts / conversation.ts / chat.ts / note.ts
 ├── styles/           # _tokens.scss（变量）/ index.scss（reset + CSS 变量）
 ├── types/            # chat.ts / conversation.ts / note.ts
-├── views/            # StudyRoom.vue / InterviewRoom.vue / NoteRoom.vue
+├── utils/            # token.ts（localStorage 令牌）
+├── views/            # LoginView.vue / StudyRoom.vue / InterviewRoom.vue / NoteRoom.vue
 ├── App.vue
 ├── main.ts
 └── env.d.ts
@@ -200,8 +226,9 @@ export interface Note {
 
 ```ts
 export interface ApiEnvelope<T> {
-  code: number      // 200 = 成功；错误复用 HTTP 状态码（404 / 409 / 422 / 500）
-  message: string
+  code: number                 // 200 = 成功；错误复用 HTTP 状态码（401 / 404 / 409 / 422 / 429 / 500）
+  message: string              // 面向用户的中文提示
+  detail?: string | null       // 面向开发者的定位信息
   data: T
 }
 ```
@@ -288,6 +315,19 @@ export interface ApiEnvelope<T> {
 | 38 | 窄屏响应式：侧栏收起为抽屉 | ⚠️ | `< 768px` 时侧栏 `display: none`，未做抽屉 |
 | 39 | 键盘可达性与焦点管理 | ⚠️ | 重命名输入框有焦点处理；未系统化 |
 
+### H. 登录 / 注册与鉴权（`/login`）
+
+| # | 交互 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| 40 | 未登录访问业务路由 → 跳转 `/login` | ✅ | `router.beforeEach` 检查 localStorage 中的 access_token，携带 `redirect` |
+| 41 | 登录 / 注册 Tab 切换 | ✅ | 共用卡片；注册态多「确认密码」；切换时清空密码 |
+| 42 | 登录成功 → 保存双令牌 → 回跳原页面 | ✅ | 写 localStorage（`utils/token.ts`），无 redirect 时默认跳面试间 |
+| 43 | 注册成功 → 自动登录 | ✅ | 注册接口成功后立即调用登录接口 |
+| 44 | 注册前端校验 | ✅ | 用户名非空且 ≤ 32；密码 6–72 位、含字母与数字、不含用户名、两次一致 |
+| 45 | 请求自动带 Bearer；401 自动刷新并重试 | ✅ | axios 拦截器；并发 401 共享同一次刷新 |
+| 46 | 刷新失败 → 清理令牌 → 跳登录 | ✅ | 同时弹出「登录状态已过期」提示 |
+| 47 | 顶栏展示当前用户 + 退出登录 | ✅ | 退出清理 localStorage 并跳 `/login` |
+
 ---
 
 ## 5. 设计 Token
@@ -299,6 +339,10 @@ export interface ApiEnvelope<T> {
 | `--color-brand` | `#F5C518` | 主色（发送按钮 / 高亮 Tab / Element Plus 主色） |
 | `--color-brand-light` | `#FFD24C` | 主色浅色（渐变起点） |
 | `--color-brand-soft` | `#FCE9A8` | 主色柔和底（选中会话 / 激活 Tab） |
+| `--color-accent` | `#FF7A1A` | 登录页强调色（Logo / 激活 Tab / 提交按钮） |
+| `--color-accent-hover` | `#FF8F3D` | 强调色悬停 |
+| `--color-accent-active` | `#EA6A0A` | 强调色按下 |
+| `--color-accent-soft` | `#FFF1E6` | 强调色柔和底（退出登录 hover） |
 | `--color-bg-page` | `#FAF6EC` | 内容区背景（米色） |
 | `--color-surface` | `#FFFFFF` | 顶栏 / 侧栏 / AI 气泡 |
 | `--color-bubble-user` | `#E9E9E9` | 用户气泡 |
@@ -324,12 +368,13 @@ export interface ApiEnvelope<T> {
 
 ## 6. 本轮实现约定
 
-- **路由**：`vue-router` history 模式，Tab 切换由路由驱动；路由名复用 `ModuleKey`；页面懒加载；`/` 与未匹配路径重定向到面试间。
+- **路由**：`vue-router` history 模式，Tab 切换由路由驱动；路由名复用 `ModuleKey`；页面懒加载；`/` 与未匹配路径重定向到面试间；`/login` 为公开路由，其余路由由前置守卫校验本地令牌。
+- **鉴权**：登录签发 access / refresh 双令牌并存入 localStorage；axios 请求拦截器自动附加 `Authorization: Bearer`；401 时用 refresh token 换新并重试一次（并发去重），失败则清理令牌并跳登录页。
 - **状态**：`Pinia` setup 风格 store（`conversation` / `chat` / `note`）；**当前模块的唯一事实来源是路由**，store 不再存一份当前 Tab。
 - **模块决定数据源**：学习室 / 面试间展示会话（`conversation` store，选中态按模块分别记录于 `activeByModule`），笔记本展示笔记（`note` store，独立数据源）；侧栏由 `useCurrentModule()` 读路由 `name` 切换列表与按钮文案。
 - **富文本编辑器**：笔记本正文用 **wangEditor-next**（`@wangeditor-next/editor` + `-for-vue`）。约定：必须引入其 CSS；内容用 `v-model` 绑定，外部切换笔记只需改绑定的 ref（组件内部自动 `setHtml`）；`onCreated` / `onChange` 只能走组件事件（写进 `defaultConfig` 会抛错）；组件卸载须调用 `editor.destroy()`；`toolbarKeys` 显式声明，图片用 `insertImage`（`uploadImage` 依赖后端上传接口）。
-- **请求层**：`src/api/` 基于原生 `XMLHttpRequest` 统一封装（**刻意不用 axios**：Mock.js 只拦截 XHR，不拦截 `fetch`），响应信封 `{ code, message, data }` 自动解包。
-- **Mock**：`mockjs` 通过 `Mock.mock` 拦截 XHR，**仅开发环境**动态加载（`main.ts` 中 `import.meta.env.DEV` 守卫）；`Mock.Random` 只用于易变字段（id / 时间戳 / AI 随机回复），业务关键文案保持固定；接真实后端时删除 mock 拦截即可，业务代码无需改动。
+- **请求层**：`src/api/` 基于 **axios** 统一封装（唯一实例 + 请求 / 响应拦截器），响应信封 `{ code, message, data }` 自动解包；错误统一 `ElMessage` 提示（短时间去重）；axios 固定 `adapter: 'xhr'`。
+- **Mock**：`mockjs` 通过替换全局 `XMLHttpRequest` 拦截请求，**仅开发环境**动态加载（`main.ts` 中 `import.meta.env.DEV` 守卫，且在首个请求前完成）；因 axios 固定 xhr adapter，Mock 对 axios 请求同样生效，**不要改用 fetch 适配器**。`Mock.Random` 只用于易变字段（id / 时间戳 / AI 随机回复），业务关键文案保持固定；接真实后端时删除 mock 拦截即可，业务代码无需改动。
 - **UI 库**：Element Plus **全量引入**（`app.use(ElementPlus)` + 引入其 CSS），主题通过 `--el-color-primary` 对齐品牌色。
 - **样式**：SCSS + 设计 token → CSS 变量，组件统一 `var(--xxx)`。
 - **会话分类图标**本轮用 emoji 占位，后续替换为品牌图标集。
@@ -342,10 +387,12 @@ export interface ApiEnvelope<T> {
 | --- | --- | --- | --- |
 | 1 | Tab 切换机制 | **Vue Router**（history 模式，可深链） | ✅ 已落地 |
 | 2 | 状态管理 | **Pinia**（setup 风格 store） | ✅ 已落地 |
-| 3 | 请求库选型 | **原生 XHR 封装**（配合 Mock.js 拦截，不引入 axios） | ✅ 已落地 |
+| 3 | 请求库选型 | **axios + xhr adapter**（拦截器统一鉴权 / 续期；xhr adapter 兼容 Mock.js） | ✅ 已落地 |
 | 4 | 发送快捷键 | Enter 发送 / Shift+Enter 换行 | ✅ 已落地 |
 | 5 | 面试流程范围 | 本轮仅打通「对话」；语音 / 复盘 / 状态机后续迭代 | ⬜ 待迭代 |
 | 6 | Element Plus 引入方式 | 全量引入（后续可评估按需引入瘦身） | ⬜ 待评估 |
 | 7 | 笔记本富文本编辑器选型 | **wangEditor-next**（`-for-vue` 提供 `Editor` / `Toolbar`，`v-model` 开箱即用；仅笔记本路由引用，构建自动拆入 `NoteRoom` 异步 chunk） | ✅ 已落地 |
 | 8 | 笔记数据来源 | **独立数据源**（`note` store + `src/api/note.ts` + `mock/notes.ts`），与会话分离，侧栏按模块切换 | ✅ 已落地 |
 | 9 | 侧栏按模块过滤 | 由 `useCurrentModule()` 读路由 `name` 决定列表与文案；会话选中态按模块记录于 `activeByModule`，避免串用 | ✅ 已落地 |
+| 10 | 登录鉴权方案 | JWT 双令牌 + localStorage；路由守卫拦截未登录；axios 401 自动刷新并重试 | ✅ 已落地 |
+| 11 | 登录页视觉 | 独立于 `AppShell` 的居中卡片；登录 / 注册 Tab 共用表单 | ✅ 已落地 |
