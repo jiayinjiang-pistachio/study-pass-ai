@@ -52,12 +52,15 @@ app/
 │   ├── security.py           # 密码哈希（passlib + bcrypt）
 │   ├── exceptions.py         # 自定义异常：BusinessException / SystemException
 │   ├── logging.py            # 日志配置
+│   ├── rate_limit.py         # 固定窗口 + IP 维度限流（注册接口依赖）
 │   └── handlers.py           # 全局异常处理器（统一错误响应）
 ├── routers/
 │   ├── user.py               # ① 路由层：HTTP 契约
+│   ├── auth.py               #   注册接口 /api/auth/register
 │   └── health.py             #   健康检查（存活 + 数据库连通性）
 ├── schemas/
 │   ├── user.py               # ② 校验层：Pydantic v2 请求 / 响应模型
+│   ├── auth.py               #   注册入参（RegisterIn）：弱密码强度校验
 │   ├── health.py             #   健康检查出参
 │   └── response.py           # 统一响应信封
 ├── services/
@@ -96,8 +99,24 @@ pytest tests/test_smoke.py -v                # 运行冒烟测试
 | GET | `/api/users/{id}` | 用户详情 | 200 |
 | PUT | `/api/users/{id}` | 更新用户 | 200 |
 | DELETE | `/api/users/{id}` | 删除用户 | 200 |
+| POST | `/api/auth/register` | 用户注册 | 200 |
 
 系统接口（不带 `/api` 前缀）：`GET /health` —— 校验服务存活与数据库连通性，正常 200、数据库异常 503。
+
+### 注册接口
+
+`POST /api/auth/register` 复用 `user_service.create_user`（bcrypt 哈希，禁止明文入库），并叠加三道防线：
+
+- **弱密码校验**（校验层 `schemas/auth.py`）：命中弱口令黑名单、缺字母、缺数字、或包含用户名 → `422`；
+- **接口限流**（`core/rate_limit.py`）：固定窗口 + IP 维度，默认 **5 次/min**，超限 → `429`（进程内内存实现，仅单机有效）。
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"bob","password":"abc12345"}'
+# → {"code":200,"message":"ok","data":{"id":1,"username":"bob","create_time":"..."}}（无 password）
+# 弱密码 / 重复用户名 / 超限分别返回 422 / 409 / 429
+```
 
 ### 统一响应信封
 

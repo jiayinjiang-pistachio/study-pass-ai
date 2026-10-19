@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from .core.handlers import register_exception_handlers
 from .core.logging import setup_logging
+from .routers import auth as auth_router
 from .routers import health as health_router
 from .routers import user as user_router
 
@@ -26,4 +27,5 @@ register_exception_handlers(app)
 
 # 按业务模块注册路由
 app.include_router(user_router.router)
+app.include_router(auth_router.router)
 app.include_router(health_router.router)

@@ -68,12 +68,15 @@ agent-backend/
 │   │   ├── security.py      #   密码哈希封装
 │   │   ├── exceptions.py    #   自定义异常：BusinessException / SystemException
 │   │   ├── logging.py       #   日志配置（Loguru + InterceptHandler）：控制台 + 文件滚动
-│   │   └── handlers.py      #   全局异常处理器（统一转错误响应信封）
+│   │   ├── handlers.py      #   全局异常处理器（统一转错误响应信封）
+│   │   └── rate_limit.py    #   进程内固定窗口限流（IP 维度），注册接口依赖
 │   ├── routers/             # ① 路由层，按业务模块拆分
 │   │   ├── user.py
+│   │   ├── auth.py          #   鉴权接口：注册 /api/auth/register
 │   │   └── health.py        #   健康检查（存活 + 数据库连通性），路径 /health
 │   ├── schemas/             # ② 校验层，按业务模块拆分
 │   │   ├── user.py
+│   │   ├── auth.py          #   注册入参（RegisterIn）：叠加弱密码强度校验
 │   │   ├── health.py        #   健康检查出参（HealthOut）
 │   │   └── response.py      #   统一响应信封（ResponseModel / ErrorResponse / ok）
 │   ├── services/            # ③ 业务层，按业务模块拆分
@@ -91,7 +94,8 @@ agent-backend/
 │   └── db_sync.sh           # 改模型后一键生成迁移并同步
 ├── tests/                   # pytest 冒烟测试（连真实 MySQL，见 §9）
 │   ├── conftest.py          #   进程内 ASGI 客户端 + 测试数据清理
-│   └── test_smoke.py        #   健康检查 + 用户 CRUD 冒烟用例
+│   ├── test_smoke.py        #   健康检查 + 用户 CRUD 冒烟用例
+│   └── test_auth.py         #   注册接口冒烟用例（弱密码 / 重复 / 限流）
 ├── alembic.ini              # Alembic 配置（连接串留空，由 env.py 注入）
 ├── pytest.ini               # pytest 配置（asyncio_mode=auto、pythonpath=.）
 ├── .env.example             # 基础环境变量模板（真实 .env 被 gitignore）
@@ -180,7 +184,7 @@ agent-backend/
   { "code": 404, "message": "用户 1 不存在", "detail": "user_id=1" }
   ```
 
-  `code` **复用 HTTP 状态码**（成功 `200`；错误 `404` / `409` / `422` / `500`），与响应的 HTTP 状态码一致。
+  `code` **复用 HTTP 状态码**（成功 `200`；错误 `404` / `409` / `422` / `429` / `500`），与响应的 HTTP 状态码一致。
 
 - RESTful 语义与状态码：
 
@@ -191,9 +195,11 @@ agent-backend/
   | 详情 | `GET /api/users/{id}` | `200` |
   | 更新 | `PUT /api/users/{id}` | `200` |
   | 删除 | `DELETE /api/users/{id}` | `200` |
+  | 注册 | `POST /api/auth/register` | `200` |
 
   > 统一信封下成功一律 `200`：删除不用 `204`（无响应体，前端无法解析信封）；新增不用 `201`（避免 body.code 与 HTTP 状态码不一致）。
 
+- **注册接口安全约定**（`POST /api/auth/register`）：复用 `user_service.create_user`（bcrypt 哈希，禁止明文入库）；弱密码（黑名单 / 缺字母 / 缺数字 / 含用户名）由**校验层** `schemas/auth.py` 拦截 → `422`；接口限流由 `core/rate_limit.py` 的依赖实现（固定窗口 + IP 维度，默认 5 次/min），超限抛 `BusinessException(429)`。限流为**进程内内存**实现，仅单机有效，多实例部署需换共享存储。
 - **系统接口**（运维探活）**有意不挂 `/api` 前缀**：`GET /health` 校验服务存活 + 数据库连通性，正常 `200`、数据库异常 `503`（由 `health_service` 抛 `SystemException(503)`）。这是对「路径以 `/api` 开头」的唯一例外，新增此类端点需在本文档登记。
 - 每个路由**必须声明 `response_model`**，出参信封用 `ResponseModel[XxxOut]`（列表用 `ResponseModel[list[XxxOut]]`），保证出参被裁剪且有文档。
 - 路由返回值统一用 `ok(data)` 包成成功信封，**不要手写 `{"code": ...}`**。
