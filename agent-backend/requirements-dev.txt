@@ -1,0 +1,6 @@
+# 测试依赖（仅开发 / CI 使用，运行期不需要；安装：pip install -r requirements-dev.txt）
+pytest==9.1.1
+# httpx 用于进程内驱动 ASGI 应用（httpx.ASGITransport），无需另起服务器
+httpx==0.28.1
+# pytest-asyncio：让 async 测试与 async 夹具生效（asyncio_mode=auto）
+pytest-asyncio==1.4.0

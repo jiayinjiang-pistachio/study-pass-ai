@@ -25,7 +25,7 @@ uvicorn app.main:app --reload --port 8000
 ```
 
 - Swagger UI：http://127.0.0.1:8000/docs
-- 健康检查：`GET /api/health`
+- 健康检查：`GET /health`（存活 + 数据库连通性；数据库异常返回 503）
 
 ## 数据库迁移（Alembic）
 
@@ -53,20 +53,39 @@ app/
 │   ├── exceptions.py         # 自定义异常：BusinessException / SystemException
 │   ├── logging.py            # 日志配置
 │   └── handlers.py           # 全局异常处理器（统一错误响应）
-├── routers/user.py           # ① 路由层：HTTP 契约
+├── routers/
+│   ├── user.py               # ① 路由层：HTTP 契约
+│   └── health.py             #   健康检查（存活 + 数据库连通性）
 ├── schemas/
 │   ├── user.py               # ② 校验层：Pydantic v2 请求 / 响应模型
+│   ├── health.py             #   健康检查出参
 │   └── response.py           # 统一响应信封
-├── services/user_service.py  # ③ 业务层：业务规则
+├── services/
+│   ├── user_service.py       # ③ 业务层：业务规则
+│   └── health_service.py     #   健康检查：数据库探活，异常转 503
 └── db/                       # ④ 数据库层：SQLAlchemy 2.0 + MySQL
     ├── base.py               #   ORM 基类
     ├── models.py             #   表结构声明（User）
     ├── session.py            #   engine + Session 工厂
-    └── user_repo.py          #   users 表读写仓储（上层唯一入口）
+    ├── user_repo.py          #   users 表读写仓储（上层唯一入口）
+    └── health_repo.py        #   数据库连通性探活（SELECT 1）
 
 alembic/                      # 迁移脚本（versions/ 存版本）
 scripts/db_sync.sh            # 一键生成迁移并同步
+tests/                        # pytest 冒烟测试（连真实 MySQL）
 ```
+
+## 测试
+
+> 健康检查与冒烟测试完整上手流程见 **[docs/health-testing-guide.md](./docs/health-testing-guide.md)**（探活原理、夹具、新增用例、常见问题）。
+
+```bash
+pip install -r requirements-dev.txt          # 测试依赖（pytest / httpx / pytest-asyncio）
+alembic upgrade head                         # 确保测试库已建表
+pytest tests/test_smoke.py -v                # 运行冒烟测试
+```
+
+> 测试连 `.env` 里的真实 MySQL，创建的用户带 `smoke_*` 前缀并在用例后自动清理；如需隔离，把 `MYSQL_URL` 指向独立的测试库。
 
 ## 用户接口
 
@@ -77,6 +96,8 @@ scripts/db_sync.sh            # 一键生成迁移并同步
 | GET | `/api/users/{id}` | 用户详情 | 200 |
 | PUT | `/api/users/{id}` | 更新用户 | 200 |
 | DELETE | `/api/users/{id}` | 删除用户 | 200 |
+
+系统接口（不带 `/api` 前缀）：`GET /health` —— 校验服务存活与数据库连通性，正常 200、数据库异常 503。
 
 ### 统一响应信封
 

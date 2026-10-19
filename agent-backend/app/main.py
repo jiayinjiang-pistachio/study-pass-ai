@@ -9,8 +9,8 @@ from fastapi import FastAPI
 
 from .core.handlers import register_exception_handlers
 from .core.logging import setup_logging
+from .routers import health as health_router
 from .routers import user as user_router
-from .schemas.response import ResponseModel, ok
 
 # 先配置日志，保证后续（含异常处理器）的日志都走统一格式
 setup_logging()
@@ -26,9 +26,4 @@ register_exception_handlers(app)
 
 # 按业务模块注册路由
 app.include_router(user_router.router)
-
-
-@app.get("/api/health", response_model=ResponseModel[dict[str, str]], tags=["system"], summary="健康检查")
-def health() -> dict:
-    """供前端 / 运维探活使用。"""
-    return ok({"status": "ok"})
+app.include_router(health_router.router)

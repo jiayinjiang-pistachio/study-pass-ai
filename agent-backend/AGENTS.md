@@ -31,7 +31,7 @@
 | 配置读取 | `python-dotenv` | 分层加载：真实环境变量 > `.env.{APP_ENV}` > `.env`，入口 `app/core/config.py`（唯一读取入口） |
 | 日志 | Loguru `0.7.x` | 开发控制台 + 文件，生产只落文件；按大小滚动（10MB × 5），入口 `app/core/logging.py` |
 | 语言 | Python `3.13` | 使用 `X | None` 现代联合类型写法 |
-| 包管理 | **venv + pip** | 仓库内已有 `.venv/`，依赖以 `requirements.txt` 为准 |
+| 包管理 | **venv + pip** | 运行期依赖以 `requirements.txt` 为准；测试依赖另见 `requirements-dev.txt` |
 
 > **依赖锁定注意**：`bcrypt` 必须锁 `4.0.1`。`bcrypt>=4.1` 移除了 `__about__`，`5.x` 更把「超 72 字节密码」从截断改为抛错，会导致 `passlib 1.7.4` 初始化后端直接崩溃。**升级 passlib 前不要放开此锁。**
 
@@ -70,27 +70,36 @@ agent-backend/
 │   │   ├── logging.py       #   日志配置（Loguru + InterceptHandler）：控制台 + 文件滚动
 │   │   └── handlers.py      #   全局异常处理器（统一转错误响应信封）
 │   ├── routers/             # ① 路由层，按业务模块拆分
-│   │   └── user.py
+│   │   ├── user.py
+│   │   └── health.py        #   健康检查（存活 + 数据库连通性），路径 /health
 │   ├── schemas/             # ② 校验层，按业务模块拆分
 │   │   ├── user.py
+│   │   ├── health.py        #   健康检查出参（HealthOut）
 │   │   └── response.py      #   统一响应信封（ResponseModel / ErrorResponse / ok）
 │   ├── services/            # ③ 业务层，按业务模块拆分
-│   │   └── user_service.py
+│   │   ├── user_service.py
+│   │   └── health_service.py#   健康检查：数据库探活，异常转 SystemException(503)
 │   └── db/                  # ④ 数据库层（SQLAlchemy 2.0 + MySQL）
 │       ├── base.py          #   ORM 基类（Alembic 感知表结构的入口）
 │       ├── models.py        #   表结构声明（User）
 │       ├── session.py       #   engine + Session 工厂
-│       └── user_repo.py     #   users 表读写仓储（上层唯一入口）
+│       ├── user_repo.py     #   users 表读写仓储（上层唯一入口）
+│       └── health_repo.py   #   数据库连通性探活（SELECT 1）
 ├── alembic/                 # Alembic 迁移（versions/ 存版本脚本）
 │   └── env.py               #   注入 MYSQL_URL、暴露 Base.metadata
 ├── scripts/
 │   └── db_sync.sh           # 改模型后一键生成迁移并同步
+├── tests/                   # pytest 冒烟测试（连真实 MySQL，见 §9）
+│   ├── conftest.py          #   进程内 ASGI 客户端 + 测试数据清理
+│   └── test_smoke.py        #   健康检查 + 用户 CRUD 冒烟用例
 ├── alembic.ini              # Alembic 配置（连接串留空，由 env.py 注入）
+├── pytest.ini               # pytest 配置（asyncio_mode=auto、pythonpath=.）
 ├── .env.example             # 基础环境变量模板（真实 .env 被 gitignore）
 ├── .env.dev.example         # 开发环境覆盖模板（真实 .env.dev 被 gitignore）
 ├── .env.prod.example        # 生产环境覆盖模板（真实 .env.prod 被 gitignore）
 ├── logs/                    # 日志输出目录（运行期生成，被 gitignore）
-├── requirements.txt
+├── requirements.txt         # 运行期依赖
+├── requirements-dev.txt     # 测试依赖（pytest / httpx / pytest-asyncio）
 ├── .gitignore
 ├── AGENTS.md                # 本规范
 └── CLAUDE.md                # 引用本规范
@@ -185,6 +194,7 @@ agent-backend/
 
   > 统一信封下成功一律 `200`：删除不用 `204`（无响应体，前端无法解析信封）；新增不用 `201`（避免 body.code 与 HTTP 状态码不一致）。
 
+- **系统接口**（运维探活）**有意不挂 `/api` 前缀**：`GET /health` 校验服务存活 + 数据库连通性，正常 `200`、数据库异常 `503`（由 `health_service` 抛 `SystemException(503)`）。这是对「路径以 `/api` 开头」的唯一例外，新增此类端点需在本文档登记。
 - 每个路由**必须声明 `response_model`**，出参信封用 `ResponseModel[XxxOut]`（列表用 `ResponseModel[list[XxxOut]]`），保证出参被裁剪且有文档。
 - 路由返回值统一用 `ok(data)` 包成成功信封，**不要手写 `{"code": ...}`**。
 - 每个路由**必须写 `summary`**，便于 `/docs` 阅读。
@@ -241,10 +251,15 @@ uvicorn app.main:app --reload --reload-exclude 'logs/*' --port 8000
 # 接口文档
 #   Swagger UI : http://127.0.0.1:8000/docs
 #   OpenAPI    : http://127.0.0.1:8000/openapi.json
+
+# 测试（连真实 MySQL，需先 alembic upgrade head）
+pip install -r requirements-dev.txt
+pytest tests/test_smoke.py -v
 ```
 
 - 提交前确保服务能正常启动、`/docs` 可打开。
-- **待引入（引入前需团队确认）**：格式化 / Lint（ruff）、单元测试（pytest）、Git hook。
+- 提交前跑一遍 `pytest tests/test_smoke.py -v`，冒烟测试应全绿。
+- **待引入（引入前需团队确认）**：格式化 / Lint（ruff）、Git hook。
 
 ---
 
