@@ -13,10 +13,11 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    UniqueConstraint,
     func,
     text,
 )
-from sqlalchemy.dialects.mysql import MEDIUMTEXT
+from sqlalchemy.dialects.mysql import MEDIUMTEXT, TINYINT
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -127,5 +128,37 @@ class Interview(Base):
     __table_args__ = (
         # 按会话查面试记录；message_id 已唯一，此处按需求补复合索引
         Index("ix_interviews_session_id_message_id", "session_id", "message_id"),
+    )
+
+
+class Resource(Base):
+    """资源元数据表：统一管理文件 / 图片 / 音频，原文件落在 MinIO。"""
+
+    __tablename__ = "resources"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    resource_type: Mapped[int] = mapped_column(
+        TINYINT, nullable=False
+    )  # 0=文件，1=图片，2=音频
+    storage_scene: Mapped[int] = mapped_column(
+        TINYINT, server_default=text("0"), nullable=False
+    )  # 0=长期（1个月），1=短期（2小时），2=只提取内容不存原文件
+    upload_purpose: Mapped[int] = mapped_column(
+        TINYINT, server_default=text("0"), nullable=False
+    )  # 0=普通资源，1=用户头像
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 文件内容 MD5；与 user_id 组成唯一键，实现用户级去重
+    file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # minio:/{bucket}/{object_key}；storage_scene=2 时为空串（不落对象）
+    storage_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expire_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    create_time: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        # 数据库兜底去重：同一用户相同内容只保留一条资源记录
+        UniqueConstraint("file_hash", "user_id", name="uk_file_hash_user_id"),
     )
 

@@ -105,11 +105,12 @@ pytest tests/test_smoke.py -v                # 运行冒烟测试
 | POST | `/api/auth/login` | 用户登录（签发双令牌） | 200 |
 | POST | `/api/auth/refresh` | 用刷新令牌换新令牌 | 200 |
 | GET | `/api/auth/me` | 当前登录用户 | 200 |
-| POST | `/api/files` | 通用文件上传（multipart，字段 `file`；图片自动更新头像） | 200 |
+| POST | `/api/files` | 通用文件上传（multipart，字段 `file`，可选 `upload_purpose` / `storage_scene`） | 200 |
+| GET | `/api/files/avatar/{id}` | 读取用户头像（公开，返回图片二进制，供 `<img>` 直接访问） | 200 |
 
-不带 `/api` 前缀的端点：`GET /health`（存活 + 数据库连通性探活）与 `/uploads/*`（头像等上传文件的静态访问）。
+不带 `/api` 前缀的端点：`GET /health`（存活 + 数据库连通性探活）与 `/uploads/*`（旧版本地头像的静态访问，新上传统一走 MinIO）。
 
-> 除注册 / 登录 / 刷新 / 健康检查外，接口需携带 `Authorization: Bearer <access_token>`；令牌缺失 / 过期 / 非法一律 **401**。`/api/users` 整组接口需登录。
+> 除注册 / 登录 / 刷新 / 健康检查 / 头像读取（`/api/files/avatar/{id}`）外，接口需携带 `Authorization: Bearer <access_token>`；令牌缺失 / 过期 / 非法一律 **401**。`/api/users` 整组接口需登录。
 
 ### 注册接口
 
@@ -145,10 +146,14 @@ curl http://127.0.0.1:8000/api/users                                            
 
 # 2.1) 通用文件上传（需登录，multipart 字段 file）
 curl -X POST http://127.0.0.1:8000/api/files \
-  -H "Authorization: Bearer <access_token>" -F "file=@avatar.png"
-# → {"kind":"image","url":"/uploads/users/1/<md5>.png","md5":"...","size":...}
-# 图片会同时更新 users.avatar；文档（PDF / Office / txt 等）只保存、不更新头像
-# 文件按用户分目录存放：uploads/users/{user_id}/，文件名 = 内容 MD5（相同内容自动去重）
+  -H "Authorization: Bearer <access_token>" \
+  -F "file=@avatar.png" -F "upload_purpose=1" -F "storage_scene=0"
+# → {"kind":"image","url":"minio:/ai-resource/users/1/<md5>.png","resource_id":1,
+#    "storage_path":"minio:/ai-resource/users/1/<md5>.png","expire_time":null,...}
+# 支持图片 / 文档 / 音频（MP3/WAV/OGG/OPUS/M4A/AAC/FLAC/WebM，音频按文档上限 10MB）。
+# upload_purpose=1 且为图片时更新 users.avatar（存 MinIO 路径）。
+# storage_scene：0=长期 30 天，1=短期 2 小时，2=只写元数据不存原文件。
+# 元数据落 MySQL resources，原文件落 MinIO；同用户相同内容按 MD5 去重。
 
 # 3) 访问令牌过期（401）时，用刷新令牌换新令牌后重试原请求
 curl -X POST http://127.0.0.1:8000/api/auth/refresh \

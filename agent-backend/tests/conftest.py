@@ -15,9 +15,9 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from app.core import rate_limit
+from app.core import minio_client, rate_limit
 from app.core.security import hash_password
-from app.db import user_repo
+from app.db import resource_repo, user_repo
 from app.main import app
 
 # 本轮测试运行唯一的前缀，用于精确清理测试期间创建的用户
@@ -73,10 +73,33 @@ async def auth_headers(client: httpx.AsyncClient, auth_user: dict) -> dict:
     return {"Authorization": f"Bearer {access_token}"}
 
 
+@pytest.fixture(scope="session")
+def minio_ready() -> None:
+    """上传用例依赖真实 MinIO；不可用时跳过，不误报失败。"""
+    try:
+        minio_client.ensure_bucket()
+    except Exception as exc:
+        pytest.skip(f"MinIO 不可用，跳过上传用例：{exc}")
+
+
 @pytest.fixture(autouse=True)
 def cleanup_users() -> None:
-    """每个用例结束后清理本轮测试创建的用户；yield 保证失败也会执行。"""
+    """每个用例结束后清理本轮测试创建的资源与用户；yield 保证失败也会执行。"""
     yield
     for user in user_repo.list_all():
-        if user["username"].startswith(TEST_PREFIX):
-            user_repo.delete(user["id"])
+        if not user["username"].startswith(TEST_PREFIX):
+            continue
+        for resource in resource_repo.list_by_user(user["id"]):
+            try:
+                key = (
+                    minio_client.object_key_from_storage_path(resource["storage_path"])
+                    if resource["storage_path"]
+                    else None
+                )
+                if key:
+                    minio_client.remove_object(key)
+            except Exception:
+                # 清理失败不影响测试结论，MinIO 对象可由过期任务兜底
+                pass
+        resource_repo.delete_by_user(user["id"])
+        user_repo.delete(user["id"])

@@ -32,15 +32,13 @@ export const useAuthStore = defineStore('auth', () => {
     await authApi.register({ username, password })
   }
 
-  /** 登录后上传头像：走后端通用文件接口，图片会同步更新 avatar 字段 */
+  /** 登录后上传头像：走后端通用文件接口，uploadPurpose=1 时同步更新 avatar 字段 */
   async function uploadAvatar(file: File): Promise<void> {
-    const uploaded = await fileApi.uploadFile(file)
+    const uploaded = await fileApi.uploadFile(file, { uploadPurpose: 1 })
     if (uploaded.kind !== fileApi.FileKind.Image) return
-    if (user.value) {
-      user.value = { ...user.value, avatar: uploaded.url }
-    } else {
-      await loadUser()
-    }
+    // 后端返回的 url 是 MinIO 内部路径，浏览器不可直接加载；
+    // 重新拉取用户信息，拿到后端转换后的头像访问地址
+    await loadUser()
   }
 
   function logout(): void {

@@ -14,6 +14,7 @@
 
 import os
 from pathlib import Path
+from typing import NamedTuple
 
 from dotenv import dotenv_values, load_dotenv
 
@@ -91,18 +92,44 @@ ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 
 REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 JWT_SECRET: str | None = os.getenv("JWT_SECRET")
 
-# #MinIO核心配置(app/core/settings.py)
-# MINI0ENDP0INT=127.0.g.1:9000
-# MINIO ACCESS KEY=minioadmin
-# MINIO SECRET KEY=minioadmin
-# MINIO BUCKET=ai-resource
-# MINIO SECURE=False#本地环境关闭HTTPS
+# ---- MinIO 对象存储配置（连接信息只走环境变量）----
 
-MINI0ENDP0INT: str | None = os.getenv("MINI0ENDP0INT")
+MINIO_ENDPOINT: str | None = os.getenv("MINIO_ENDPOINT")
 MINIO_ACCESS_KEY: str | None = os.getenv("MINIO_ACCESS_KEY")
 MINIO_SECRET_KEY: str | None = os.getenv("MINIO_SECRET_KEY")
-MINIO_BUCKET: str | None = os.getenv("MINIO_BUCKET")
-MINIO_SECURE: bool = os.getenv("MINIO_SECURE")
+MINIO_BUCKET: str = os.getenv("MINIO_BUCKET", "ai-resource")
+MINIO_SECURE: bool = os.getenv("MINIO_SECURE", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+
+class MinioConfig(NamedTuple):
+    """MinIO 客户端连接参数。"""
+
+    endpoint: str
+    access_key: str
+    secret_key: str
+    bucket: str
+    secure: bool
+
+
+def get_minio_config() -> MinioConfig:
+    """返回 MinIO 连接配置；缺失时立即报错（与 get_mysql_url 一致）。"""
+    if not (MINIO_ENDPOINT and MINIO_ACCESS_KEY and MINIO_SECRET_KEY):
+        raise RuntimeError(
+            "MinIO 配置缺失，请配置 MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY"
+        )
+    return MinioConfig(
+        endpoint=MINIO_ENDPOINT,
+        access_key=MINIO_ACCESS_KEY,
+        secret_key=MINIO_SECRET_KEY,
+        bucket=MINIO_BUCKET,
+        secure=MINIO_SECURE,
+    )
+
 
 def get_jwt_secret() -> str:
     """返回 JWT 签名密钥。

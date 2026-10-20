@@ -16,6 +16,11 @@ PyJWT==2.10.1
 # multipart/form-data 解析：头像上传接口（FastAPI UploadFile 依赖）
 python-multipart==0.0.20
 
+# 对象存储：MinIO 官方 SDK（原文件 / 图片 / 音频落桶，元数据存 MySQL）
+# 锁 7.1.17：7.2.x 依赖 argon2-cffi，其在 Intel macOS + Python 3.13 无预编译轮子，
+# 安装时需源码编译；7.1.17 的 put/remove/stat 等 API 已满足本项目需求。
+minio==7.1.17
+
 # 数据持久化：SQLAlchemy 2.0 ORM + MySQL 同步驱动
 SQLAlchemy==2.0.36
 PyMySQL==1.1.1

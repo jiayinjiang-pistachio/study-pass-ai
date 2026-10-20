@@ -7,7 +7,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # bcrypt 只处理前 72 字节，故密码上限取 72，超长直接在校验层拦截
 PASSWORD_MIN_LENGTH = 6
@@ -44,5 +44,16 @@ class UserOut(UserBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int = Field(..., description="用户 ID")
-    avatar: str | None = Field(None, description="头像 URL（未上传时为 null）")
+    avatar: str | None = Field(None, description="头像访问地址（未上传时为 null）")
     create_time: datetime = Field(..., description="创建时间（由数据库自动填充）")
+
+    @model_validator(mode="after")
+    def _to_public_avatar_url(self) -> "UserOut":
+        """库里存的是 minio:/... 路径，浏览器无法直接加载，统一转成公开读取地址。
+
+        用文件名里的 MD5 作为 ?v= 版本号：头像更新后 URL 随之变化，避免命中旧缓存。
+        """
+        if self.avatar and self.avatar.startswith("minio:/"):
+            version = self.avatar.rsplit("/", 1)[-1].split(".", 1)[0]
+            self.avatar = f"/api/files/avatar/{self.id}?v={version}"
+        return self

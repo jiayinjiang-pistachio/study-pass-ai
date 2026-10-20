@@ -28,6 +28,7 @@
 | 密码哈希 | `passlib[bcrypt]` | 统一入口在 `app/core/security.py` |
 | 令牌鉴权 | `PyJWT` `2.10.x` | HS256 签发 / 校验 Access、Refresh 令牌，入口 `app/core/security.py`；密钥走环境变量 `JWT_SECRET` |
 | ORM / 数据库 | SQLAlchemy `2.0.x` + PyMySQL | MySQL 同步驱动，模型声明于 `app/db/models.py` |
+| 对象存储 | MinIO Python SDK `7.1.x` | 原文件落桶，元数据存 MySQL；入口 `app/core/minio_client.py` |
 | 表结构迁移 | Alembic `1.14.x` | 改模型后 `scripts/db_sync.sh` 一键同步 |
 | 配置读取 | `python-dotenv` | 分层加载：真实环境变量 > `.env.{APP_ENV}` > `.env`，入口 `app/core/config.py`（唯一读取入口） |
 | 日志 | Loguru `0.7.x` | 开发控制台 + 文件，生产只落文件；按大小滚动（10MB × 5），入口 `app/core/logging.py` |
@@ -70,6 +71,7 @@ agent-backend/
 │   │   ├── exceptions.py    #   自定义异常：BusinessException / SystemException
 │   │   ├── logging.py       #   日志配置（Loguru + InterceptHandler）：控制台 + 文件滚动
 │   │   ├── handlers.py      #   全局异常处理器（统一转错误响应信封）
+│   │   ├── minio_client.py  #   MinIO 客户端：建桶、对象读写、storage_path 转换
 │   │   └── rate_limit.py    #   进程内固定窗口限流（IP 维度），注册接口依赖
 │   ├── routers/             # ① 路由层，按业务模块拆分
 │   │   ├── deps.py          #   路由层共享依赖：get_current_user（Bearer 鉴权）
@@ -80,19 +82,24 @@ agent-backend/
 │   ├── schemas/             # ② 校验层，按业务模块拆分
 │   │   ├── user.py
 │   │   ├── auth.py          #   注册 / 登录 / 刷新入参 + 令牌出参（RegisterIn / LoginIn / RefreshIn / TokenOut）
-│   │   ├── file.py          #   文件上传出参（FileOut：url / md5 / size / kind）
+│   │   ├── file.py          #   文件上传出参（FileOut：url / md5 / size / kind / resource_id 等）
 │   │   ├── health.py        #   健康检查出参（HealthOut）
 │   │   └── response.py      #   统一响应信封（ResponseModel / ErrorResponse / ok）
 │   ├── services/            # ③ 业务层，按业务模块拆分
 │   │   ├── user_service.py
 │   │   ├── auth_service.py  #   鉴权业务：登录校验、签发 / 刷新令牌、解析当前用户
-│   │   ├── file_service.py  #   文件类型识别、按用户分目录 + MD5 去重落盘、图片更新头像
+│   │   ├── file_type.py     #   上传文件类型识别（文件头 / 扩展名）与大小上限
+│   │   ├── upload_service.py#   旧本地磁盘上传逻辑（教学保留，运行时不使用）
+│   │   ├── upload_service_minio.py # 运行逻辑：MinIO 落对象 + resources 元数据 + 用户级去重
+│   │   ├── avatar_service.py #   用户头像读取：resources/用户头像路径 → MinIO 字节流
+│   │   ├── resource_cleanup.py # 每天 03:00 清理过期资源（先删对象再删元数据）
 │   │   └── health_service.py#   健康检查：数据库探活，异常转 SystemException(503)
 │   └── db/                  # ④ 数据库层（SQLAlchemy 2.0 + MySQL）
 │       ├── base.py          #   ORM 基类（Alembic 感知表结构的入口）
-│       ├── models.py        #   表结构声明（User / ChatSession / ChatMessage / Interview）
+│       ├── models.py        #   表结构声明（User / ChatSession / ChatMessage / Interview / Resource）
 │       ├── session.py       #   engine + Session 工厂
 │       ├── user_repo.py     #   users 表读写仓储（上层唯一入口）
+│       ├── resource_repo.py #   resources 表读写仓储（去重预查 / 过期扫描）
 │       └── health_repo.py   #   数据库连通性探活（SELECT 1）
 ├── alembic/                 # Alembic 迁移（versions/ 存版本脚本）
 │   └── env.py               #   注入 MYSQL_URL、暴露 Base.metadata
@@ -212,8 +219,9 @@ agent-backend/
 
 - **鉴权约定**：除注册 / 登录 / 刷新 / 健康检查外，接口需携带 `Authorization: Bearer <access_token>`；令牌缺失 / 过期 / 非法 / 类型不符一律返回 `401`（由 `core/security.decode_token` 与 `routers/deps.get_current_user` 抛 `BusinessException(401)`）。**刷新令牌只能用于 `/api/auth/refresh`**，不能访问受保护接口（`type` 声明区分）；访问令牌过期时由前端调 `/api/auth/refresh` 换新令牌后重试原请求。令牌为无状态 JWT，**暂不支持主动吊销 / 登出**（后续需要再引入黑名单或落库）。
 - **注册接口安全约定**（`POST /api/auth/register`）：复用 `user_service.create_user`（bcrypt 哈希，禁止明文入库）；弱密码（黑名单 / 缺字母 / 缺数字 / 含用户名）由**校验层** `schemas/auth.py` 拦截 → `422`；接口限流由 `core/rate_limit.py` 的依赖实现（固定窗口 + IP 维度，默认 5 次/min），超限抛 `BusinessException(429)`。限流为**进程内内存**实现，仅单机有效，多实例部署需换共享存储。
-- **通用文件上传约定**（`POST /api/files`）：`multipart/form-data`，字段名 `file`，**需登录**。服务端按文件头自动识别类型：图片（JPG / PNG / WebP / GIF）保存后同步更新 `users.avatar`，文档（PDF / Office / txt / md / csv / rtf / json）只保存；类型不在白名单 `422`，图片超 2MB（`AVATAR_MAX_BYTES`）或文档超 10MB（`FILE_MAX_BYTES`）返回 `413`。存储路径为 `UPLOAD_DIR/users/{user_id}/{MD5}.{ext}`（默认 `uploads/`，已 gitignore），**文件名取文件内容的 MD5 以实现去重**；响应返回 `{url, md5, size, kind}`。替换头像时清理旧文件。
-- **系统接口 / 静态资源**：`GET /health`（运维探活）与 `/uploads/*`（上传文件静态访问，由 `main.py` 挂载）**有意不挂 `/api` 前缀**：前者校验服务存活 + 数据库连通性，正常 `200`、数据库异常 `503`（由 `health_service` 抛 `SystemException(503)`）；后者仅提供已落盘文件。这是对「路径以 `/api` 开头」的例外，新增此类端点需在本文档登记。
+- **通用文件上传约定**（`POST /api/files`）：`multipart/form-data`，字段 `file`，**需登录**；可选表单字段 `upload_purpose`（0=普通资源 / 1=用户头像，默认 0）与 `storage_scene`（0=长期 30 天 / 1=短期 2 小时 / 2=只提取内容不存原文件，默认 0）。服务端按文件头识别图片（JPG / PNG / WebP / GIF）、文档（PDF / Office / txt / md / csv / rtf / json）与音频（MP3 / WAV / OGG / OPUS / M4A / AAC / FLAC / WebM）；类型不在白名单或文件头不符 `422`，图片超 2MB（`AVATAR_MAX_BYTES`）或文档 / 音频超 10MB（`FILE_MAX_BYTES`）返回 `413`。**元数据写 `resources` 表，原文件落 MinIO**：对象 key 为 `users/{user_id}/{MD5}{ext}`，`storage_path` 格式 `minio:/{bucket}/{object_key}`；`(file_hash, user_id)` 唯一键实现用户级去重（先查库，数据库唯一键兜底）。仅 `upload_purpose=1` 且为图片时更新 `users.avatar`（库里存 `storage_path`）。对外响应中的 `avatar` 由校验层转成公开读取地址 `/api/files/avatar/{user_id}?v={md5}`（`v` 用于头像更新后失效缓存）。`storage_scene=2` 只写元数据、不上传对象（`storage_path` 为空串）。响应返回 `{url, md5, size, kind, resource_id, storage_path, expire_time}`。过期资源由 `resource_cleanup` 每天 03:00 先删 MinIO 对象、再删元数据。
+- **系统接口 / 静态资源**：`GET /health`（运维探活）与 `/uploads/*`（旧版本地文件静态访问，由 `main.py` 挂载）**有意不挂 `/api` 前缀**：前者校验服务存活 + 数据库连通性，正常 `200`、数据库异常 `503`（由 `health_service` 抛 `SystemException(503)`）；后者仅兼容历史上已落盘的头像/文件，新上传统一走 MinIO。这是对「路径以 `/api` 开头」的例外，新增此类端点需在本文档登记。
+- **头像读取例外**：`GET /api/files/avatar/{user_id}` **无需鉴权且返回二进制**（不是统一信封），因为浏览器 `<img src>` 不会携带 `Authorization` 头；供头像展示使用，按 user_id 只暴露头像对象，不暴露其他资源。
 - 每个路由**必须声明 `response_model`**，出参信封用 `ResponseModel[XxxOut]`（列表用 `ResponseModel[list[XxxOut]]`），保证出参被裁剪且有文档。
 - 路由返回值统一用 `ok(data)` 包成成功信封，**不要手写 `{"code": ...}`**。
 - 每个路由**必须写 `summary`**，便于 `/docs` 阅读。

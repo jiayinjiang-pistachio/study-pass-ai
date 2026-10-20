@@ -5,23 +5,43 @@
 """
 
 import hashlib
-import shutil
-from datetime import timedelta
-from pathlib import Path
+from datetime import datetime, timedelta
 
 import httpx
 
-from app.core import rate_limit
-from app.core.config import AVATAR_MAX_BYTES, UPLOAD_DIR
+from app.core import minio_client, rate_limit
+from app.core.config import AVATAR_MAX_BYTES, get_minio_config
 from app.core.security import create_access_token
+from app.db import resource_repo
 
 VALID_PASSWORD = "abc12345"
 PNG_BYTES = b"\x89PNG\r\n\x1a\nfake-avatar"
 PDF_BYTES = b"%PDF-1.4\nfake-pdf"
+WAV_BYTES = b"RIFF\x24\x00\x00\x00WAVEfmt fake-audio"
 
 
-def _user_upload_dir(user_id: int) -> Path:
-    return UPLOAD_DIR / "users" / str(user_id)
+def _object_key(user_id: int, md5: str, suffix: str) -> str:
+    return f"users/{user_id}/{md5}{suffix}"
+
+
+def _storage_path(user_id: int, md5: str, suffix: str) -> str:
+    return f"minio:/{get_minio_config().bucket}/{_object_key(user_id, md5, suffix)}"
+
+
+async def _post_file(
+    client: httpx.AsyncClient,
+    headers: dict,
+    filename: str,
+    content: bytes,
+    content_type: str,
+    **form: str,
+) -> httpx.Response:
+    return await client.post(
+        "/api/files",
+        headers=headers,
+        files={"file": (filename, content, content_type)},
+        data=form or None,
+    )
 
 
 async def _register(client: httpx.AsyncClient, username: str, password: str = VALID_PASSWORD) -> httpx.Response:
@@ -186,80 +206,240 @@ async def test_refresh_with_access_token_401(client: httpx.AsyncClient, username
 
 # ---- 通用文件上传 ----
 
-async def test_upload_image_saves_md5_file_and_updates_avatar(
-    client: httpx.AsyncClient, auth_user: dict, auth_headers: dict
+async def test_upload_avatar_image_stores_object_and_updates_avatar(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    minio_ready: None,
 ) -> None:
-    """图片 → 保存到用户目录（MD5 文件名）并更新 avatar，静态访问可用。"""
-    resp = await client.post(
-        "/api/files",
-        headers=auth_headers,
-        files={"file": ("avatar.png", PNG_BYTES, "image/png")},
+    """头像图片 → 写 resources + MinIO 对象，并更新 users.avatar。"""
+    resp = await _post_file(
+        client,
+        auth_headers,
+        "avatar.png",
+        PNG_BYTES,
+        "image/png",
+        upload_purpose="1",
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
     md5 = hashlib.md5(PNG_BYTES).hexdigest()
-    expected_url = f"/uploads/users/{auth_user['id']}/{md5}.png"
+    expected = _storage_path(auth_user["id"], md5, ".png")
 
-    try:
-        assert data == {"url": expected_url, "md5": md5, "size": len(PNG_BYTES), "kind": "image"}
-        path = _user_upload_dir(auth_user["id"]) / f"{md5}.png"
-        assert path.is_file()
+    assert data["kind"] == "image"
+    assert data["resource_id"] > 0
+    assert data["storage_path"] == expected
+    assert data["url"] == expected
+    assert data["expire_time"] is None
+    assert minio_client.object_exists(_object_key(auth_user["id"], md5, ".png"))
 
-        me = await client.get("/api/auth/me", headers=auth_headers)
-        assert me.json()["data"]["avatar"] == expected_url
+    resource = resource_repo.get(data["resource_id"])
+    assert resource is not None
+    assert resource["resource_type"] == 1
+    assert resource["upload_purpose"] == 1
+    assert resource["file_hash"] == md5
 
-        static = await client.get(expected_url)
-        assert static.status_code == 200
-        assert static.content == PNG_BYTES
-    finally:
-        shutil.rmtree(_user_upload_dir(auth_user["id"]), ignore_errors=True)
+    # 响应中的 avatar 是浏览器可访问的地址，而不是 MinIO 内部路径
+    me = await client.get("/api/auth/me", headers=auth_headers)
+    assert me.json()["data"]["avatar"] == (
+        f"/api/files/avatar/{auth_user['id']}?v={md5}"
+    )
 
 
-async def test_upload_document_saves_without_updating_avatar(
-    client: httpx.AsyncClient, auth_user: dict, auth_headers: dict
+async def test_avatar_is_publicly_readable(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    minio_ready: None,
 ) -> None:
-    """文档 → 只保存文件，不修改 avatar。"""
-    resp = await client.post(
-        "/api/files",
-        headers=auth_headers,
-        files={"file": ("report.pdf", PDF_BYTES, "application/pdf")},
+    """头像读取接口无需令牌：浏览器 <img src> 可以直接访问。"""
+    await _post_file(
+        client,
+        auth_headers,
+        "avatar.png",
+        PNG_BYTES,
+        "image/png",
+        upload_purpose="1",
+    )
+
+    resp = await client.get(f"/api/files/avatar/{auth_user['id']}")
+    assert resp.status_code == 200
+    assert resp.content == PNG_BYTES
+    assert resp.headers["content-type"] == "image/png"
+
+
+async def test_avatar_missing_404(
+    client: httpx.AsyncClient, auth_user: dict
+) -> None:
+    """未上传头像时读取 → 404。"""
+    resp = await client.get(f"/api/files/avatar/{auth_user['id']}")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == 404
+
+
+async def test_upload_document_stores_object_without_updating_avatar(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    minio_ready: None,
+) -> None:
+    """文档 → 只存资源和对象，不修改 avatar；长期场景约 30 天过期。"""
+    resp = await _post_file(
+        client,
+        auth_headers,
+        "report.pdf",
+        PDF_BYTES,
+        "application/pdf",
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
     md5 = hashlib.md5(PDF_BYTES).hexdigest()
 
-    try:
-        assert data["kind"] == "document"
-        assert data["url"] == f"/uploads/users/{auth_user['id']}/{md5}.pdf"
-        assert (_user_upload_dir(auth_user["id"]) / f"{md5}.pdf").is_file()
+    assert data["kind"] == "document"
+    assert data["storage_path"] == _storage_path(auth_user["id"], md5, ".pdf")
+    assert minio_client.object_exists(_object_key(auth_user["id"], md5, ".pdf"))
 
-        me = await client.get("/api/auth/me", headers=auth_headers)
-        assert me.json()["data"]["avatar"] is None
-    finally:
-        shutil.rmtree(_user_upload_dir(auth_user["id"]), ignore_errors=True)
+    remaining = datetime.fromisoformat(data["expire_time"]) - datetime.now()
+    assert timedelta(days=29) < remaining <= timedelta(days=30, minutes=5)
+
+    me = await client.get("/api/auth/me", headers=auth_headers)
+    assert me.json()["data"]["avatar"] is None
+
+
+async def test_upload_audio_stores_object_as_audio_resource(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    minio_ready: None,
+) -> None:
+    """音频 → resource_type=2、kind=audio，落 MinIO 且不影响头像。"""
+    resp = await _post_file(
+        client, auth_headers, "voice.wav", WAV_BYTES, "audio/wav"
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    md5 = hashlib.md5(WAV_BYTES).hexdigest()
+
+    assert data["kind"] == "audio"
+    assert data["storage_path"] == _storage_path(auth_user["id"], md5, ".wav")
+    assert minio_client.object_exists(_object_key(auth_user["id"], md5, ".wav"))
+
+    resource = resource_repo.get(data["resource_id"])
+    assert resource is not None
+    assert resource["resource_type"] == 2
+
+    me = await client.get("/api/auth/me", headers=auth_headers)
+    assert me.json()["data"]["avatar"] is None
+
+
+async def test_upload_forged_audio_422(
+    client: httpx.AsyncClient, auth_headers: dict
+) -> None:
+    """扩展名为 .wav 但文件头不符 → 422。"""
+    resp = await client.post(
+        "/api/files",
+        headers=auth_headers,
+        files={"file": ("voice.wav", b"<html>fake</html>", "audio/wav")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == 422
 
 
 async def test_upload_same_content_is_deduplicated(
-    client: httpx.AsyncClient, auth_user: dict, auth_headers: dict
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    minio_ready: None,
 ) -> None:
-    """相同内容重复上传 → 同一个 MD5 文件名，目录内只有一个文件。"""
-    first = await client.post(
-        "/api/files",
-        headers=auth_headers,
-        files={"file": ("a.pdf", PDF_BYTES, "application/pdf")},
+    """同用户同内容重复上传 → 复用同一条资源记录（文件名首次为准）。"""
+    first = await _post_file(
+        client, auth_headers, "a.pdf", PDF_BYTES, "application/pdf"
     )
-    second = await client.post(
-        "/api/files",
-        headers=auth_headers,
-        files={"file": ("b.pdf", PDF_BYTES, "application/pdf")},
+    second = await _post_file(
+        client, auth_headers, "b.pdf", PDF_BYTES, "application/pdf"
     )
 
-    try:
-        assert first.status_code == 200 and second.status_code == 200
-        assert first.json()["data"]["url"] == second.json()["data"]["url"]
-        assert len(list(_user_upload_dir(auth_user["id"]).iterdir())) == 1
-    finally:
-        shutil.rmtree(_user_upload_dir(auth_user["id"]), ignore_errors=True)
+    assert first.status_code == 200 and second.status_code == 200
+    assert first.json()["data"]["resource_id"] == second.json()["data"]["resource_id"]
+    assert first.json()["data"]["storage_path"] == second.json()["data"]["storage_path"]
+
+    rows = resource_repo.list_by_user(auth_user["id"])
+    assert len(rows) == 1
+    assert rows[0]["file_name"] == "a.pdf"
+
+
+async def test_upload_short_scene_sets_two_hour_expiry(
+    client: httpx.AsyncClient,
+    auth_headers: dict,
+    minio_ready: None,
+) -> None:
+    """storage_scene=1 → 过期时间约为 2 小时后。"""
+    resp = await _post_file(
+        client,
+        auth_headers,
+        "short.pdf",
+        PDF_BYTES,
+        "application/pdf",
+        storage_scene="1",
+    )
+    assert resp.status_code == 200, resp.text
+
+    remaining = datetime.fromisoformat(resp.json()["data"]["expire_time"]) - datetime.now()
+    assert timedelta(hours=1, minutes=59) <= remaining <= timedelta(hours=2, minutes=1)
+
+
+async def test_upload_extract_only_scene_skips_object(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    minio_ready: None,
+) -> None:
+    """storage_scene=2 → 只写元数据，不落 MinIO，storage_path 为空且不过期。"""
+    resp = await _post_file(
+        client,
+        auth_headers,
+        "extract.pdf",
+        PDF_BYTES,
+        "application/pdf",
+        storage_scene="2",
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    md5 = hashlib.md5(PDF_BYTES).hexdigest()
+
+    assert data["storage_path"] == ""
+    assert data["url"] == ""
+    assert data["expire_time"] is None
+    assert not minio_client.object_exists(_object_key(auth_user["id"], md5, ".pdf"))
+
+
+async def test_upload_image_without_avatar_purpose_keeps_avatar(
+    client: httpx.AsyncClient, auth_headers: dict, minio_ready: None
+) -> None:
+    """upload_purpose=0 的图片只存资源，不更新头像。"""
+    resp = await _post_file(
+        client, auth_headers, "photo.png", PNG_BYTES, "image/png"
+    )
+    assert resp.status_code == 200, resp.text
+
+    me = await client.get("/api/auth/me", headers=auth_headers)
+    assert me.json()["data"]["avatar"] is None
+
+
+async def test_upload_invalid_purpose_422(
+    client: httpx.AsyncClient, auth_headers: dict, minio_ready: None
+) -> None:
+    """upload_purpose 超出 0/1 → 422（表单校验）。"""
+    resp = await _post_file(
+        client,
+        auth_headers,
+        "avatar.png",
+        PNG_BYTES,
+        "image/png",
+        upload_purpose="2",
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == 422
 
 
 async def test_upload_requires_auth_401(client: httpx.AsyncClient) -> None:
