@@ -33,9 +33,16 @@ async function handleLogout(): Promise<void> {
     <ModuleTabs />
 
     <div class="top-nav__user">
-      <span v-if="authStore.user" class="top-nav__username text-ellipsis">
-        {{ authStore.user.username }}
-      </span>
+      <div v-if="authStore.user" class="top-nav__profile">
+        <el-avatar
+          :size="30"
+          :src="authStore.user.avatar ?? undefined"
+          class="top-nav__avatar"
+        >
+          {{ authStore.user.username.slice(0, 1).toUpperCase() }}
+        </el-avatar>
+        <span class="top-nav__username text-ellipsis">{{ authStore.user.username }}</span>
+      </div>
       <el-button class="top-nav__logout" text :icon="SwitchButton" @click="handleLogout">
         退出登录
       </el-button>
@@ -83,6 +90,20 @@ async function handleLogout(): Promise<void> {
     align-items: center;
     gap: 10px;
     margin-left: auto;
+  }
+
+  &__profile {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  &__avatar {
+    flex: none;
+    background: var(--color-accent-soft);
+    color: var(--color-accent);
+    font-size: 13px;
+    font-weight: 600;
   }
 
   &__username {

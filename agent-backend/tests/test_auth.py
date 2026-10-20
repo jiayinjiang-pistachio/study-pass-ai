@@ -4,14 +4,24 @@
 依赖：本地 MySQL 已启动且执行过 alembic upgrade head。
 """
 
+import hashlib
+import shutil
 from datetime import timedelta
+from pathlib import Path
 
 import httpx
 
 from app.core import rate_limit
+from app.core.config import AVATAR_MAX_BYTES, UPLOAD_DIR
 from app.core.security import create_access_token
 
 VALID_PASSWORD = "abc12345"
+PNG_BYTES = b"\x89PNG\r\n\x1a\nfake-avatar"
+PDF_BYTES = b"%PDF-1.4\nfake-pdf"
+
+
+def _user_upload_dir(user_id: int) -> Path:
+    return UPLOAD_DIR / "users" / str(user_id)
 
 
 async def _register(client: httpx.AsyncClient, username: str, password: str = VALID_PASSWORD) -> httpx.Response:
@@ -172,6 +182,132 @@ async def test_refresh_with_access_token_401(client: httpx.AsyncClient, username
     resp = await client.post("/api/auth/refresh", json={"refresh_token": tokens["access_token"]})
     assert resp.status_code == 401
     assert resp.json()["code"] == 401
+
+
+# ---- 通用文件上传 ----
+
+async def test_upload_image_saves_md5_file_and_updates_avatar(
+    client: httpx.AsyncClient, auth_user: dict, auth_headers: dict
+) -> None:
+    """图片 → 保存到用户目录（MD5 文件名）并更新 avatar，静态访问可用。"""
+    resp = await client.post(
+        "/api/files",
+        headers=auth_headers,
+        files={"file": ("avatar.png", PNG_BYTES, "image/png")},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    md5 = hashlib.md5(PNG_BYTES).hexdigest()
+    expected_url = f"/uploads/users/{auth_user['id']}/{md5}.png"
+
+    try:
+        assert data == {"url": expected_url, "md5": md5, "size": len(PNG_BYTES), "kind": "image"}
+        path = _user_upload_dir(auth_user["id"]) / f"{md5}.png"
+        assert path.is_file()
+
+        me = await client.get("/api/auth/me", headers=auth_headers)
+        assert me.json()["data"]["avatar"] == expected_url
+
+        static = await client.get(expected_url)
+        assert static.status_code == 200
+        assert static.content == PNG_BYTES
+    finally:
+        shutil.rmtree(_user_upload_dir(auth_user["id"]), ignore_errors=True)
+
+
+async def test_upload_document_saves_without_updating_avatar(
+    client: httpx.AsyncClient, auth_user: dict, auth_headers: dict
+) -> None:
+    """文档 → 只保存文件，不修改 avatar。"""
+    resp = await client.post(
+        "/api/files",
+        headers=auth_headers,
+        files={"file": ("report.pdf", PDF_BYTES, "application/pdf")},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    md5 = hashlib.md5(PDF_BYTES).hexdigest()
+
+    try:
+        assert data["kind"] == "document"
+        assert data["url"] == f"/uploads/users/{auth_user['id']}/{md5}.pdf"
+        assert (_user_upload_dir(auth_user["id"]) / f"{md5}.pdf").is_file()
+
+        me = await client.get("/api/auth/me", headers=auth_headers)
+        assert me.json()["data"]["avatar"] is None
+    finally:
+        shutil.rmtree(_user_upload_dir(auth_user["id"]), ignore_errors=True)
+
+
+async def test_upload_same_content_is_deduplicated(
+    client: httpx.AsyncClient, auth_user: dict, auth_headers: dict
+) -> None:
+    """相同内容重复上传 → 同一个 MD5 文件名，目录内只有一个文件。"""
+    first = await client.post(
+        "/api/files",
+        headers=auth_headers,
+        files={"file": ("a.pdf", PDF_BYTES, "application/pdf")},
+    )
+    second = await client.post(
+        "/api/files",
+        headers=auth_headers,
+        files={"file": ("b.pdf", PDF_BYTES, "application/pdf")},
+    )
+
+    try:
+        assert first.status_code == 200 and second.status_code == 200
+        assert first.json()["data"]["url"] == second.json()["data"]["url"]
+        assert len(list(_user_upload_dir(auth_user["id"]).iterdir())) == 1
+    finally:
+        shutil.rmtree(_user_upload_dir(auth_user["id"]), ignore_errors=True)
+
+
+async def test_upload_requires_auth_401(client: httpx.AsyncClient) -> None:
+    """未带令牌上传 → 401。"""
+    resp = await client.post(
+        "/api/files",
+        files={"file": ("avatar.png", PNG_BYTES, "image/png")},
+    )
+    assert resp.status_code == 401
+    assert resp.json()["code"] == 401
+
+
+async def test_upload_unsupported_type_422(
+    client: httpx.AsyncClient, auth_headers: dict
+) -> None:
+    """不在白名单内的类型 → 422。"""
+    resp = await client.post(
+        "/api/files",
+        headers=auth_headers,
+        files={"file": ("script.exe", b"MZ-not-allowed", "application/octet-stream")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == 422
+
+
+async def test_upload_forged_pdf_422(client: httpx.AsyncClient, auth_headers: dict) -> None:
+    """扩展名为 .pdf 但文件头不符 → 422。"""
+    resp = await client.post(
+        "/api/files",
+        headers=auth_headers,
+        files={"file": ("report.pdf", b"<html>fake</html>", "application/pdf")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == 422
+
+
+async def test_upload_image_too_large_413(
+    client: httpx.AsyncClient, auth_headers: dict
+) -> None:
+    """图片超过头像上限 2MB → 413。"""
+    oversized = PNG_BYTES + b"x" * (AVATAR_MAX_BYTES + 1 - len(PNG_BYTES))
+    resp = await client.post(
+        "/api/files",
+        headers=auth_headers,
+        files={"file": ("avatar.png", oversized, "image/png")},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["code"] == 413
 
 
 # ---- 受保护的用户 CRUD ----

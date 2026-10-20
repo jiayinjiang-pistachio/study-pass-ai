@@ -2,6 +2,7 @@ import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import * as authApi from '@/api/auth'
 import type { AuthUser } from '@/api/auth'
+import * as fileApi from '@/api/file'
 import { clearTokens, getAccessToken, setTokens } from '@/utils/token'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -31,11 +32,22 @@ export const useAuthStore = defineStore('auth', () => {
     await authApi.register({ username, password })
   }
 
+  /** 登录后上传头像：走后端通用文件接口，图片会同步更新 avatar 字段 */
+  async function uploadAvatar(file: File): Promise<void> {
+    const uploaded = await fileApi.uploadFile(file)
+    if (uploaded.kind !== fileApi.FileKind.Image) return
+    if (user.value) {
+      user.value = { ...user.value, avatar: uploaded.url }
+    } else {
+      await loadUser()
+    }
+  }
+
   function logout(): void {
     clearTokens()
     user.value = null
     loggedIn.value = false
   }
 
-  return { user, loggedIn, loadUser, login, register, logout }
+  return { user, loggedIn, loadUser, login, register, uploadAvatar, logout }
 })

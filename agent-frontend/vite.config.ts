@@ -13,6 +13,8 @@ export default defineConfig(({ mode }) => {
     changeOrigin: true,
     secure: false,
   }
+  // 后端静态资源（头像等）挂载在 /uploads，需与 API 一起代理
+  const uploadProxy = '/uploads'
 
   return {
     plugins: [vue()],
@@ -27,6 +29,7 @@ export default defineConfig(({ mode }) => {
       cors: true,
       proxy: {
         [apiPrefix]: apiProxy,
+        [uploadProxy]: apiProxy,
       },
     },
     preview: {
@@ -35,6 +38,7 @@ export default defineConfig(({ mode }) => {
       cors: true,
       proxy: {
         [apiPrefix]: apiProxy,
+        [uploadProxy]: apiProxy,
       },
     },
   }

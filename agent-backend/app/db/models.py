@@ -21,6 +21,8 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(32), unique=True, index=True, nullable=False)
     # 只存 bcrypt 哈希，绝不落明文（见 app/core/security.py）
     password: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 头像相对 URL（如 /uploads/users/1/<md5>.png）；注册时未上传则为 NULL
+    avatar: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # server_default=func.now()：插入时由数据库自动填充当前时间，业务层无需传值
     create_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False

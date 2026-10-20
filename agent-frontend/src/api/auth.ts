@@ -14,6 +14,7 @@ export interface TokenPair {
 export interface AuthUser {
   id: number
   username: string
+  avatar: string | null
   create_time: string
 }
 

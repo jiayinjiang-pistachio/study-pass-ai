@@ -75,15 +75,18 @@ agent-backend/
 │   │   ├── deps.py          #   路由层共享依赖：get_current_user（Bearer 鉴权）
 │   │   ├── user.py          #   用户 CRUD（整组需登录）
 │   │   ├── auth.py          #   鉴权接口：注册 / 登录 / 刷新令牌 / 当前用户
+│   │   ├── file.py          #   通用文件上传（整组需登录）
 │   │   └── health.py        #   健康检查（存活 + 数据库连通性），路径 /health
 │   ├── schemas/             # ② 校验层，按业务模块拆分
 │   │   ├── user.py
 │   │   ├── auth.py          #   注册 / 登录 / 刷新入参 + 令牌出参（RegisterIn / LoginIn / RefreshIn / TokenOut）
+│   │   ├── file.py          #   文件上传出参（FileOut：url / md5 / size / kind）
 │   │   ├── health.py        #   健康检查出参（HealthOut）
 │   │   └── response.py      #   统一响应信封（ResponseModel / ErrorResponse / ok）
 │   ├── services/            # ③ 业务层，按业务模块拆分
 │   │   ├── user_service.py
 │   │   ├── auth_service.py  #   鉴权业务：登录校验、签发 / 刷新令牌、解析当前用户
+│   │   ├── file_service.py  #   文件类型识别、按用户分目录 + MD5 去重落盘、图片更新头像
 │   │   └── health_service.py#   健康检查：数据库探活，异常转 SystemException(503)
 │   └── db/                  # ④ 数据库层（SQLAlchemy 2.0 + MySQL）
 │       ├── base.py          #   ORM 基类（Alembic 感知表结构的入口）
@@ -98,7 +101,7 @@ agent-backend/
 ├── tests/                   # pytest 冒烟测试（连真实 MySQL，见 §9）
 │   ├── conftest.py          #   进程内 ASGI 客户端 + 测试数据清理 + 鉴权夹具
 │   ├── test_smoke.py        #   健康检查 + 用户 CRUD 冒烟用例（CRUD 需鉴权）
-│   └── test_auth.py         #   鉴权冒烟用例（注册 / 登录 / 刷新 / me）
+│   └── test_auth.py         #   鉴权冒烟用例（注册 / 登录 / 刷新 / me / 文件上传）
 ├── alembic.ini              # Alembic 配置（连接串留空，由 env.py 注入）
 ├── pytest.ini               # pytest 配置（asyncio_mode=auto、pythonpath=.）
 ├── .env.example             # 基础环境变量模板（真实 .env 被 gitignore）
@@ -203,12 +206,14 @@ agent-backend/
   | 登录 | `POST /api/auth/login` | `200` |
   | 刷新令牌 | `POST /api/auth/refresh` | `200` |
   | 当前用户 | `GET /api/auth/me` | `200` |
+  | 上传文件 | `POST /api/files` | `200` |
 
   > 统一信封下成功一律 `200`：删除不用 `204`（无响应体，前端无法解析信封）；新增不用 `201`（避免 body.code 与 HTTP 状态码不一致）。
 
 - **鉴权约定**：除注册 / 登录 / 刷新 / 健康检查外，接口需携带 `Authorization: Bearer <access_token>`；令牌缺失 / 过期 / 非法 / 类型不符一律返回 `401`（由 `core/security.decode_token` 与 `routers/deps.get_current_user` 抛 `BusinessException(401)`）。**刷新令牌只能用于 `/api/auth/refresh`**，不能访问受保护接口（`type` 声明区分）；访问令牌过期时由前端调 `/api/auth/refresh` 换新令牌后重试原请求。令牌为无状态 JWT，**暂不支持主动吊销 / 登出**（后续需要再引入黑名单或落库）。
 - **注册接口安全约定**（`POST /api/auth/register`）：复用 `user_service.create_user`（bcrypt 哈希，禁止明文入库）；弱密码（黑名单 / 缺字母 / 缺数字 / 含用户名）由**校验层** `schemas/auth.py` 拦截 → `422`；接口限流由 `core/rate_limit.py` 的依赖实现（固定窗口 + IP 维度，默认 5 次/min），超限抛 `BusinessException(429)`。限流为**进程内内存**实现，仅单机有效，多实例部署需换共享存储。
-- **系统接口**（运维探活）**有意不挂 `/api` 前缀**：`GET /health` 校验服务存活 + 数据库连通性，正常 `200`、数据库异常 `503`（由 `health_service` 抛 `SystemException(503)`）。这是对「路径以 `/api` 开头」的唯一例外，新增此类端点需在本文档登记。
+- **通用文件上传约定**（`POST /api/files`）：`multipart/form-data`，字段名 `file`，**需登录**。服务端按文件头自动识别类型：图片（JPG / PNG / WebP / GIF）保存后同步更新 `users.avatar`，文档（PDF / Office / txt / md / csv / rtf / json）只保存；类型不在白名单 `422`，图片超 2MB（`AVATAR_MAX_BYTES`）或文档超 10MB（`FILE_MAX_BYTES`）返回 `413`。存储路径为 `UPLOAD_DIR/users/{user_id}/{MD5}.{ext}`（默认 `uploads/`，已 gitignore），**文件名取文件内容的 MD5 以实现去重**；响应返回 `{url, md5, size, kind}`。替换头像时清理旧文件。
+- **系统接口 / 静态资源**：`GET /health`（运维探活）与 `/uploads/*`（上传文件静态访问，由 `main.py` 挂载）**有意不挂 `/api` 前缀**：前者校验服务存活 + 数据库连通性，正常 `200`、数据库异常 `503`（由 `health_service` 抛 `SystemException(503)`）；后者仅提供已落盘文件。这是对「路径以 `/api` 开头」的例外，新增此类端点需在本文档登记。
 - 每个路由**必须声明 `response_model`**，出参信封用 `ResponseModel[XxxOut]`（列表用 `ResponseModel[list[XxxOut]]`），保证出参被裁剪且有文档。
 - 路由返回值统一用 `ok(data)` 包成成功信封，**不要手写 `{"code": ...}`**。
 - 每个路由**必须写 `summary`**，便于 `/docs` 阅读。

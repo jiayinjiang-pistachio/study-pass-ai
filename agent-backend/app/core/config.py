@@ -57,6 +57,21 @@ def _resolve_log_dir() -> Path:
 LOG_DIR: Path = _resolve_log_dir()
 
 
+def _resolve_upload_dir() -> Path:
+    """上传根目录：与日志目录一致，相对路径锚定仓库根。"""
+    raw = os.getenv("UPLOAD_DIR", "uploads")
+    path = Path(raw)
+    return path if path.is_absolute() else _ROOT / path
+
+
+# 上传文件根目录：/uploads 由 main.py 挂载为静态目录。
+# 通用文档默认上限 10MB；图片会写入头像字段，沿用更严格的 2MB 上限。
+# 路由先按通用上限多读 1 字节，由业务层按识别结果判断是否超限。
+UPLOAD_DIR: Path = _resolve_upload_dir()
+FILE_MAX_BYTES: int = int(os.getenv("FILE_MAX_BYTES", str(10 * 1024 * 1024)))
+AVATAR_MAX_BYTES: int = int(os.getenv("AVATAR_MAX_BYTES", str(2 * 1024 * 1024)))
+
+
 def get_mysql_url() -> str:
     """返回 MySQL 连接串（形如 mysql+pymysql://user:pwd@host:3306/db?charset=utf8mb4）。
 

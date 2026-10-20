@@ -50,7 +50,7 @@
 
 ```
 src/
-├── api/              # 接口层：request.ts（axios 统一请求）+ 按业务拆分（auth.ts / conversation.ts / interview.ts / note.ts）
+├── api/              # 接口层：request.ts（axios 统一请求）+ 按业务拆分（auth.ts / file.ts / conversation.ts / interview.ts / note.ts）
 ├── assets/           # 需要经构建处理的静态资源（图片、svg、字体）
 ├── components/       # 可复用组件
 │   ├── common/       # 通用展示组件（EmptyState / LoadingDots）
@@ -204,6 +204,7 @@ src/
 - 请求基址来自 `import.meta.env.VITE_API_PREFIX`（默认 `/api`），**禁止硬编码后端 host 或端口**。
 - 统一响应结构约定为信封 `{ code, message, data }`：`code === 200` 视为成功并**解包返回 `data`**，否则抛 `ApiError`（携带 `code` / `message`）。后端错误响应的 `code` 复用 HTTP 状态码（404 / 409 / 422 / 500），并额外带 `detail`（面向开发者定位）。
 - **鉴权与续期**：请求层自动为受保护接口附加 `Authorization: Bearer <access_token>`；收到 `401` 时用本地 `refresh_token` 调 `/api/auth/refresh`（并发请求共享同一次刷新）并重试一次，刷新失败则清理本地令牌并跳转登录页。令牌存于 localStorage，读写统一走 `src/utils/token.ts`。
+- **头像上传**：注册页选择头像时**只做本地预览**（`URL.createObjectURL`，限制 JPG / PNG / WebP / GIF 且 ≤ 2MB），不发请求；点击注册后按「建号 → 自动登录拿令牌 → `POST /api/files` 上传」执行，上传用 `FormData`（字段 `file`），请求层自动带 Bearer。后端自动识别类型：图片会更新头像并返回 `{url, md5, size, kind}`，文档只保存。头像上传失败不阻断登录。当前用户（含 `avatar` URL）由 `stores/auth.ts` 全局维护，顶栏从 store 读取展示。通用文件接口封装在 `src/api/file.ts`。
 - **错误提示**：请求层统一弹出后端 `message`（短时间去重，可用 `silent` 关闭），调用方不要重复提示同一错误。
 - 每个接口在 `src/api/xxx.ts` 中定义明确的请求 / 响应类型，并按业务域拆分文件（如 `conversation.ts` / `interview.ts` / `note.ts`）。
 - 流式接口（AI 对话、语音播报等）需封装为独立的 SSE / 流式工具，并处理中断与错误重连。

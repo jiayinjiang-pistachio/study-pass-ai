@@ -105,8 +105,9 @@ pytest tests/test_smoke.py -v                # 运行冒烟测试
 | POST | `/api/auth/login` | 用户登录（签发双令牌） | 200 |
 | POST | `/api/auth/refresh` | 用刷新令牌换新令牌 | 200 |
 | GET | `/api/auth/me` | 当前登录用户 | 200 |
+| POST | `/api/files` | 通用文件上传（multipart，字段 `file`；图片自动更新头像） | 200 |
 
-系统接口（不带 `/api` 前缀）：`GET /health` —— 校验服务存活与数据库连通性，正常 200、数据库异常 503。
+不带 `/api` 前缀的端点：`GET /health`（存活 + 数据库连通性探活）与 `/uploads/*`（头像等上传文件的静态访问）。
 
 > 除注册 / 登录 / 刷新 / 健康检查外，接口需携带 `Authorization: Bearer <access_token>`；令牌缺失 / 过期 / 非法一律 **401**。`/api/users` 整组接口需登录。
 
@@ -121,7 +122,7 @@ pytest tests/test_smoke.py -v                # 运行冒烟测试
 curl -X POST http://127.0.0.1:8000/api/auth/register \
   -H 'Content-Type: application/json' \
   -d '{"username":"bob","password":"abc12345"}'
-# → {"code":200,"message":"ok","data":{"id":1,"username":"bob","create_time":"..."}}（无 password）
+# → {"code":200,"message":"ok","data":{"id":1,"username":"bob","avatar":null,"create_time":"..."}}（无 password）
 # 弱密码 / 重复用户名 / 超限分别返回 422 / 409 / 429
 ```
 
@@ -141,6 +142,13 @@ curl -X POST http://127.0.0.1:8000/api/auth/login \
 # 2) 携带访问令牌访问受保护接口
 curl http://127.0.0.1:8000/api/auth/me -H "Authorization: Bearer <access_token>"   # 200
 curl http://127.0.0.1:8000/api/users                                               # 401（无令牌）
+
+# 2.1) 通用文件上传（需登录，multipart 字段 file）
+curl -X POST http://127.0.0.1:8000/api/files \
+  -H "Authorization: Bearer <access_token>" -F "file=@avatar.png"
+# → {"kind":"image","url":"/uploads/users/1/<md5>.png","md5":"...","size":...}
+# 图片会同时更新 users.avatar；文档（PDF / Office / txt 等）只保存、不更新头像
+# 文件按用户分目录存放：uploads/users/{user_id}/，文件名 = 内容 MD5（相同内容自动去重）
 
 # 3) 访问令牌过期（401）时，用刷新令牌换新令牌后重试原请求
 curl -X POST http://127.0.0.1:8000/api/auth/refresh \

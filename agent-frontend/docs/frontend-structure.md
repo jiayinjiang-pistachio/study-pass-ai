@@ -72,13 +72,15 @@
 │                    │  [👤 用户名或邮箱      ] │                     │
 │                    │  [🔒 密码             ] │                     │
 │                    │  [🔒 确认密码]（注册态） │                     │
+│                    │  [📷 点击头像上传]（注册态）│  ← 仅本地预览      │
 │                    │  [      登录 / 注册     ] │  ← 橙色全宽按钮     │
 │                    └─────────────────────────┘                     │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
 - `/login` 为公开路由，不套 `AppShell`；其余路由由前置守卫校验本地令牌，未登录跳登录页并携带 `redirect`，登录成功后回跳。
-- 登录 / 注册共用一张卡片，通过 Tab 切换；注册态多一个「确认密码」输入框。
+- 登录 / 注册共用一张卡片，通过 Tab 切换；注册态多一个「确认密码」输入框与头像选择入口。
+- 头像选择只生成本地预览；注册流程为「文本信息建号 → 自动登录拿 Token → 带 Bearer 调 `POST /api/files` 上传」，失败不阻断登录。
 
 ---
 
@@ -94,7 +96,7 @@ App.vue
       ├─ components/layout/TopNavBar.vue      # 顶栏容器
       │  ├─ (内联) Logo + 「学面通AI」标题     # 黄色圆形 logo，静态展示
       │  ├─ components/layout/ModuleTabs.vue  # 学习室 / 面试间 / 笔记本（RouterLink × 3）
-      │  └─ (内联) 当前用户名 + 退出登录
+      │  └─ (内联) 当前用户头像 + 用户名 + 退出登录
       ├─ components/sidebar/ConversationSidebar.vue   # 左栏（按当前模块切换列表与按钮文案）
       │  ├─ (内联) ＋新建会话 / ＋新建笔记 按钮
       │  ├─ components/sidebar/ConversationList.vue   # 学习室 / 面试间（按模块过滤）
@@ -135,7 +137,7 @@ App.vue
 | --- | --- | --- |
 | `src/router/` | `index.ts` | history 模式；路由名复用 `ModuleKey`；页面懒加载；`/login` 公开，其余路由由前置守卫校验令牌 |
 | `src/stores/` | `auth`（令牌 / 当前用户 / 登录注册退出）、`conversation`（会话列表 / 各模块选中态）、`chat`（消息 / 发送态）、`note`（笔记列表 / 当前笔记 / 内容） | **Pinia setup 风格** store |
-| `src/api/` | `request.ts`（axios 实例 + 拦截器）、`auth.ts`（登录 / 注册 / 当前用户）、`conversation.ts`（会话 CRUD）、`interview.ts`（对话消息）、`note.ts`（笔记 CRUD 与内容保存） | 请求统一走此层，禁止组件/store 裸调 |
+| `src/api/` | `request.ts`（axios 实例 + 拦截器）、`auth.ts`（登录 / 注册 / 当前用户）、`file.ts`（通用文件上传）、`conversation.ts`（会话 CRUD）、`interview.ts`（对话消息）、`note.ts`（笔记 CRUD 与内容保存） | 请求统一走此层，禁止组件/store 裸调 |
 | `src/mock/` | `index.ts`（Mock.js 拦截）、`data.ts`（会话种子数据与固定文案，分学习 / 面试两组）、`notes.ts`（笔记种子数据与拦截） | **仅开发环境**动态加载；axios 固定 xhr adapter 以被 Mock.js 拦截 |
 | `src/utils/` | `token.ts`（localStorage 令牌读写） | 请求层与路由守卫共用 |
 | `src/composables/` | `useAutoScroll`（滚动贴底 + 「回到最新」）、`useCurrentModule`（从路由 `name` 派生当前模块） | 逻辑复用 |
@@ -145,7 +147,7 @@ App.vue
 
 ```
 src/
-├── api/              # request.ts（axios）/ auth.ts / conversation.ts / interview.ts / note.ts
+├── api/              # request.ts（axios）/ auth.ts / file.ts / conversation.ts / interview.ts / note.ts
 ├── assets/           # 需构建处理的静态资源
 ├── components/
 │   ├── common/       # EmptyState / LoadingDots
@@ -226,7 +228,7 @@ export interface Note {
 
 ```ts
 export interface ApiEnvelope<T> {
-  code: number                 // 200 = 成功；错误复用 HTTP 状态码（401 / 404 / 409 / 422 / 429 / 500）
+  code: number                 // 200 = 成功；错误复用 HTTP 状态码（401 / 404 / 409 / 413 / 422 / 429 / 500）
   message: string              // 面向用户的中文提示
   detail?: string | null       // 面向开发者的定位信息
   data: T
@@ -326,7 +328,9 @@ export interface ApiEnvelope<T> {
 | 44 | 注册前端校验 | ✅ | 用户名非空且 ≤ 32；密码 6–72 位、含字母与数字、不含用户名、两次一致 |
 | 45 | 请求自动带 Bearer；401 自动刷新并重试 | ✅ | axios 拦截器；并发 401 共享同一次刷新 |
 | 46 | 刷新失败 → 清理令牌 → 跳登录 | ✅ | 同时弹出「登录状态已过期」提示 |
-| 47 | 顶栏展示当前用户 + 退出登录 | ✅ | 退出清理 localStorage 并跳 `/login` |
+| 47 | 顶栏展示当前用户 + 退出登录 | ✅ | 头像与用户名来自 `auth` store；退出清理 localStorage 并跳 `/login` |
+| 48 | 注册选择头像 → 仅本地预览 | ✅ | `URL.createObjectURL` 预览，限制 JPG / PNG / WebP / GIF 且 ≤ 2MB；切换/离开时释放 |
+| 49 | 注册成功 → 自动登录 → 上传头像 | ✅ | 建号后调用登录拿 Token，再以 `FormData` 调通用接口 `POST /api/files`；图片由后端识别并更新 avatar，失败不阻断登录 |
 
 ---
 
@@ -370,7 +374,8 @@ export interface ApiEnvelope<T> {
 
 - **路由**：`vue-router` history 模式，Tab 切换由路由驱动；路由名复用 `ModuleKey`；页面懒加载；`/` 与未匹配路径重定向到面试间；`/login` 为公开路由，其余路由由前置守卫校验本地令牌。
 - **鉴权**：登录签发 access / refresh 双令牌并存入 localStorage；axios 请求拦截器自动附加 `Authorization: Bearer`；401 时用 refresh token 换新并重试一次（并发去重），失败则清理令牌并跳登录页。
-- **状态**：`Pinia` setup 风格 store（`conversation` / `chat` / `note`）；**当前模块的唯一事实来源是路由**，store 不再存一份当前 Tab。
+- **文件上传**：注册页选择头像时只本地预览；注册→自动登录→带令牌调通用接口 `POST /api/files`（`multipart/form-data`，字段 `file`，封装于 `src/api/file.ts`）。后端按用户分目录存为 `/uploads/users/{userId}/{MD5}.{ext}`，图片会同时更新头像，文档只保存；Vite 开发/预览服务器同时代理 `/uploads`。头像 URL 与用户名统一由 `auth` store 维护，顶栏直接读取。
+- **状态**：`Pinia` setup 风格 store（`auth` / `conversation` / `chat` / `note`）；**当前模块的唯一事实来源是路由**，store 不再存一份当前 Tab。
 - **模块决定数据源**：学习室 / 面试间展示会话（`conversation` store，选中态按模块分别记录于 `activeByModule`），笔记本展示笔记（`note` store，独立数据源）；侧栏由 `useCurrentModule()` 读路由 `name` 切换列表与按钮文案。
 - **富文本编辑器**：笔记本正文用 **wangEditor-next**（`@wangeditor-next/editor` + `-for-vue`）。约定：必须引入其 CSS；内容用 `v-model` 绑定，外部切换笔记只需改绑定的 ref（组件内部自动 `setHtml`）；`onCreated` / `onChange` 只能走组件事件（写进 `defaultConfig` 会抛错）；组件卸载须调用 `editor.destroy()`；`toolbarKeys` 显式声明，图片用 `insertImage`（`uploadImage` 依赖后端上传接口）。
 - **请求层**：`src/api/` 基于 **axios** 统一封装（唯一实例 + 请求 / 响应拦截器），响应信封 `{ code, message, data }` 自动解包；错误统一 `ElMessage` 提示（短时间去重）；axios 固定 `adapter: 'xhr'`。
@@ -396,3 +401,5 @@ export interface ApiEnvelope<T> {
 | 9 | 侧栏按模块过滤 | 由 `useCurrentModule()` 读路由 `name` 决定列表与文案；会话选中态按模块记录于 `activeByModule`，避免串用 | ✅ 已落地 |
 | 10 | 登录鉴权方案 | JWT 双令牌 + localStorage；路由守卫拦截未登录；axios 401 自动刷新并重试 | ✅ 已落地 |
 | 11 | 登录页视觉 | 独立于 `AppShell` 的居中卡片；登录 / 注册 Tab 共用表单 | ✅ 已落地 |
+| 12 | 注册头像上传时机 | 选择时只本地预览；建号并自动登录后，携带 Bearer 调用通用上传接口，避免未认证请求 | ✅ 已落地 |
+| 13 | 文件存储 | 按 `users/{userId}/` 分目录，文件名用内容 MD5（去重）；图片自动更新头像，文档只保存 | ✅ 已落地 |

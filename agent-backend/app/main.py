@@ -6,11 +6,13 @@
 """
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
-from .core.config import get_jwt_secret
+from .core.config import UPLOAD_DIR, get_jwt_secret
 from .core.handlers import register_exception_handlers
 from .core.logging import setup_logging
 from .routers import auth as auth_router
+from .routers import file as file_router
 from .routers import health as health_router
 from .routers import user as user_router
 
@@ -29,7 +31,12 @@ app = FastAPI(
 # 注册全局异常处理器：统一转成 {code, message, detail} 错误响应体
 register_exception_handlers(app)
 
+# 上传文件静态访问（头像等）：挂载前先建目录，避免首次启动因目录缺失失败
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+
 # 按业务模块注册路由
 app.include_router(user_router.router)
 app.include_router(auth_router.router)
+app.include_router(file_router.router)
 app.include_router(health_router.router)

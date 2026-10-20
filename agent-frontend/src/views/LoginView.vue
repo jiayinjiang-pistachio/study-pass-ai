@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Lock, User } from '@element-plus/icons-vue'
+import { Camera, Lock, User } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { ModuleKey } from '@/types/conversation'
 
@@ -11,6 +11,10 @@ const AuthTab = {
   Register: 'register',
 } as const
 type AuthTab = (typeof AuthTab)[keyof typeof AuthTab]
+
+/** 与后端 file_service 保持一致：图片 2MB + 常见图片格式 */
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024
+const AVATAR_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 
 const router = useRouter()
 const route = useRoute()
@@ -24,8 +28,48 @@ const form = reactive({
   confirmPassword: '',
 })
 
+const avatarInputRef = ref<HTMLInputElement | null>(null)
+const avatarFile = ref<File | null>(null)
+const avatarPreview = ref<string | null>(null)
+
 const isRegister = computed(() => activeTab.value === AuthTab.Register)
 const submitLabel = computed(() => (isRegister.value ? '注册' : '登录'))
+
+function revokeAvatarPreview(): void {
+  if (avatarPreview.value) {
+    URL.revokeObjectURL(avatarPreview.value)
+    avatarPreview.value = null
+  }
+}
+
+/** 选择头像只做本地预览，真正上传发生在注册并自动登录成功之后 */
+function openAvatarPicker(): void {
+  if (!isRegister.value || loading.value) return
+  avatarInputRef.value?.click()
+}
+
+function handleAvatarChange(event: Event): void {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  // 清空 value，保证连续选择同一个文件也能触发 change
+  input.value = ''
+  if (!file) return
+
+  if (!AVATAR_TYPES.has(file.type)) {
+    ElMessage.warning('请选择 JPG / PNG / WebP / GIF 图片')
+    return
+  }
+  if (file.size > AVATAR_MAX_BYTES) {
+    ElMessage.warning('头像不能超过 2MB')
+    return
+  }
+
+  revokeAvatarPreview()
+  avatarFile.value = file
+  avatarPreview.value = URL.createObjectURL(file)
+}
+
+onBeforeUnmount(revokeAvatarPreview)
 
 function switchTab(tab: AuthTab): void {
   if (loading.value || activeTab.value === tab) return
@@ -62,6 +106,20 @@ function resolveRedirect(): string | null {
   return value.startsWith('/') && !value.startsWith('//') ? value : null
 }
 
+/** 登录成功后上传头像；失败不阻断进入应用，错误已由请求层统一提示 */
+async function uploadSelectedAvatar(): Promise<void> {
+  const file = avatarFile.value
+  if (!file) return
+  try {
+    await authStore.uploadAvatar(file)
+  } catch {
+    // 头像属于可选信息，失败时仍保留登录态
+  } finally {
+    avatarFile.value = null
+    revokeAvatarPreview()
+  }
+}
+
 async function handleSubmit(): Promise<void> {
   const error = validate()
   if (error) {
@@ -73,9 +131,11 @@ async function handleSubmit(): Promise<void> {
   try {
     const username = form.username.trim()
     if (isRegister.value) {
+      // 按要求分三步：文本信息建号 → 自动登录拿 Token → 带认证上传头像
       await authStore.register(username, form.password)
       ElMessage.success('注册成功，正在登录…')
       await authStore.login(username, form.password)
+      await uploadSelectedAvatar()
     } else {
       await authStore.login(username, form.password)
     }
@@ -101,26 +161,51 @@ async function handleSubmit(): Promise<void> {
         <h1 class="auth-card__title">学面通AI</h1>
       </header>
 
-      <div class="auth-card__avatar" aria-hidden="true">
-        <svg viewBox="0 0 120 120">
-          <defs>
-            <linearGradient id="auth-sky" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="#8ecdf5" />
-              <stop offset="62%" stop-color="#e3f4fc" />
-              <stop offset="100%" stop-color="#fbe7c2" />
-            </linearGradient>
-            <linearGradient id="auth-sea" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="#7ccfe0" />
-              <stop offset="100%" stop-color="#43a9c6" />
-            </linearGradient>
-          </defs>
-          <circle cx="60" cy="60" r="60" fill="url(#auth-sky)" />
-          <circle cx="84" cy="33" r="11" fill="#ffd86b" />
-          <path d="M0 72 Q30 64 60 72 T120 72 V120 H0 Z" fill="url(#auth-sea)" opacity="0.92" />
-          <path d="M0 84 Q30 76 60 84 T120 84 V120 H0 Z" fill="#2f93b4" opacity="0.5" />
-          <path d="M0 96 Q30 90 60 96 T120 96 V120 H0 Z" fill="#f5dfb3" />
-          <path d="M0 104 Q30 98 60 104 T120 104 V120 H0 Z" fill="#efd09b" />
-        </svg>
+      <div class="auth-card__avatar-wrap">
+        <button
+          type="button"
+          class="auth-card__avatar"
+          :class="{ 'is-picker': isRegister }"
+          :disabled="!isRegister || loading"
+          :aria-label="isRegister ? '选择头像' : '头像'"
+          @click="openAvatarPicker"
+        >
+          <img v-if="avatarPreview" :src="avatarPreview" alt="头像预览" />
+          <svg v-else viewBox="0 0 120 120" aria-hidden="true">
+            <defs>
+              <linearGradient id="auth-sky" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#8ecdf5" />
+                <stop offset="62%" stop-color="#e3f4fc" />
+                <stop offset="100%" stop-color="#fbe7c2" />
+              </linearGradient>
+              <linearGradient id="auth-sea" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#7ccfe0" />
+                <stop offset="100%" stop-color="#43a9c6" />
+              </linearGradient>
+            </defs>
+            <circle cx="60" cy="60" r="60" fill="url(#auth-sky)" />
+            <circle cx="84" cy="33" r="11" fill="#ffd86b" />
+            <path d="M0 72 Q30 64 60 72 T120 72 V120 H0 Z" fill="url(#auth-sea)" opacity="0.92" />
+            <path d="M0 84 Q30 76 60 84 T120 84 V120 H0 Z" fill="#2f93b4" opacity="0.5" />
+            <path d="M0 96 Q30 90 60 96 T120 96 V120 H0 Z" fill="#f5dfb3" />
+            <path d="M0 104 Q30 98 60 104 T120 104 V120 H0 Z" fill="#efd09b" />
+          </svg>
+          <span v-if="isRegister" class="auth-card__avatar-overlay">
+            <el-icon><Camera /></el-icon>
+            <span>{{ avatarPreview ? '更换头像' : '上传头像' }}</span>
+          </span>
+          <span v-if="isRegister" class="auth-card__avatar-badge" aria-hidden="true">
+            <el-icon><Camera /></el-icon>
+          </span>
+        </button>
+        <input
+          ref="avatarInputRef"
+          class="auth-card__avatar-input"
+          type="file"
+          accept="image/jpeg,image/png,image/webp,image/gif"
+          @change="handleAvatarChange"
+        />
+        <p v-if="isRegister" class="auth-card__avatar-hint">可选，注册后自动上传</p>
       </div>
 
       <div class="auth-tabs" role="tablist">
@@ -233,21 +318,95 @@ async function handleSubmit(): Promise<void> {
     color: var(--color-text);
   }
 
+  &__avatar-wrap {
+    margin-bottom: 18px;
+    text-align: center;
+  }
+
   &__avatar {
+    position: relative;
+    display: block;
     width: 76px;
     height: 76px;
-    margin: 24px auto 18px;
+    margin: 24px auto 0;
+    padding: 0;
+    border: none;
     border-radius: 50%;
     overflow: hidden;
+    background: none;
+    cursor: default;
     box-shadow:
       0 0 0 4px var(--color-surface),
       0 0 0 5px var(--color-border);
+    transition: box-shadow 0.2s;
 
+    img,
     svg {
       display: block;
       width: 100%;
       height: 100%;
+      object-fit: cover;
     }
+
+    &.is-picker {
+      cursor: pointer;
+
+      &:hover {
+        box-shadow:
+          0 0 0 4px var(--color-surface),
+          0 0 0 5px var(--color-accent);
+      }
+
+      &:hover .auth-card__avatar-overlay {
+        opacity: 1;
+      }
+    }
+
+    &:disabled {
+      cursor: default;
+    }
+  }
+
+  &__avatar-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    background: rgba(20, 16, 12, 0.5);
+    color: #fff;
+    font-size: 12px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+  }
+
+  &__avatar-badge {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: 2px solid var(--color-surface);
+    border-radius: 50%;
+    background: var(--color-accent);
+    color: #fff;
+    font-size: 13px;
+  }
+
+  &__avatar-input {
+    display: none;
+  }
+
+  &__avatar-hint {
+    margin: 8px 0 0;
+    color: var(--color-text-muted);
+    font-size: 12px;
   }
 }
 

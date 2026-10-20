@@ -44,4 +44,5 @@ class UserOut(UserBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int = Field(..., description="用户 ID")
+    avatar: str | None = Field(None, description="头像 URL（未上传时为 null）")
     create_time: datetime = Field(..., description="创建时间（由数据库自动填充）")
