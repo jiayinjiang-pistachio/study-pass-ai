@@ -90,7 +90,7 @@ agent-backend/
 │   │   └── health_service.py#   健康检查：数据库探活，异常转 SystemException(503)
 │   └── db/                  # ④ 数据库层（SQLAlchemy 2.0 + MySQL）
 │       ├── base.py          #   ORM 基类（Alembic 感知表结构的入口）
-│       ├── models.py        #   表结构声明（User）
+│       ├── models.py        #   表结构声明（User / ChatSession / ChatMessage / Interview）
 │       ├── session.py       #   engine + Session 工厂
 │       ├── user_repo.py     #   users 表读写仓储（上层唯一入口）
 │       └── health_repo.py   #   数据库连通性探活（SELECT 1）

@@ -22,4 +22,4 @@ msg="${1:-auto migrate}"
 "$ALEMBIC" revision --autogenerate -m "$msg"
 "$ALEMBIC" upgrade head
 
-echo "✔ 迁移已生成并升级到最新（$msg）"
+echo "✔ 迁移已生成并升级到最新（${msg}）"

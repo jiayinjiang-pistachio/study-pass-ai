@@ -91,6 +91,18 @@ ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 
 REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 JWT_SECRET: str | None = os.getenv("JWT_SECRET")
 
+# #MinIO核心配置(app/core/settings.py)
+# MINI0ENDP0INT=127.0.g.1:9000
+# MINIO ACCESS KEY=minioadmin
+# MINIO SECRET KEY=minioadmin
+# MINIO BUCKET=ai-resource
+# MINIO SECURE=False#本地环境关闭HTTPS
+
+MINI0ENDP0INT: str | None = os.getenv("MINI0ENDP0INT")
+MINIO_ACCESS_KEY: str | None = os.getenv("MINIO_ACCESS_KEY")
+MINIO_SECRET_KEY: str | None = os.getenv("MINIO_SECRET_KEY")
+MINIO_BUCKET: str | None = os.getenv("MINIO_BUCKET")
+MINIO_SECURE: bool = os.getenv("MINIO_SECURE")
 
 def get_jwt_secret() -> str:
     """返回 JWT 签名密钥。
@@ -103,3 +115,5 @@ def get_jwt_secret() -> str:
             "环境变量 JWT_SECRET 未配置，请在 .env 中设置一个足够随机的密钥"
         )
     return JWT_SECRET
+
+
