@@ -1,85 +1,154 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { Conversation, ModuleKey } from '@/types/conversation'
-import { ModuleKey as Module } from '@/types/conversation'
+import type { ChatModule, Conversation } from '@/types/conversation'
 import * as conversationApi from '@/api/conversation'
 
-/** 会话仅存在于学习室与面试间；笔记本使用独立的笔记数据源 */
-const CHAT_MODULES: ModuleKey[] = [Module.Study, Module.Interview]
+const PAGE_SIZE = 20
+const CHAT_MODULES: ChatModule[] = ['study', 'interview']
+
+interface ListState {
+  items: Conversation[]
+  page: number
+  total: number
+  loading: boolean
+  loaded: boolean
+}
+
+function emptyState(): ListState {
+  return { items: [], page: 0, total: 0, loading: false, loaded: false }
+}
 
 export const useConversationStore = defineStore('conversation', () => {
-  const conversations = ref<Conversation[]>([])
-  /** 每个模块各自记录当前选中的会话 id（模块由路由决定，见 ConversationSidebar） */
-  const activeByModule = ref<Record<ModuleKey, string>>({
-    [Module.Study]: '',
-    [Module.Interview]: '',
-    [Module.Note]: '',
+  /** 学习室 / 面试间各自维护一份分页列表 */
+  const states = ref<Record<ChatModule, ListState>>({
+    study: emptyState(),
+    interview: emptyState(),
   })
-  const loading = ref(false)
+  /** 每个模块各自记录当前选中的会话 id（模块由路由决定） */
+  const activeByModule = ref<Record<ChatModule, number | null>>({
+    study: null,
+    interview: null,
+  })
 
-  function listOf(module: ModuleKey): Conversation[] {
-    return conversations.value.filter((item) => item.module === module)
+  function stateOf(module: ChatModule): ListState {
+    return states.value[module]
   }
 
-  async function load(): Promise<void> {
-    loading.value = true
+  function listOf(module: ChatModule): Conversation[] {
+    return states.value[module].items
+  }
+
+  function hasMore(module: ChatModule): boolean {
+    const state = states.value[module]
+    return state.items.length < state.total
+  }
+
+  /** 当前选中项不在列表里时，回退到第一项（删除 / 首次加载后使用） */
+  function ensureActive(module: ChatModule): void {
+    const state = states.value[module]
+    const current = activeByModule.value[module]
+    if (current !== null && state.items.some((item) => item.id === current)) {
+      return
+    }
+    activeByModule.value[module] = state.items[0]?.id ?? null
+  }
+
+  function mergeById(
+    current: Conversation[],
+    incoming: Conversation[],
+  ): Conversation[] {
+    const merged = new Map<number, Conversation>()
+    for (const item of [...current, ...incoming]) merged.set(item.id, item)
+    return [...merged.values()]
+  }
+
+  async function load(module: ChatModule, page = 1): Promise<void> {
+    const state = states.value[module]
+    if (state.loading) return
+    state.loading = true
     try {
-      conversations.value = await conversationApi.fetchConversations()
-      CHAT_MODULES.forEach((module) => {
-        const list = listOf(module)
-        if (!list.some((item) => item.id === activeByModule.value[module])) {
-          activeByModule.value[module] = list[0]?.id ?? ''
-        }
-      })
+      const result = await conversationApi.fetchConversations(
+        module,
+        page,
+        PAGE_SIZE,
+      )
+      state.items =
+        page === 1 ? result.items : mergeById(state.items, result.items)
+      state.page = result.page
+      state.total = result.total
+      state.loaded = true
+      ensureActive(module)
     } finally {
-      loading.value = false
+      state.loading = false
     }
   }
 
-  function select(module: ModuleKey, id: string): void {
-    activeByModule.value[module] = id
+  async function ensureLoaded(module: ChatModule): Promise<void> {
+    const state = states.value[module]
+    if (state.loaded || state.loading) return
+    await load(module)
   }
 
-  async function create(module: ModuleKey): Promise<void> {
-    const conversation = await conversationApi.createConversation(module)
-    conversations.value.unshift(conversation)
-    activeByModule.value[module] = conversation.id
+  async function loadMore(module: ChatModule): Promise<void> {
+    const state = states.value[module]
+    if (state.loading || !hasMore(module)) return
+    await load(module, state.page + 1)
   }
 
-  async function rename(id: string, title: string): Promise<void> {
+  async function create(module: ChatModule): Promise<void> {
+    const created = await conversationApi.createConversation(module)
+    await load(module, 1)
+    activeByModule.value[module] = created.id
+
+    // 并发写入等极端情况下新会话可能不在第一页，本地补一条保证可切换
+    const state = states.value[module]
+    if (!state.items.some((item) => item.id === created.id)) {
+      state.items.unshift(created)
+      state.total += 1
+    }
+  }
+
+  function find(id: number): { module: ChatModule; item: Conversation } | null {
+    for (const module of CHAT_MODULES) {
+      const item = states.value[module].items.find((entry) => entry.id === id)
+      if (item) return { module, item }
+    }
+    return null
+  }
+
+  async function rename(id: number, title: string): Promise<void> {
     const trimmed = title.trim()
     if (!trimmed) return
     const updated = await conversationApi.renameConversation(id, trimmed)
-    const target = conversations.value.find((item) => item.id === id)
-    if (target) target.title = updated.title
+    const target = find(id)
+    if (target) target.item.title = updated.title
   }
 
-  async function remove(id: string): Promise<void> {
+  async function remove(module: ChatModule, id: number): Promise<void> {
     await conversationApi.deleteConversation(id)
-    const index = conversations.value.findIndex((item) => item.id === id)
-    if (index === -1) return
-    const [removed] = conversations.value.splice(index, 1)
-    const module = removed.module
     if (activeByModule.value[module] === id) {
-      activeByModule.value[module] = listOf(module)[0]?.id ?? ''
+      activeByModule.value[module] = null
     }
+    // 删除后刷新列表，ensureActive 会切换到新的第一项
+    await load(module, 1)
   }
 
-  function touch(id: string): void {
-    const target = conversations.value.find((item) => item.id === id)
-    if (target) target.updatedAt = Date.now()
+  function select(module: ChatModule, id: number): void {
+    activeByModule.value[module] = id
   }
 
   return {
-    conversations,
+    states,
     activeByModule,
-    loading,
+    stateOf,
     listOf,
+    hasMore,
+    ensureLoaded,
     load,
-    select,
+    loadMore,
     create,
     rename,
     remove,
-    touch,
+    select,
   }
 })

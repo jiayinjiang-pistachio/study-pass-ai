@@ -7,8 +7,21 @@ import { useNoteStore } from '@/stores/note'
 const noteStore = useNoteStore()
 const { notes, activeNoteId, loading } = storeToRefs(noteStore)
 
-function handleExport(id: string): void {
-  const target = notes.value.find((item) => item.id === id)
+function handleSelect(id: string | number): void {
+  noteStore.select(String(id))
+}
+
+function handleRename(id: string | number, title: string): void {
+  void noteStore.rename(String(id), title)
+}
+
+async function handleRemove(id: string | number): Promise<void> {
+  await noteStore.remove(String(id))
+}
+
+function handleExport(id: string | number): void {
+  const key = String(id)
+  const target = notes.value.find((item) => item.id === key)
   ElMessage.info(`导出「${target?.title ?? ''}」功能开发中`)
 }
 </script>
@@ -23,9 +36,9 @@ function handleExport(id: string): void {
       :icon="item.icon"
       :active="item.id === activeNoteId"
       entity-label="笔记"
-      @select="noteStore.select"
-      @rename="noteStore.rename"
-      @remove="noteStore.remove"
+      @select="handleSelect"
+      @rename="handleRename"
+      @remove="handleRemove"
       @export="handleExport"
     />
   </ul>

@@ -18,6 +18,8 @@ from .core.logging import setup_logging
 from .routers import auth as auth_router
 from .routers import file as file_router
 from .routers import health as health_router
+from .routers import interview as interview_router
+from .routers import session as session_router
 from .routers import user as user_router
 from .services import resource_cleanup
 
@@ -61,6 +63,8 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 # 按业务模块注册路由
 app.include_router(user_router.router)
 app.include_router(auth_router.router)
+app.include_router(session_router.router)
+app.include_router(interview_router.router)
 app.include_router(file_router.router)
 app.include_router(file_router.public_router)
 app.include_router(health_router.router)

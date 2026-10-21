@@ -1,7 +1,7 @@
 import { computed } from 'vue'
 import type { ComputedRef } from 'vue'
 import { useRoute } from 'vue-router'
-import type { ModuleKey } from '@/types/conversation'
+import type { ChatModule, ModuleKey } from '@/types/conversation'
 import { ModuleKey as Module } from '@/types/conversation'
 
 /**
@@ -11,4 +11,12 @@ import { ModuleKey as Module } from '@/types/conversation'
 export function useCurrentModule(): ComputedRef<ModuleKey> {
   const route = useRoute()
   return computed(() => (route.name as ModuleKey | undefined) ?? Module.Interview)
+}
+
+/** 当前模块若为会话模块（学习室 / 面试间）则返回，笔记本返回 null */
+export function useCurrentChatModule(): ComputedRef<ChatModule | null> {
+  const module = useCurrentModule()
+  return computed(() =>
+    module.value === Module.Note ? null : module.value,
+  )
 }

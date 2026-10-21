@@ -56,14 +56,14 @@ src/
 │   ├── common/       # 通用展示组件（EmptyState / LoadingDots）
 │   ├── layout/       # 顶栏相关（TopNavBar / ModuleTabs）
 │   ├── sidebar/      # 侧栏（ConversationSidebar / ConversationList / NoteList / SidebarItem）
-│   └── chat/         # 聊天区（ChatMessageList / ChatMessageItem / ChatInputBar）
+│   └── chat/         # 聊天区（ChatMessageList / ChatMessageItem / MsgFile / InterviewCard / ChatInputBar）
 ├── composables/      # 组合式函数，命名 useXxx.ts（useAutoScroll / useCurrentModule）
 ├── layouts/          # 布局组件（AppShell.vue）
-├── mock/             # 接口 Mock（仅开发环境加载，见 §7.2；index.ts / data.ts / notes.ts）
+├── mock/             # 接口 Mock（仅开发环境加载，见 §7.2；index.ts / notes.ts，会话已接真实后端）
 ├── router/           # 路由配置
 ├── stores/           # Pinia 状态（auth / conversation / chat / note）
 ├── styles/           # 全局样式与设计 token（_tokens.scss / index.scss）
-├── types/            # 全局类型定义（conversation / chat / note）
+├── types/            # 全局类型定义（api / conversation / chat / note）
 ├── utils/            # 纯工具函数（token.ts：本地令牌读写）
 ├── views/            # 页面级组件（与路由一一对应：LoginView / StudyRoom / InterviewRoom / NoteRoom）
 ├── App.vue

@@ -1,14 +1,20 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { watch } from 'vue'
 import TopNavBar from '@/components/layout/TopNavBar.vue'
 import ConversationSidebar from '@/components/sidebar/ConversationSidebar.vue'
+import { useCurrentChatModule } from '@/composables/useCurrentModule'
 import { useConversationStore } from '@/stores/conversation'
 
 const conversationStore = useConversationStore()
+const chatModule = useCurrentChatModule()
 
-onMounted(() => {
-  void conversationStore.load()
-})
+watch(
+  chatModule,
+  (module) => {
+    if (module) void conversationStore.ensureLoaded(module)
+  },
+  { immediate: true },
+)
 </script>
 
 <template>

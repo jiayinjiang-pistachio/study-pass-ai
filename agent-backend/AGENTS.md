@@ -77,17 +77,25 @@ agent-backend/
 │   │   ├── deps.py          #   路由层共享依赖：get_current_user（Bearer 鉴权）
 │   │   ├── user.py          #   用户 CRUD（整组需登录）
 │   │   ├── auth.py          #   鉴权接口：注册 / 登录 / 刷新令牌 / 当前用户
-│   │   ├── file.py          #   通用文件上传（整组需登录）
+│   │   ├── session.py       #   会话管理 + 会话内聊天消息（整组需登录）
+│   │   ├── interview.py     #   面试详情（按 interview_id + user_id）
+│   │   ├── file.py          #   通用文件上传 / 头像读取（上传需登录，头像公开）
 │   │   └── health.py        #   健康检查（存活 + 数据库连通性），路径 /health
 │   ├── schemas/             # ② 校验层，按业务模块拆分
 │   │   ├── user.py
 │   │   ├── auth.py          #   注册 / 登录 / 刷新入参 + 令牌出参（RegisterIn / LoginIn / RefreshIn / TokenOut）
+│   │   ├── session.py       #   会话入参 / 出参（SessionCreate / SessionUpdate / SessionOut / SessionListOut）
+│   │   ├── message.py       #   聊天消息出参（MessageOut / MessageListOut / SegmentOut）
+│   │   ├── interview.py     #   面试详情出参（InterviewOut，含 qa_object）
 │   │   ├── file.py          #   文件上传出参（FileOut：url / md5 / size / kind / resource_id 等）
 │   │   ├── health.py        #   健康检查出参（HealthOut）
 │   │   └── response.py      #   统一响应信封（ResponseModel / ErrorResponse / ok）
 │   ├── services/            # ③ 业务层，按业务模块拆分
 │   │   ├── user_service.py
 │   │   ├── auth_service.py  #   鉴权业务：登录校验、签发 / 刷新令牌、解析当前用户
+│   │   ├── session_service.py #  会话分页 / 创建 / 编辑 + 级联删除（含附件资源）
+│   │   ├── message_service.py #  会话消息分页查询（正文与附件段分离）
+│   │   ├── interview_service.py # 面试详情查询（interview_id + user_id 防越权）
 │   │   ├── file_type.py     #   上传文件类型识别（文件头 / 扩展名）与大小上限
 │   │   ├── upload_service.py#   旧本地磁盘上传逻辑（教学保留，运行时不使用）
 │   │   ├── upload_service_minio.py # 运行逻辑：MinIO 落对象 + resources 元数据 + 用户级去重
@@ -99,6 +107,9 @@ agent-backend/
 │       ├── models.py        #   表结构声明（User / ChatSession / ChatMessage / Interview / Resource）
 │       ├── session.py       #   engine + Session 工厂
 │       ├── user_repo.py     #   users 表读写仓储（上层唯一入口）
+│       ├── session_repo.py  #   sessions 表读写仓储（列表 / 归属校验 / 更新 / 删除）
+│       ├── message_repo.py  #   chat_messages 表读写仓储（按会话分页 / 级联清理）
+│       ├── interview_repo.py#   interviews 表读写仓储（按 id + user_id 查询 / 按会话删除）
 │       ├── resource_repo.py #   resources 表读写仓储（去重预查 / 过期扫描）
 │       └── health_repo.py   #   数据库连通性探活（SELECT 1）
 ├── alembic/                 # Alembic 迁移（versions/ 存版本脚本）
@@ -108,7 +119,9 @@ agent-backend/
 ├── tests/                   # pytest 冒烟测试（连真实 MySQL，见 §9）
 │   ├── conftest.py          #   进程内 ASGI 客户端 + 测试数据清理 + 鉴权夹具
 │   ├── test_smoke.py        #   健康检查 + 用户 CRUD 冒烟用例（CRUD 需鉴权）
-│   └── test_auth.py         #   鉴权冒烟用例（注册 / 登录 / 刷新 / me / 文件上传）
+│   ├── test_auth.py         #   鉴权冒烟用例（注册 / 登录 / 刷新 / me / 文件上传）
+│   ├── test_sessions.py     #   会话 / 消息 / 面试详情 / 级联删除用例
+│   └── test_resources.py    #   过期资源清理用例
 ├── alembic.ini              # Alembic 配置（连接串留空，由 env.py 注入）
 ├── pytest.ini               # pytest 配置（asyncio_mode=auto、pythonpath=.）
 ├── .env.example             # 基础环境变量模板（真实 .env 被 gitignore）
@@ -214,12 +227,25 @@ agent-backend/
   | 刷新令牌 | `POST /api/auth/refresh` | `200` |
   | 当前用户 | `GET /api/auth/me` | `200` |
   | 上传文件 | `POST /api/files` | `200` |
+  | 会话列表（分页） | `GET /api/sessions?page=&page_size=` | `200` |
+  | 创建会话 | `POST /api/sessions` | `200` |
+  | 编辑会话标题 | `PUT /api/sessions/{session_id}` | `200` |
+  | 删除会话（级联） | `DELETE /api/sessions/{session_id}` | `200` |
+  | 会话消息（分页） | `GET /api/sessions/{session_id}/messages?page=&page_size=` | `200` |
+  | 面试详情 | `GET /api/interviews/{interview_id}` | `200` |
 
   > 统一信封下成功一律 `200`：删除不用 `204`（无响应体，前端无法解析信封）；新增不用 `201`（避免 body.code 与 HTTP 状态码不一致）。
 
 - **鉴权约定**：除注册 / 登录 / 刷新 / 健康检查外，接口需携带 `Authorization: Bearer <access_token>`；令牌缺失 / 过期 / 非法 / 类型不符一律返回 `401`（由 `core/security.decode_token` 与 `routers/deps.get_current_user` 抛 `BusinessException(401)`）。**刷新令牌只能用于 `/api/auth/refresh`**，不能访问受保护接口（`type` 声明区分）；访问令牌过期时由前端调 `/api/auth/refresh` 换新令牌后重试原请求。令牌为无状态 JWT，**暂不支持主动吊销 / 登出**（后续需要再引入黑名单或落库）。
 - **注册接口安全约定**（`POST /api/auth/register`）：复用 `user_service.create_user`（bcrypt 哈希，禁止明文入库）；弱密码（黑名单 / 缺字母 / 缺数字 / 含用户名）由**校验层** `schemas/auth.py` 拦截 → `422`；接口限流由 `core/rate_limit.py` 的依赖实现（固定窗口 + IP 维度，默认 5 次/min），超限抛 `BusinessException(429)`。限流为**进程内内存**实现，仅单机有效，多实例部署需换共享存储。
 - **通用文件上传约定**（`POST /api/files`）：`multipart/form-data`，字段 `file`，**需登录**；可选表单字段 `upload_purpose`（0=普通资源 / 1=用户头像，默认 0）与 `storage_scene`（0=长期 30 天 / 1=短期 2 小时 / 2=只提取内容不存原文件，默认 0）。服务端按文件头识别图片（JPG / PNG / WebP / GIF）、文档（PDF / Office / txt / md / csv / rtf / json）与音频（MP3 / WAV / OGG / OPUS / M4A / AAC / FLAC / WebM）；类型不在白名单或文件头不符 `422`，图片超 2MB（`AVATAR_MAX_BYTES`）或文档 / 音频超 10MB（`FILE_MAX_BYTES`）返回 `413`。**元数据写 `resources` 表，原文件落 MinIO**：对象 key 为 `users/{user_id}/{MD5}{ext}`，`storage_path` 格式 `minio:/{bucket}/{object_key}`；`(file_hash, user_id)` 唯一键实现用户级去重（先查库，数据库唯一键兜底）。仅 `upload_purpose=1` 且为图片时更新 `users.avatar`（库里存 `storage_path`）。对外响应中的 `avatar` 由校验层转成公开读取地址 `/api/files/avatar/{user_id}?v={md5}`（`v` 用于头像更新后失效缓存）。`storage_scene=2` 只写元数据、不上传对象（`storage_path` 为空串）。响应返回 `{url, md5, size, kind, resource_id, storage_path, expire_time}`。过期资源由 `resource_cleanup` 每天 03:00 先删 MinIO 对象、再删元数据。
+- **会话与聊天消息约定**：
+  - 会话整组接口（`/api/sessions`、`/api/sessions/{id}/messages`）需登录，所有查询按令牌中的 `user_id` 隔离；资源不存在或不属于当前用户一律 `404`（不区分「不存在」与「无权限」，避免泄露）。
+  - 创建会话入参 `title` + `session_mode`（0=学习，1=面试，2=笔记），同时兼容需求文档字段名 `session_model`（`AliasChoices`）；出参不暴露 `user_id`。
+  - 分页统一 `{items,total,page,page_size}`：`page ≥ 1`、`page_size` 1..100；会话按 `created_at DESC, id DESC`，消息按 `created_at ASC, id ASC`。
+  - `chat_messages` 语义：**聊天正文在 `request_text` / `response_text`**；`request_segments` / `response_segments` **只存附件段**（`{type: file|image|audio, resource_id, file_name?, url?}`），AI 回复文本始终进 `response_text`。消息出参还包含 `status`（0=生成中，1=完成，2=失败）与 `interview_id`（普通聊天为 `null`），供前端面试卡片逻辑使用。
+  - **级联删除**（`DELETE /api/sessions/{id}`）：先解析消息附件段收集 `resource_id`，再按 `interviews → chat_messages → sessions` 的依赖顺序删库；最后仅删除当前用户自己的 `resources` 元数据与 MinIO 对象（先删对象、成功后再删元数据，失败则保留元数据交给过期清理重试）。
+- **面试记录约定**：`interviews.user_id` 记录归属；`GET /api/interviews/{interview_id}` 必须按 `interview_id + user_id` 查询，返回含 `qa_object` 的详情，防止越权读取他人面试记录。
 - **系统接口 / 静态资源**：`GET /health`（运维探活）与 `/uploads/*`（旧版本地文件静态访问，由 `main.py` 挂载）**有意不挂 `/api` 前缀**：前者校验服务存活 + 数据库连通性，正常 `200`、数据库异常 `503`（由 `health_service` 抛 `SystemException(503)`）；后者仅兼容历史上已落盘的头像/文件，新上传统一走 MinIO。这是对「路径以 `/api` 开头」的例外，新增此类端点需在本文档登记。
 - **头像读取例外**：`GET /api/files/avatar/{user_id}` **无需鉴权且返回二进制**（不是统一信封），因为浏览器 `<img src>` 不会携带 `Authorization` 头；供头像展示使用，按 user_id 只暴露头像对象，不暴露其他资源。
 - 每个路由**必须声明 `response_model`**，出参信封用 `ResponseModel[XxxOut]`（列表用 `ResponseModel[list[XxxOut]]`），保证出参被裁剪且有文档。
@@ -237,6 +263,7 @@ agent-backend/
 - 上层（services）只能通过 `app/db/xxx_repo.py` 暴露的函数读写，**禁止直接访问 Session / ORM 对象**。
 - `db` 层对外返回记录**副本**（普通 `dict`），不把会话内 ORM 对象交给调用方。
 - 更换存储实现时，**只改 `db/` 层**，上层调用签名保持不变。
+- `chat_messages` 的附件段用 MySQL `JSON` 列存储（`request_segments` / `response_segments`，可为 `NULL`），正文不入 JSON；`status` 为 `Integer`（0/1/2），`interview_id` 为可空 `BigInteger`（**不建外键**，避免与 `interviews.message_id` 形成循环依赖）。`interviews.user_id` 必填并建索引，所有详情查询必须同时带 `interview_id` 与 `user_id`。
 
 ---
 

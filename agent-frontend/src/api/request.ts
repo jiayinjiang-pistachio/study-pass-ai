@@ -45,6 +45,8 @@ export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE'
 export interface RequestOptions {
   method?: HttpMethod
   body?: unknown
+  /** 查询参数（undefined 由 axios 自动忽略） */
+  params?: Record<string, string | number | boolean | undefined>
   /** 是否自动携带令牌并处理 401 续期，默认开启 */
   auth?: boolean
   /** 是否关闭全局错误提示（调用方自行处理时使用） */
@@ -222,13 +224,14 @@ http.interceptors.response.use(
  * 清理本地令牌并跳转登录页。
  */
 export async function request<T>(url: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, auth = true, silent = false } = options
+  const { method = 'GET', body, params, auth = true, silent = false } = options
   const skipAuth = !auth || AUTH_FREE_PATHS.some((path) => url.startsWith(path))
 
   const response = await http.request<ApiEnvelope<T>, AxiosResponse<T>>({
     url,
     method,
     data: body,
+    params,
     skipAuth,
     silent,
   })

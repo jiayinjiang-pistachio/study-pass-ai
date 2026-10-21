@@ -8,7 +8,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
  * 只负责展示与交互，具体的数据操作由父组件监听事件后调用对应 store。
  */
 const props = defineProps<{
-  id: string
+  id: string | number
   title: string
   icon: string
   active: boolean
@@ -17,10 +17,10 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  select: [id: string]
-  rename: [id: string, title: string]
-  remove: [id: string]
-  export: [id: string]
+  select: [id: string | number]
+  rename: [id: string | number, title: string]
+  remove: [id: string | number]
+  export: [id: string | number]
 }>()
 
 const editing = ref(false)

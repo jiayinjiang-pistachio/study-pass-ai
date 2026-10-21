@@ -1,53 +1,91 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { storeToRefs } from 'pinia'
-import { ArrowDown, Service } from '@element-plus/icons-vue'
+import { computed, nextTick, ref, watch } from 'vue'
+import { ArrowDown } from '@element-plus/icons-vue'
 import ChatMessageItem from './ChatMessageItem.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
-import LoadingDots from '@/components/common/LoadingDots.vue'
 import { useAutoScroll } from '@/composables/useAutoScroll'
-import { useCurrentModule } from '@/composables/useCurrentModule'
+import { useCurrentChatModule } from '@/composables/useCurrentModule'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
+import type { ChatMessage } from '@/types/chat'
+
+/** 常量空数组，避免 computed 每次返回新引用触发无意义的 watch */
+const EMPTY_MESSAGES: ChatMessage[] = []
 
 const chatStore = useChatStore()
 const conversationStore = useConversationStore()
-const { messagesMap, loading, replying } = storeToRefs(chatStore)
-const module = useCurrentModule()
+const module = useCurrentChatModule()
 
 const scroller = ref<HTMLElement | null>(null)
 
-const activeConversationId = computed(() => conversationStore.activeByModule[module.value])
-const messages = computed(() => messagesMap.value[activeConversationId.value] ?? [])
+const activeSessionId = computed(() =>
+  module.value ? conversationStore.activeByModule[module.value] : null,
+)
+const state = computed(() =>
+  activeSessionId.value ? chatStore.stateOf(activeSessionId.value) : null,
+)
+const messages = computed(() => state.value?.items ?? EMPTY_MESSAGES)
+const loading = computed(() => state.value?.loading ?? false)
+const loadingOlder = computed(() => state.value?.loadingOlder ?? false)
+const hasActiveSession = computed(() => activeSessionId.value !== null)
 
-const { showScrollToBottom, scrollToBottom } = useAutoScroll(scroller, () => messages.value)
+const { showScrollToBottom, scrollToBottom } = useAutoScroll(
+  scroller,
+  () => messages.value,
+)
 
 watch(
-  activeConversationId,
-  (id) => {
-    if (id) void chatStore.loadMessages(id)
+  activeSessionId,
+  async (id) => {
+    if (id === null) return
+    await chatStore.loadLatest(id)
+    await nextTick()
+    scrollToBottom('auto')
   },
   { immediate: true },
 )
+
+/** 距离顶部 10px 内触发上拉分页，并保持当前视口位置不跳动 */
+async function handleScroll(): Promise<void> {
+  const el = scroller.value
+  const id = activeSessionId.value
+  if (!el || id === null || el.scrollTop > 10) return
+
+  const current = chatStore.stateOf(id)
+  if (current.loadingOlder || current.page <= 1) return
+
+  const heightBefore = el.scrollHeight
+  const topBefore = el.scrollTop
+  const added = await chatStore.loadOlder(id)
+  if (!added) return
+
+  await nextTick()
+  el.scrollTop = topBefore + (el.scrollHeight - heightBefore)
+}
 </script>
 
 <template>
-  <div ref="scroller" v-loading="loading" class="chat-list scroll-area">
+  <div
+    ref="scroller"
+    v-loading="loading"
+    class="chat-list scroll-area"
+    @scroll.passive="handleScroll"
+  >
     <div class="chat-list__inner">
+      <p v-if="loadingOlder" class="chat-list__older">加载更早消息…</p>
+
       <template v-if="messages.length">
         <ChatMessageItem v-for="item in messages" :key="item.id" :message="item" />
-
-        <div v-if="replying" class="chat-list__typing">
-          <span class="chat-list__typing-avatar">
-            <el-icon><Service /></el-icon>
-          </span>
-          <div class="chat-list__typing-bubble">
-            <LoadingDots />
-          </div>
-        </div>
       </template>
 
-      <EmptyState v-else-if="!loading" description="开始你的第一句话吧" />
+      <EmptyState
+        v-else-if="!loading && hasActiveSession"
+        description="暂无聊天记录"
+      />
+      <EmptyState
+        v-else-if="!loading"
+        description="暂无会话，点击左侧「新建会话」开始"
+      />
     </div>
 
     <Transition name="fade">
@@ -79,32 +117,12 @@ watch(
     padding: 28px 24px 12px;
   }
 
-  &__typing {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
-  &__typing-avatar {
-    flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: var(--avatar-size);
-    height: var(--avatar-size);
-    border-radius: 50%;
-    background: #3b82f6;
-    color: #fff;
-    font-size: 20px;
-  }
-
-  &__typing-bubble {
-    display: flex;
-    align-items: center;
-    padding: 12px 18px;
-    border-radius: var(--radius-bubble);
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
+  &__older {
+    margin: 0;
+    padding: 4px 0;
+    text-align: center;
+    font-size: 12px;
+    color: var(--color-text-muted);
   }
 
   &__to-bottom {

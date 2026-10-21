@@ -80,6 +80,17 @@ class ChatMessage(Base):
     request_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     request_text: Mapped[str] = mapped_column(MEDIUMTEXT, nullable=False)
     response_text: Mapped[str] = mapped_column(MEDIUMTEXT, nullable=False)
+    # 只存附件段（file / image / audio）；聊天正文始终在 request_text / response_text
+    request_segments: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    response_segments: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    # 0=生成中，1=完成，2=失败；前端据此展示消息状态
+    status: Mapped[int] = mapped_column(
+        Integer, server_default=text("0"), nullable=False
+    )
+    # 该消息关联的面试记录；普通聊天为 NULL（不建外键，避免与 interviews.message_id 循环依赖）
+    interview_id: Mapped[int | None] = mapped_column(
+        BigInteger, index=True, nullable=True
+    )
     # 从附件中提取的完整文本，作为后续对话上下文；无附件或无法提取时为 NULL
     file_extracted_text: Mapped[str | None] = mapped_column(MEDIUMTEXT, nullable=True)
     created_at: Mapped[int] = mapped_column(
@@ -99,6 +110,8 @@ class Interview(Base):
     __tablename__ = "interviews"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # 归属用户：查询面试详情时必须同时校验 interview_id + user_id
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     session_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("sessions.id"), nullable=False
     )

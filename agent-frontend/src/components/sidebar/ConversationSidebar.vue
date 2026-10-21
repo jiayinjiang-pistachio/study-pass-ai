@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
 import ConversationList from './ConversationList.vue'
 import NoteList from './NoteList.vue'
-import { useCurrentModule } from '@/composables/useCurrentModule'
+import { useCurrentChatModule, useCurrentModule } from '@/composables/useCurrentModule'
 import { useConversationStore } from '@/stores/conversation'
 import { useNoteStore } from '@/stores/note'
 import { ModuleKey } from '@/types/conversation'
@@ -11,6 +11,7 @@ import { ModuleKey } from '@/types/conversation'
 const conversationStore = useConversationStore()
 const noteStore = useNoteStore()
 const module = useCurrentModule()
+const chatModule = useCurrentChatModule()
 
 const isNote = computed(() => module.value === ModuleKey.Note)
 const createLabel = computed(() => (isNote.value ? '新建笔记' : '新建会话'))
@@ -19,8 +20,8 @@ const listLabel = computed(() => (isNote.value ? '历史笔记' : '历史会话'
 async function handleCreate(): Promise<void> {
   if (isNote.value) {
     await noteStore.create()
-  } else {
-    await conversationStore.create(module.value)
+  } else if (chatModule.value) {
+    await conversationStore.create(chatModule.value)
   }
 }
 </script>

@@ -1,24 +1,14 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
-import { storeToRefs } from 'pinia'
+import { computed, ref } from 'vue'
 import { Paperclip, Promotion } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { useCurrentModule } from '@/composables/useCurrentModule'
-import { useChatStore } from '@/stores/chat'
-import { useConversationStore } from '@/stores/conversation'
 
 const MAX_HEIGHT = 120
 
-const chatStore = useChatStore()
-const conversationStore = useConversationStore()
-const { replying } = storeToRefs(chatStore)
-const module = useCurrentModule()
-
-const activeConversationId = computed(() => conversationStore.activeByModule[module.value])
 const draft = ref('')
 const fieldRef = ref<HTMLTextAreaElement | null>(null)
 
-const canSend = computed(() => draft.value.trim().length > 0 && !replying.value)
+const canSend = computed(() => draft.value.trim().length > 0)
 
 function resize(): void {
   const el = fieldRef.value
@@ -27,26 +17,13 @@ function resize(): void {
   el.style.height = `${Math.min(el.scrollHeight, MAX_HEIGHT)}px`
 }
 
-function resetField(): void {
-  draft.value = ''
-  nextTick(() => {
-    const el = fieldRef.value
-    if (el) el.style.height = 'auto'
-  })
-}
-
 function handleAttach(): void {
   ElMessage.info('附件上传功能开发中')
 }
 
-async function handleSend(): Promise<void> {
-  const conversationId = activeConversationId.value
-  const content = draft.value.trim()
-  if (!content || !conversationId || replying.value) return
-
-  resetField()
-  conversationStore.touch(conversationId)
-  await chatStore.send(conversationId, content)
+function handleSend(): void {
+  if (!canSend.value) return
+  ElMessage.info('发送功能开发中')
 }
 </script>
 

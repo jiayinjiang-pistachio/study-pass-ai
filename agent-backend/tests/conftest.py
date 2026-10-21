@@ -17,7 +17,13 @@ import pytest_asyncio
 
 from app.core import minio_client, rate_limit
 from app.core.security import hash_password
-from app.db import resource_repo, user_repo
+from app.db import (
+    interview_repo,
+    message_repo,
+    resource_repo,
+    session_repo,
+    user_repo,
+)
 from app.main import app
 
 # 本轮测试运行唯一的前缀，用于精确清理测试期间创建的用户
@@ -73,6 +79,24 @@ async def auth_headers(client: httpx.AsyncClient, auth_user: dict) -> dict:
     return {"Authorization": f"Bearer {access_token}"}
 
 
+@pytest_asyncio.fixture
+async def other_auth(
+    client: httpx.AsyncClient, auth_user: dict
+) -> tuple[dict, dict]:
+    """造第二个测试用户并登录，返回 (user, headers)，用于越权隔离用例。"""
+    name = f"{TEST_PREFIX}other_{uuid.uuid4().hex[:6]}"
+    user = user_repo.insert(
+        {"username": name, "password": hash_password(TEST_PASSWORD)}
+    )
+    resp = await client.post(
+        "/api/auth/login",
+        json={"username": name, "password": TEST_PASSWORD},
+    )
+    assert resp.status_code == 200, resp.text
+    token = resp.json()["data"]["access_token"]
+    return user, {"Authorization": f"Bearer {token}"}
+
+
 @pytest.fixture(scope="session")
 def minio_ready() -> None:
     """上传用例依赖真实 MinIO；不可用时跳过，不误报失败。"""
@@ -89,6 +113,11 @@ def cleanup_users() -> None:
     for user in user_repo.list_all():
         if not user["username"].startswith(TEST_PREFIX):
             continue
+        # 会话级联数据先清：interviews 依赖 chat_messages.message_id
+        for session in session_repo.list_all_for_user(user["id"]):
+            interview_repo.delete_by_session(session["id"])
+            message_repo.delete_by_session(session["id"])
+            session_repo.delete(session["id"])
         for resource in resource_repo.list_by_user(user["id"]):
             try:
                 key = (

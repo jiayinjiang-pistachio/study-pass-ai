@@ -58,26 +58,44 @@ app/
 │   ├── deps.py               # ① 路由层共享依赖：get_current_user（Bearer 鉴权）
 │   ├── user.py               #   用户 CRUD（整组需登录）
 │   ├── auth.py               #   注册 / 登录 / 刷新令牌 / 当前用户
+│   ├── session.py            #   会话管理 + 会话内消息（整组需登录）
+│   ├── interview.py          #   面试详情（按 interview_id + user_id）
+│   ├── file.py               #   文件上传 / 头像读取
 │   └── health.py             #   健康检查（存活 + 数据库连通性）
 ├── schemas/
 │   ├── user.py               # ② 校验层：Pydantic v2 请求 / 响应模型
 │   ├── auth.py               #   注册 / 登录 / 刷新入参 + 令牌出参
+│   ├── session.py            #   会话入参 / 出参
+│   ├── message.py            #   聊天消息出参（正文 + 附件段）
+│   ├── interview.py          #   面试详情出参（含 qa_object）
+│   ├── file.py               #   文件上传出参
 │   ├── health.py             #   健康检查出参
 │   └── response.py           # 统一响应信封
 ├── services/
 │   ├── user_service.py       # ③ 业务层：业务规则
 │   ├── auth_service.py       #   鉴权业务：登录校验、签发 / 刷新令牌、解析当前用户
+│   ├── session_service.py    #   会话分页 / 创建 / 编辑 + 级联删除
+│   ├── message_service.py    #   会话消息分页（正文与附件段分离）
+│   ├── interview_service.py  #   面试详情（interview_id + user_id）
+│   ├── upload_service_minio.py # 文件上传（MinIO + resources 元数据）
+│   ├── resource_cleanup.py   #   过期资源清理
 │   └── health_service.py     #   健康检查：数据库探活，异常转 503
 └── db/                       # ④ 数据库层：SQLAlchemy 2.0 + MySQL
     ├── base.py               #   ORM 基类
-    ├── models.py             #   表结构声明（User / ChatSession / ChatMessage / Interview）
+    ├── models.py             #   表结构声明（User / ChatSession / ChatMessage / Interview / Resource）
     ├── session.py            #   engine + Session 工厂
-    ├── user_repo.py          #   users 表读写仓储（上层唯一入口）
+    ├── user_repo.py          #   users 表读写仓储
+    ├── session_repo.py       #   sessions 表读写仓储
+    ├── message_repo.py       #   chat_messages 表读写仓储
+    ├── interview_repo.py     #   interviews 表读写仓储
+    ├── resource_repo.py      #   resources 表读写仓储
     └── health_repo.py        #   数据库连通性探活（SELECT 1）
 
 alembic/                      # 迁移脚本（versions/ 存版本）
 scripts/db_sync.sh            # 一键生成迁移并同步
 tests/                        # pytest 冒烟测试（连真实 MySQL）
+├── test_sessions.py          #   会话 / 消息 / 面试详情 / 级联删除
+└── test_resources.py         #   过期资源清理
 ```
 
 ## 测试
@@ -87,7 +105,7 @@ tests/                        # pytest 冒烟测试（连真实 MySQL）
 ```bash
 pip install -r requirements-dev.txt          # 测试依赖（pytest / httpx / pytest-asyncio）
 alembic upgrade head                         # 确保测试库已建表
-pytest tests/test_smoke.py -v                # 运行冒烟测试
+pytest tests/ -v                             # 运行全部测试（含会话 / 资源清理）
 ```
 
 > 测试连 `.env` 里的真实 MySQL，创建的用户带 `smoke_*` 前缀并在用例后自动清理；如需隔离，把 `MYSQL_URL` 指向独立的测试库。
@@ -107,6 +125,12 @@ pytest tests/test_smoke.py -v                # 运行冒烟测试
 | GET | `/api/auth/me` | 当前登录用户 | 200 |
 | POST | `/api/files` | 通用文件上传（multipart，字段 `file`，可选 `upload_purpose` / `storage_scene`） | 200 |
 | GET | `/api/files/avatar/{id}` | 读取用户头像（公开，返回图片二进制，供 `<img>` 直接访问） | 200 |
+| GET | `/api/sessions?page=&page_size=` | 当前用户会话列表（分页，按创建时间倒序） | 200 |
+| POST | `/api/sessions` | 创建会话（`title` + `session_mode`，兼容 `session_model`） | 200 |
+| PUT | `/api/sessions/{id}` | 编辑会话标题 | 200 |
+| DELETE | `/api/sessions/{id}` | 级联删除会话（消息 / 面试 / 附件资源与 MinIO 对象） | 200 |
+| GET | `/api/sessions/{id}/messages?page=&page_size=` | 会话消息分页（正文 + 附件段 + status/interview_id） | 200 |
+| GET | `/api/interviews/{id}` | 面试详情（含 `qa_object`，按 id + 当前用户查询） | 200 |
 
 不带 `/api` 前缀的端点：`GET /health`（存活 + 数据库连通性探活）与 `/uploads/*`（旧版本地头像的静态访问，新上传统一走 MinIO）。
 
@@ -162,6 +186,35 @@ curl -X POST http://127.0.0.1:8000/api/auth/refresh \
 
 - 刷新令牌**只能**用于 `/api/auth/refresh`，不能访问受保护接口（`type` 声明区分）；访问令牌过期时，前端应调 `/api/auth/refresh` 换新令牌并自动重试原请求。
 - 令牌为无状态 JWT，**暂不支持主动吊销 / 登出**（后续需要再引入黑名单或落库）。
+
+### 会话与聊天消息
+
+```bash
+# 创建会话（session_model 为兼容旧文档的等价字段名）
+curl -X POST http://127.0.0.1:8000/api/sessions \
+  -H "Authorization: Bearer <access_token>" -H 'Content-Type: application/json' \
+  -d '{"title":"Python 学习","session_mode":0}'
+
+# 会话列表 / 编辑标题 / 删除（级联清理消息、面试、附件资源与 MinIO 对象）
+curl "http://127.0.0.1:8000/api/sessions?page=1&page_size=20" -H "Authorization: Bearer <access_token>"
+curl -X PUT http://127.0.0.1:8000/api/sessions/1 -H "Authorization: Bearer <access_token>" \
+  -H 'Content-Type: application/json' -d '{"title":"新标题"}'
+curl -X DELETE http://127.0.0.1:8000/api/sessions/1 -H "Authorization: Bearer <access_token>"
+
+# 会话消息（按时间正序分页）
+curl "http://127.0.0.1:8000/api/sessions/1/messages?page=1&page_size=20" \
+  -H "Authorization: Bearer <access_token>"
+# → items: [{id, request_text, response_text, request_segments, response_segments,
+#            status, interview_id, created_at}]
+
+# 面试详情（含 qa_object；只能查自己的记录）
+curl http://127.0.0.1:8000/api/interviews/1 -H "Authorization: Bearer <access_token>"
+```
+
+- **正文与附件分离**：`request_text` / `response_text` 是聊天正文；`request_segments` / `response_segments` 只存附件段 `{type: file|image|audio, resource_id, file_name?, url?}`。AI 回复的文本始终进 `response_text`，附件进 `response_segments`。
+- **消息状态**：`status` 0=生成中、1=完成、2=失败；`interview_id` 指向关联面试记录（普通聊天为 `null`），供前端渲染面试卡片。
+- **用户隔离**：会话、消息、面试详情均按令牌中的 `user_id` 查询，他人的资源统一返回 `404`。
+- **级联删除**：解析消息附件段收集 `resource_id`，按 `interviews → chat_messages → sessions` 顺序删库，再删除当前用户自己的 `resources` 元数据与 MinIO 对象（先删对象，失败则保留元数据等待过期清理重试）。
 
 ### 统一响应信封
 
