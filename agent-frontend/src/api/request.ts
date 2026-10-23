@@ -118,7 +118,8 @@ function redirectToLogin(): void {
     })
 }
 
-function handleAuthExpired(message: string): void {
+/** 清理令牌并跳转登录页；供 axios 拦截器与 SSE 流式请求共用。 */
+export function handleAuthExpired(message: string): void {
   clearTokens()
   notifyError(message)
   redirectToLogin()
@@ -127,7 +128,7 @@ function handleAuthExpired(message: string): void {
 let refreshPromise: Promise<string> | null = null
 
 /** 刷新令牌去重：并发 401 只发起一次刷新，其余请求等待同一个结果 */
-function refreshAccessToken(): Promise<string> {
+export function refreshAccessToken(): Promise<string> {
   if (!refreshPromise) {
     refreshPromise = (async () => {
       const refreshToken = getRefreshToken()

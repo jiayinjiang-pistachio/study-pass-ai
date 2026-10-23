@@ -6,11 +6,14 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
+from ..schemas.chat import StreamChatIn
 from ..schemas.message import MessageListOut
 from ..schemas.response import ResponseModel, ok
 from ..schemas.session import SessionCreate, SessionListOut, SessionOut, SessionUpdate
-from ..services import message_service, session_service
+from ..services import chat_service, message_service, session_service
 from .deps import get_current_user
 
 router = APIRouter(
@@ -86,6 +89,36 @@ def delete_session(
     """级联删除会话、消息、面试记录，以及消息附件引用的资源和 MinIO 对象。"""
     session_service.delete_session(current_user["id"], session_id)
     return ok(None)
+
+
+@router.post(
+    "/{session_id}/stream-chat",
+    response_class=StreamingResponse,
+    summary="流式对话（SSE）",
+)
+async def stream_chat(
+    session_id: int,
+    payload: StreamChatIn,
+    current_user: dict = Depends(get_current_user),
+) -> StreamingResponse:
+    """一问一答的流式生成，返回 text/event-stream。
+
+    事件依次为 meta → delta* → done；生成失败时以 error 收尾。
+    会话不存在、附件越权在建立流之前返回标准错误信封。
+    """
+    state = await run_in_threadpool(
+        chat_service.prepare_stream, current_user["id"], session_id, payload
+    )
+    return StreamingResponse(
+        chat_service.stream_reply(state),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # 关闭 Nginx 等反向代理的缓冲，保证增量事件实时下发
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get(

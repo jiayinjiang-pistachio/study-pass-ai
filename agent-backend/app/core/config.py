@@ -106,6 +106,70 @@ MINIO_SECURE: bool = os.getenv("MINIO_SECURE", "false").strip().lower() in {
 }
 
 
+# ---- AI 对话配置（OpenAI 兼容协议）----
+# provider 只影响 base_url 默认值；任意兼容 OpenAI 协议的服务也可用 LLM_BASE_URL 显式指定。
+LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+LLM_MODEL: str | None = os.getenv("LLM_MODEL")
+LLM_API_KEY: str | None = os.getenv("LLM_API_KEY")
+LLM_BASE_URL: str | None = os.getenv("LLM_BASE_URL")
+LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "60"))
+LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "1"))
+
+# 记忆层：取最近 N 轮（一问一答为一轮）已完成消息作为上下文
+MEMORY_MAX_TURNS: int = int(os.getenv("MEMORY_MAX_TURNS", "10"))
+# 单条历史消息注入上下文的最大字符数：附件提取文本可能很长，超限截断避免撑爆上下文
+MEMORY_MESSAGE_MAX_CHARS: int = int(os.getenv("MEMORY_MESSAGE_MAX_CHARS", "4000"))
+
+_PROVIDER_BASE_URLS = {
+    "openai": "https://api.openai.com/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "moonshot": "https://api.moonshot.cn/v1",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+}
+
+
+class LLMConfig(NamedTuple):
+    """大模型连接参数（OpenAI 兼容协议）。"""
+
+    provider: str
+    model: str
+    api_key: str
+    base_url: str
+    temperature: float
+    timeout: float
+    max_retries: int
+
+
+def get_llm_config() -> LLMConfig:
+    """返回大模型配置；缺失时立即报错（与 get_mysql_url 一致）。
+
+    延迟到调用时校验，而不是启动即失败：未配置 AI 密钥时其他接口仍应可用，
+    只有流式对话接口返回 503。
+    """
+    if not LLM_API_KEY:
+        raise RuntimeError("环境变量 LLM_API_KEY 未配置，流式对话接口不可用")
+    if not LLM_MODEL:
+        raise RuntimeError("环境变量 LLM_MODEL 未配置（如 deepseek-chat / gpt-4o-mini）")
+
+    base_url = LLM_BASE_URL or _PROVIDER_BASE_URLS.get(LLM_PROVIDER)
+    if not base_url:
+        raise RuntimeError(
+            f"未知的 LLM_PROVIDER={LLM_PROVIDER}，请配置 LLM_BASE_URL"
+        )
+
+    return LLMConfig(
+        provider=LLM_PROVIDER,
+        model=LLM_MODEL,
+        api_key=LLM_API_KEY,
+        base_url=base_url.rstrip("/"),
+        temperature=LLM_TEMPERATURE,
+        timeout=LLM_TIMEOUT,
+        max_retries=LLM_MAX_RETRIES,
+    )
+
+
 class MinioConfig(NamedTuple):
     """MinIO 客户端连接参数。"""
 

@@ -26,6 +26,7 @@ uvicorn app.main:app --reload --port 8000
 
 - Swagger UI：http://127.0.0.1:8000/docs
 - 健康检查：`GET /health`（存活 + 数据库连通性；数据库异常返回 503）
+- 流式对话需在 `.env` 中配置 `LLM_PROVIDER / LLM_MODEL / LLM_API_KEY`（OpenAI 兼容协议，可选 `LLM_BASE_URL`）；未配置时仅该接口返回 503，其他接口不受影响。
 
 ## 数据库迁移（Alembic）
 
@@ -130,6 +131,7 @@ pytest tests/ -v                             # 运行全部测试（含会话 / 
 | PUT | `/api/sessions/{id}` | 编辑会话标题 | 200 |
 | DELETE | `/api/sessions/{id}` | 级联删除会话（消息 / 面试 / 附件资源与 MinIO 对象） | 200 |
 | GET | `/api/sessions/{id}/messages?page=&page_size=` | 会话消息分页（正文 + 附件段 + status/interview_id） | 200 |
+| POST | `/api/sessions/{id}/stream-chat` | 流式对话（SSE：meta → delta* → done / error） | 200 |
 | GET | `/api/interviews/{id}` | 面试详情（含 `qa_object`，按 id + 当前用户查询） | 200 |
 
 不带 `/api` 前缀的端点：`GET /health`（存活 + 数据库连通性探活）与 `/uploads/*`（旧版本地头像的静态访问，新上传统一走 MinIO）。
@@ -215,6 +217,32 @@ curl http://127.0.0.1:8000/api/interviews/1 -H "Authorization: Bearer <access_to
 - **消息状态**：`status` 0=生成中、1=完成、2=失败；`interview_id` 指向关联面试记录（普通聊天为 `null`），供前端渲染面试卡片。
 - **用户隔离**：会话、消息、面试详情均按令牌中的 `user_id` 查询，他人的资源统一返回 `404`。
 - **级联删除**：解析消息附件段收集 `resource_id`，按 `interviews → chat_messages → sessions` 顺序删库，再删除当前用户自己的 `resources` 元数据与 MinIO 对象（先删对象，失败则保留元数据等待过期清理重试）。
+
+### 流式对话（SSE）
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/api/sessions/1/stream-chat \
+  -H "Authorization: Bearer <access_token>" -H 'Content-Type: application/json' \
+  -d '{"request_text":"解释一下 Python GIL","select_mode":1}'
+```
+
+事件顺序（每行 `data` 均为 JSON）：
+
+```text
+event: meta
+data: {"session_id":1,"message_id":12,"request_id":"..."}
+
+event: delta
+data: {"content":"GIL 是"}
+
+event: done
+data: {"message_id":12,"status":1}
+```
+
+- 校验与用户消息落库在建立流之前完成：`404 / 422 / 503` 仍返回标准 JSON 信封；流开始后失败以 `event: error` 返回（`{code, message}`），已生成的部分内容会保留。
+- 落库语义：用户消息先写入 `status=0`；成功后回写 `response_text` 并置 `status=1`；模型失败或客户端断开时保留部分内容并置 `status=2`。
+- AI 代码分三层：`app/services/ai/llm.py`（provider → 模型实例）、`prompt_layer.py`（系统提示词与链路组装）、`memory.py`（数据库多轮历史 → 上下文）；`chat_service.py` 负责编排与 SSE 输出。
+- 记忆层只取最近 `MEMORY_MAX_TURNS` 轮 `status=1` 的消息，单条超过 `MEMORY_MESSAGE_MAX_CHARS` 截断，`file_extracted_text` 非空时拼入对应用户消息。
 
 ### 统一响应信封
 

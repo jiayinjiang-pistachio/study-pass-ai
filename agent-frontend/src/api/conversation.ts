@@ -1,8 +1,12 @@
-import { request } from './request'
+import { ApiError, handleAuthExpired, refreshAccessToken, request } from './request'
 import type { PageResult } from '@/types/api'
 import type { ChatMessage, MessageSegment, SegmentType } from '@/types/chat'
 import type { ChatModule, Conversation } from '@/types/conversation'
 import { MODULE_ICONS, ModuleKey, SESSION_MODE_BY_MODULE } from '@/types/conversation'
+import { readSse } from '@/utils/sse'
+import { getAccessToken } from '@/utils/token'
+
+const API_PREFIX = import.meta.env.VITE_API_PREFIX || '/api'
 
 interface RawSession {
   id?: number
@@ -158,4 +162,123 @@ export async function fetchMessages(
     { params: { page, page_size: pageSize } },
   )
   return { ...data, items: data.items.map(toMessage) }
+}
+
+/** 流式对话入参：正文与附件段分离，与后端 chat_messages 语义一致 */
+export interface StreamChatPayload {
+  request_text: string
+  select_mode?: number
+  request_id?: string
+  request_segments?: Array<{
+    type: SegmentType
+    resource_id: number
+    file_name?: string
+    url?: string
+  }>
+}
+
+export interface StreamMeta {
+  sessionId: number
+  messageId: number
+  requestId: string
+}
+
+export interface StreamChatHandlers {
+  /** 收到 meta：服务端已完成落库，返回真实消息 ID */
+  onMeta?: (meta: StreamMeta) => void
+  /** 收到增量文本 */
+  onDelta?: (content: string) => void
+}
+
+function buildStreamHeaders(token: string | null): Headers {
+  const headers = new Headers()
+  headers.set('Content-Type', 'application/json')
+  headers.set('Accept', 'text/event-stream')
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  return headers
+}
+
+async function postStream(url: string, body: unknown): Promise<Response> {
+  const init: RequestInit = { method: 'POST', body: JSON.stringify(body) }
+  let response = await fetch(url, {
+    ...init,
+    headers: buildStreamHeaders(getAccessToken()),
+  })
+  if (response.status !== 401) return response
+
+  // fetch 不经过 axios 拦截器，401 时手动续期并重试一次
+  let token: string
+  try {
+    token = await refreshAccessToken()
+  } catch (error) {
+    handleAuthExpired('登录状态已过期，请重新登录')
+    throw error
+  }
+  return fetch(url, { ...init, headers: buildStreamHeaders(token) })
+}
+
+async function toStreamError(response: Response): Promise<ApiError> {
+  let message = `请求失败（${response.status}）`
+  try {
+    const payload: unknown = await response.json()
+    if (isRecord(payload) && typeof payload.message === 'string') {
+      message = payload.message
+    }
+  } catch {
+    // 非 JSON 错误体：保留默认文案
+  }
+  return new ApiError(message, response.status)
+}
+
+/**
+ * 发起流式对话：POST /sessions/{id}/stream-chat。
+ *
+ * EventSource 不支持 POST + Authorization，因此用 fetch 读取 SSE 响应体。
+ * 正常流程为 meta → delta* → done；服务端 error 事件或连接中断会抛 ApiError。
+ */
+export async function streamChat(
+  sessionId: number,
+  payload: StreamChatPayload,
+  handlers: StreamChatHandlers = {},
+): Promise<void> {
+  const response = await postStream(
+    `${API_PREFIX}/sessions/${sessionId}/stream-chat`,
+    payload,
+  )
+  if (!response.ok) throw await toStreamError(response)
+
+  let errorMessage = ''
+  let finished = false
+
+  await readSse(response, ({ event, data }) => {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(data)
+    } catch {
+      return
+    }
+    if (!isRecord(parsed)) return
+
+    if (event === 'meta') {
+      handlers.onMeta?.({
+        sessionId: toNumber(parsed.session_id),
+        messageId: toNumber(parsed.message_id),
+        requestId: typeof parsed.request_id === 'string' ? parsed.request_id : '',
+      })
+    } else if (event === 'delta') {
+      if (typeof parsed.content === 'string' && parsed.content) {
+        handlers.onDelta?.(parsed.content)
+      }
+    } else if (event === 'done') {
+      finished = true
+    } else if (event === 'error') {
+      errorMessage =
+        typeof parsed.message === 'string'
+          ? parsed.message
+          : 'AI 服务暂时不可用，请稍后重试'
+    }
+  })
+
+  if (errorMessage) throw new ApiError(errorMessage, 502)
+  if (!finished) throw new ApiError('连接中断，请稍后重试', -1)
 }

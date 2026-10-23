@@ -32,6 +32,7 @@
 | 表结构迁移 | Alembic `1.14.x` | 改模型后 `scripts/db_sync.sh` 一键同步 |
 | 配置读取 | `python-dotenv` | 分层加载：真实环境变量 > `.env.{APP_ENV}` > `.env`，入口 `app/core/config.py`（唯一读取入口） |
 | 日志 | Loguru `0.7.x` | 开发控制台 + 文件，生产只落文件；按大小滚动（10MB × 5），入口 `app/core/logging.py` |
+| AI 编排 | LangChain `langchain-core 1.7` + `langchain-openai 1.7` | OpenAI 兼容协议；模型 / 提示词 / 记忆三层封装在 `app/services/ai/` |
 | 语言 | Python `3.13` | 使用 `X | None` 现代联合类型写法 |
 | 包管理 | **venv + pip** | 运行期依赖以 `requirements.txt` 为准；测试依赖另见 `requirements-dev.txt` |
 
@@ -86,6 +87,7 @@ agent-backend/
 │   │   ├── auth.py          #   注册 / 登录 / 刷新入参 + 令牌出参（RegisterIn / LoginIn / RefreshIn / TokenOut）
 │   │   ├── session.py       #   会话入参 / 出参（SessionCreate / SessionUpdate / SessionOut / SessionListOut）
 │   │   ├── message.py       #   聊天消息出参（MessageOut / MessageListOut / SegmentOut）
+│   │   ├── chat.py          #   流式对话入参（StreamChatIn / SegmentIn）
 │   │   ├── interview.py     #   面试详情出参（InterviewOut，含 qa_object）
 │   │   ├── file.py          #   文件上传出参（FileOut：url / md5 / size / kind / resource_id 等）
 │   │   ├── health.py        #   健康检查出参（HealthOut）
@@ -95,6 +97,8 @@ agent-backend/
 │   │   ├── auth_service.py  #   鉴权业务：登录校验、签发 / 刷新令牌、解析当前用户
 │   │   ├── session_service.py #  会话分页 / 创建 / 编辑 + 级联删除（含附件资源）
 │   │   ├── message_service.py #  会话消息分页查询（正文与附件段分离）
+│   │   ├── chat_service.py  #   流式对话：校验 / 落库 / 记忆上下文 / SSE 编排
+│   │   ├── ai/              #   AI 三层：llm（模型）/ prompt_layer（提示词与链路）/ memory（上下文）
 │   │   ├── interview_service.py # 面试详情查询（interview_id + user_id 防越权）
 │   │   ├── file_type.py     #   上传文件类型识别（文件头 / 扩展名）与大小上限
 │   │   ├── upload_service.py#   旧本地磁盘上传逻辑（教学保留，运行时不使用）
@@ -108,7 +112,7 @@ agent-backend/
 │       ├── session.py       #   engine + Session 工厂
 │       ├── user_repo.py     #   users 表读写仓储（上层唯一入口）
 │       ├── session_repo.py  #   sessions 表读写仓储（列表 / 归属校验 / 更新 / 删除）
-│       ├── message_repo.py  #   chat_messages 表读写仓储（按会话分页 / 级联清理）
+│       ├── message_repo.py  #   chat_messages 表读写仓储（分页 / 记忆历史 / 回写 / 级联清理）
 │       ├── interview_repo.py#   interviews 表读写仓储（按 id + user_id 查询 / 按会话删除）
 │       ├── resource_repo.py #   resources 表读写仓储（去重预查 / 过期扫描）
 │       └── health_repo.py   #   数据库连通性探活（SELECT 1）
@@ -121,6 +125,7 @@ agent-backend/
 │   ├── test_smoke.py        #   健康检查 + 用户 CRUD 冒烟用例（CRUD 需鉴权）
 │   ├── test_auth.py         #   鉴权冒烟用例（注册 / 登录 / 刷新 / me / 文件上传）
 │   ├── test_sessions.py     #   会话 / 消息 / 面试详情 / 级联删除用例
+│   ├── test_stream_chat.py  #   流式对话用例（假链路，覆盖 SSE / 上下文 / 失败落库）
 │   └── test_resources.py    #   过期资源清理用例
 ├── alembic.ini              # Alembic 配置（连接串留空，由 env.py 注入）
 ├── pytest.ini               # pytest 配置（asyncio_mode=auto、pythonpath=.）
@@ -232,6 +237,7 @@ agent-backend/
   | 编辑会话标题 | `PUT /api/sessions/{session_id}` | `200` |
   | 删除会话（级联） | `DELETE /api/sessions/{session_id}` | `200` |
   | 会话消息（分页） | `GET /api/sessions/{session_id}/messages?page=&page_size=` | `200` |
+  | 流式对话（SSE） | `POST /api/sessions/{session_id}/stream-chat` | `200` |
   | 面试详情 | `GET /api/interviews/{interview_id}` | `200` |
 
   > 统一信封下成功一律 `200`：删除不用 `204`（无响应体，前端无法解析信封）；新增不用 `201`（避免 body.code 与 HTTP 状态码不一致）。
@@ -245,6 +251,15 @@ agent-backend/
   - 分页统一 `{items,total,page,page_size}`：`page ≥ 1`、`page_size` 1..100；会话按 `created_at DESC, id DESC`，消息按 `created_at ASC, id ASC`。
   - `chat_messages` 语义：**聊天正文在 `request_text` / `response_text`**；`request_segments` / `response_segments` **只存附件段**（`{type: file|image|audio, resource_id, file_name?, url?}`），AI 回复文本始终进 `response_text`。消息出参还包含 `status`（0=生成中，1=完成，2=失败）与 `interview_id`（普通聊天为 `null`），供前端面试卡片逻辑使用。
   - **级联删除**（`DELETE /api/sessions/{id}`）：先解析消息附件段收集 `resource_id`，再按 `interviews → chat_messages → sessions` 的依赖顺序删库；最后仅删除当前用户自己的 `resources` 元数据与 MinIO 对象（先删对象、成功后再删元数据，失败则保留元数据交给过期清理重试）。
+- **流式对话约定**（`POST /api/sessions/{session_id}/stream-chat`）：
+  - 入参 `request_text`（必填，去空白后 1..20000 字）、`select_mode`（0..5）、`request_id`（可选，缺省由后端生成）、`request_segments`（仅可引用当前用户自己的 `resource_id`，越权返回 404）。
+  - **响应为 `text/event-stream`，不使用统一 JSON 信封**；这是 SSE 接口的既定例外，因此不声明 `response_model`。
+  - 校验与用户消息落库在建立流之前完成，404 / 422 / 503 仍返回标准 JSON 错误信封；流开始后失败以 SSE `error` 事件返回。
+  - 事件：`meta`（`session_id` / `message_id` / `request_id`）→ `delta`（`{content}`）→ `done`；异常以 `error`（`{code, message}`）收尾。响应头含 `Cache-Control: no-cache`、`X-Accel-Buffering: no`，避免反向代理缓冲。
+  - 落库：用户消息先以 `status=0`（生成中）写入；成功回写 `response_text` + `status=1`；模型失败或客户端断开时保留已生成的部分内容并置 `status=2`。
+  - AI 分层（`app/services/ai/`）：`llm.py` 只负责 provider → 模型实例；`prompt_layer.py` 只负责系统提示词与 `prompt | model | parser` 链路；`memory.py` 只负责从数据库取多轮历史并构建 LangChain 消息上下文。`chat_service.py` 只做编排与 SSE 输出。
+  - 记忆层仅取最近 `MEMORY_MAX_TURNS` 轮 `status=1` 的消息；单条消息超过 `MEMORY_MESSAGE_MAX_CHARS` 截断；`file_extracted_text` 非空时拼入对应的用户消息。
+  - 模型统一走 OpenAI 兼容协议，配置项 `LLM_PROVIDER / LLM_MODEL / LLM_API_KEY / LLM_BASE_URL / LLM_TEMPERATURE / LLM_TIMEOUT / LLM_MAX_RETRIES`；密钥只放环境变量，缺失时该接口返回 503，不影响其他接口启动。
 - **面试记录约定**：`interviews.user_id` 记录归属；`GET /api/interviews/{interview_id}` 必须按 `interview_id + user_id` 查询，返回含 `qa_object` 的详情，防止越权读取他人面试记录。
 - **系统接口 / 静态资源**：`GET /health`（运维探活）与 `/uploads/*`（旧版本地文件静态访问，由 `main.py` 挂载）**有意不挂 `/api` 前缀**：前者校验服务存活 + 数据库连通性，正常 `200`、数据库异常 `503`（由 `health_service` 抛 `SystemException(503)`）；后者仅兼容历史上已落盘的头像/文件，新上传统一走 MinIO。这是对「路径以 `/api` 开头」的例外，新增此类端点需在本文档登记。
 - **头像读取例外**：`GET /api/files/avatar/{user_id}` **无需鉴权且返回二进制**（不是统一信封），因为浏览器 `<img src>` 不会携带 `Authorization` 头；供头像展示使用，按 user_id 只暴露头像对象，不暴露其他资源。

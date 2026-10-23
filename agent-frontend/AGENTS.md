@@ -64,7 +64,7 @@ src/
 ├── stores/           # Pinia 状态（auth / conversation / chat / note）
 ├── styles/           # 全局样式与设计 token（_tokens.scss / index.scss）
 ├── types/            # 全局类型定义（api / conversation / chat / note）
-├── utils/            # 纯工具函数（token.ts：本地令牌读写）
+├── utils/            # 纯工具函数（token.ts：令牌读写；sse.ts：SSE 响应解析；markdownUtil.ts：Markdown 渲染）
 ├── views/            # 页面级组件（与路由一一对应：LoginView / StudyRoom / InterviewRoom / NoteRoom）
 ├── App.vue
 ├── main.ts
@@ -207,7 +207,7 @@ src/
 - **头像上传**：注册页选择头像时**只做本地预览**（`URL.createObjectURL`，限制 JPG / PNG / WebP / GIF 且 ≤ 2MB），不发请求；点击注册后按「建号 → 自动登录拿令牌 → `POST /api/files` 上传」执行，上传用 `FormData`（字段 `file`），请求层自动带 Bearer。后端自动识别类型：图片会更新头像并返回 `{url, md5, size, kind}`，文档 / 音频只保存。头像上传失败不阻断登录。当前用户（含 `avatar` URL）由 `stores/auth.ts` 全局维护，顶栏从 store 读取展示。通用文件接口封装在 `src/api/file.ts`。
 - **错误提示**：请求层统一弹出后端 `message`（短时间去重，可用 `silent` 关闭），调用方不要重复提示同一错误。
 - 每个接口在 `src/api/xxx.ts` 中定义明确的请求 / 响应类型，并按业务域拆分文件（如 `conversation.ts` / `interview.ts` / `note.ts`）。
-- 流式接口（AI 对话、语音播报等）需封装为独立的 SSE / 流式工具，并处理中断与错误重连。
+- 流式接口（AI 对话、语音播报等）需封装为独立的 SSE / 流式工具，并处理中断与错误重连。当前实现：`src/utils/sse.ts` 只做协议解析，`src/api/conversation.ts` 的 `streamChat` 负责鉴权（fetch 不经过 axios 拦截器，401 时手动续期一次）、错误与业务事件分发；`stores/chat.ts` 的 `sendMessage` 负责本地乐观消息与增量渲染。
 
 ### 7.2 Mock 层（`src/mock/`，仅开发环境）
 

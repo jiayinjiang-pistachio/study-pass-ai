@@ -2,13 +2,28 @@
 import { computed, ref } from 'vue'
 import { Paperclip, Promotion } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { useCurrentChatModule } from '@/composables/useCurrentModule'
+import { useChatStore } from '@/stores/chat'
+import { useConversationStore } from '@/stores/conversation'
 
 const MAX_HEIGHT = 120
+
+const chatStore = useChatStore()
+const conversationStore = useConversationStore()
+const module = useCurrentChatModule()
 
 const draft = ref('')
 const fieldRef = ref<HTMLTextAreaElement | null>(null)
 
-const canSend = computed(() => draft.value.trim().length > 0)
+const sessionId = computed(() =>
+  module.value ? conversationStore.activeByModule[module.value] : null,
+)
+const sending = computed(
+  () => sessionId.value !== null && chatStore.isSending(sessionId.value),
+)
+const canSend = computed(
+  () => draft.value.trim().length > 0 && !sending.value,
+)
 
 function resize(): void {
   const el = fieldRef.value
@@ -21,9 +36,26 @@ function handleAttach(): void {
   ElMessage.info('附件上传功能开发中')
 }
 
-function handleSend(): void {
-  if (!canSend.value) return
-  ElMessage.info('发送功能开发中')
+async function handleSend(): Promise<void> {
+  if (!canSend.value || !module.value) return
+
+  const id = conversationStore.activeByModule[module.value]
+  if (id === null) {
+    ElMessage.warning('请先在左侧新建会话')
+    return
+  }
+
+  const text = draft.value.trim()
+  draft.value = ''
+  resize()
+
+  try {
+    await chatStore.sendMessage(id, text)
+  } catch (error) {
+    ElMessage.error(
+      error instanceof Error ? error.message : '发送失败，请稍后重试',
+    )
+  }
 }
 </script>
 
@@ -35,7 +67,7 @@ function handleSend(): void {
         v-model="draft"
         class="chat-input__field"
         rows="1"
-        placeholder="输入你的回答..."
+        :placeholder="sending ? 'AI 正在回复…' : '输入你的回答...'"
         @input="resize"
         @keydown.enter.exact.prevent="handleSend"
       ></textarea>

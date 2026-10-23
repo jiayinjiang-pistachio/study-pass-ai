@@ -35,3 +35,8 @@ python-dotenv==1.0.1
 
 # 日志：Loguru 统一控制台 + 文件滚动输出（app/core/logging.py）
 loguru==0.7.3
+
+# AI 对话：LangChain 模型编排（OpenAI 兼容协议，可接 OpenAI / DeepSeek / 通义 / Moonshot）
+# langchain-core 与 langchain-openai 存在版本配套关系，升级时需一起验证
+langchain-core==1.7.0
+langchain-openai==1.7.2

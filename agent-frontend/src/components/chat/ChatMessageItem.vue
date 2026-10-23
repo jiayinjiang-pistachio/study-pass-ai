@@ -4,6 +4,7 @@ import { Service, User } from '@element-plus/icons-vue'
 import InterviewCard from './InterviewCard.vue'
 import MsgFile from './MsgFile.vue'
 import type { ChatMessage } from '@/types/chat'
+
 import { renderMarkdown } from '@/utils/markdownUtil'
 
 const props = defineProps<{ message: ChatMessage }>()

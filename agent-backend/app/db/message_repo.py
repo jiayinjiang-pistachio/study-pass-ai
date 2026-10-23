@@ -50,6 +50,38 @@ def list_all_by_session(session_id: int) -> list[dict]:
         return [_to_dict(row) for row in rows]
 
 
+def list_recent_completed(session_id: int, limit: int) -> list[dict]:
+    """返回会话内最近 limit 条已完成消息，按时间正序（供记忆层拼接上下文）。
+
+    只取 status=1 且有回复正文的消息：生成中 / 失败的空回复不能作为历史。
+    """
+    with SessionLocal() as session:
+        rows = session.scalars(
+            select(ChatMessage)
+            .where(
+                ChatMessage.session_id == session_id,
+                ChatMessage.status == 1,
+                ChatMessage.response_text != "",
+            )
+            .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+            .limit(limit)
+        ).all()
+        # 查询用倒序取最近 N 条，返回前恢复成正序，符合对话上下文顺序
+        return [_to_dict(row) for row in reversed(rows)]
+
+
+def update_result(message_id: int, response_text: str, status: int) -> bool:
+    """流式结束后回写回复正文与状态；消息不存在返回 False。"""
+    with SessionLocal() as session:
+        obj = session.get(ChatMessage, message_id)
+        if obj is None:
+            return False
+        obj.response_text = response_text
+        obj.status = status
+        session.commit()
+        return True
+
+
 def count_by_session(session_id: int) -> int:
     """统计会话消息总数（分页用）。"""
     with SessionLocal() as session:
