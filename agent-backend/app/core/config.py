@@ -170,6 +170,38 @@ def get_llm_config() -> LLMConfig:
     )
 
 
+# ---- Redis 配置（提示词版本管理的缓存，连接信息只走环境变量）----
+REDIS_HOST: str = os.getenv("REDIS_HOST", "127.0.0.1")
+REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB: int = int(os.getenv("REDIS_DB", "0"))
+REDIS_PASSWORD: str | None = os.getenv("REDIS_PASSWORD")
+# 生效提示词缓存：Redis Hash，字段为 `{agent}:{scene}` / `common:common`
+PROMPT_CACHE_KEY: str = os.getenv("PROMPT_CACHE_KEY", "prompt:templates:active")
+
+
+class RedisConfig(NamedTuple):
+    """Redis 客户端连接参数。"""
+
+    host: str
+    port: int
+    db: int
+    password: str | None
+
+
+def get_redis_config() -> RedisConfig:
+    """返回 Redis 配置。
+
+    与 AI / MinIO 一致采用延迟校验：Redis 不可用时提示词接口回源数据库，
+    不影响其他接口启动。
+    """
+    return RedisConfig(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        db=REDIS_DB,
+        password=REDIS_PASSWORD or None,
+    )
+
+
 class MinioConfig(NamedTuple):
     """MinIO 客户端连接参数。"""
 

@@ -144,6 +144,53 @@ class Interview(Base):
     )
 
 
+class PromptTemplate(Base):
+    """提示词模板表：按 (agent_name, scene) 维护独立版本链。
+
+    公共通用模板固定 agent_name='common'、scene='common'；
+    私有模板为智能体名 + 专属场景。同一作用域内只有一个 is_active=1 的版本。
+    """
+
+    __tablename__ = "prompt_templates"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # 公共通用模板固定 common；私有模板为 AGENT_CONFIG 中的智能体名
+    agent_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 公共通用模板固定 common；私有模板为智能体专属场景（如 study / interview）
+    scene: Mapped[str] = mapped_column(String(64), nullable=False)
+    template_type: Mapped[int] = mapped_column(
+        TINYINT, nullable=False
+    )  # 1=私有，2=公共
+    template_content: Mapped[str] = mapped_column(MEDIUMTEXT, nullable=False)
+    # JSON 数组字符串，如 ["question", "language"]；无变量时为 NULL
+    variables: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 同一作用域内自增，从 1 开始
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 0=未生效，1=生效；同一 (agent_name, scene) 至多一条生效
+    is_active: Mapped[int] = mapped_column(
+        TINYINT, server_default=text("0"), nullable=False
+    )
+    description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[int] = mapped_column(
+        BigInteger, server_default=text("(UNIX_TIMESTAMP())"), nullable=False
+    )
+
+    __table_args__ = (
+        # 作用域查询（当前生效版本 / 版本链）与单一生效约束的应用层校验都依赖此索引
+        Index("ix_prompt_templates_agent_scene", "agent_name", "scene"),
+        Index(
+            "ix_prompt_templates_agent_scene_active",
+            "agent_name",
+            "scene",
+            "is_active",
+        ),
+        # 版本号由数据库兜底防重；单一生效由仓储层事务行锁保证
+        UniqueConstraint(
+            "agent_name", "scene", "version", name="uk_prompt_agent_scene_version"
+        ),
+    )
+
+
 class Resource(Base):
     """资源元数据表：统一管理文件 / 图片 / 音频，原文件落在 MinIO。"""
 

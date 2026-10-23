@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "Bash(ls -d @wangeditor-next+basic-modules@6.5.0*/node_modules/@wangeditor-next/basic-modules)",
-      "Bash(grep -oE 'registerMenu[^;]{0,400}' __TRACKED_VAR__/dist/index.mjs)"
+      "Bash(grep -oE 'registerMenu[^;]{0,400}' __TRACKED_VAR__/dist/index.mjs)",
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(.venv/bin/python -c \"import redis; print\\(redis.__version__\\)\")",
+      "Bash(.venv/bin/alembic heads:*)",
+      "Bash(.venv/bin/alembic current:*)",
+      "Bash(grep -H \"^revision\\\\|^down_revision\" alembic/versions/*.py)",
+      "Bash(.venv/bin/alembic revision:*)",
+      "Bash(.venv/bin/alembic upgrade:*)",
+      "Bash(.venv/bin/python -c ':*)"
     ]
   }
 }

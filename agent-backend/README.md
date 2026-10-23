@@ -27,6 +27,7 @@ uvicorn app.main:app --reload --port 8000
 - Swagger UI：http://127.0.0.1:8000/docs
 - 健康检查：`GET /health`（存活 + 数据库连通性；数据库异常返回 503）
 - 流式对话需在 `.env` 中配置 `LLM_PROVIDER / LLM_MODEL / LLM_API_KEY`（OpenAI 兼容协议，可选 `LLM_BASE_URL`）；未配置时仅该接口返回 503，其他接口不受影响。
+- 提示词版本管理默认使用本机 Redis 做缓存（`REDIS_HOST=127.0.0.1`、`REDIS_PORT=6379`、`REDIS_DB=0`，可选 `REDIS_PASSWORD`）；Redis 不可用时自动回源 MySQL，接口不受影响。
 
 ## 数据库迁移（Alembic）
 
@@ -54,6 +55,7 @@ app/
 │   ├── exceptions.py         # 自定义异常：BusinessException / SystemException
 │   ├── logging.py            # 日志配置
 │   ├── rate_limit.py         # 固定窗口 + IP 维度限流（注册接口依赖）
+│   ├── redis_client.py       # Redis 客户端（提示词缓存，不可用不阻断启动）
 │   └── handlers.py           # 全局异常处理器（统一错误响应）
 ├── routers/
 │   ├── deps.py               # ① 路由层共享依赖：get_current_user（Bearer 鉴权）
@@ -62,6 +64,7 @@ app/
 │   ├── session.py            #   会话管理 + 会话内消息（整组需登录）
 │   ├── interview.py          #   面试详情（按 interview_id + user_id）
 │   ├── file.py               #   文件上传 / 头像读取
+│   ├── prompt.py             #   提示词版本管理（读取 / 新建 / 回滚 / 智能体配置）
 │   └── health.py             #   健康检查（存活 + 数据库连通性）
 ├── schemas/
 │   ├── user.py               # ② 校验层：Pydantic v2 请求 / 响应模型
@@ -69,6 +72,7 @@ app/
 │   ├── session.py            #   会话入参 / 出参
 │   ├── message.py            #   聊天消息出参（正文 + 附件段）
 │   ├── interview.py          #   面试详情出参（含 qa_object）
+│   ├── prompt.py             #   提示词入参 / 出参
 │   ├── file.py               #   文件上传出参
 │   ├── health.py             #   健康检查出参
 │   └── response.py           # 统一响应信封
@@ -77,18 +81,20 @@ app/
 │   ├── auth_service.py       #   鉴权业务：登录校验、签发 / 刷新令牌、解析当前用户
 │   ├── session_service.py    #   会话分页 / 创建 / 编辑 + 级联删除
 │   ├── message_service.py    #   会话消息分页（正文与附件段分离）
+│   ├── prompt_template_service.py # 提示词版本管理：智能体配置 / 拼接 / 回滚 / Redis 缓存
 │   ├── interview_service.py  #   面试详情（interview_id + user_id）
 │   ├── upload_service_minio.py # 文件上传（MinIO + resources 元数据）
 │   ├── resource_cleanup.py   #   过期资源清理
 │   └── health_service.py     #   健康检查：数据库探活，异常转 503
 └── db/                       # ④ 数据库层：SQLAlchemy 2.0 + MySQL
     ├── base.py               #   ORM 基类
-    ├── models.py             #   表结构声明（User / ChatSession / ChatMessage / Interview / Resource）
+    ├── models.py             #   表结构声明（User / ChatSession / ChatMessage / Interview / PromptTemplate / Resource）
     ├── session.py            #   engine + Session 工厂
     ├── user_repo.py          #   users 表读写仓储
     ├── session_repo.py       #   sessions 表读写仓储
     ├── message_repo.py       #   chat_messages 表读写仓储
     ├── interview_repo.py     #   interviews 表读写仓储
+    ├── prompt_template_repo.py # prompt_templates 表读取 / 生效切换仓储
     ├── resource_repo.py      #   resources 表读写仓储
     └── health_repo.py        #   数据库连通性探活（SELECT 1）
 
@@ -96,6 +102,8 @@ alembic/                      # 迁移脚本（versions/ 存版本）
 scripts/db_sync.sh            # 一键生成迁移并同步
 tests/                        # pytest 冒烟测试（连真实 MySQL）
 ├── test_sessions.py          #   会话 / 消息 / 面试详情 / 级联删除
+├── test_stream_chat.py       #   流式对话 / SSE / 上下文 / 失败落库
+├── test_prompt_templates.py  #   提示词版本 / 拼接 / 回滚 / Redis 缓存
 └── test_resources.py         #   过期资源清理
 ```
 
@@ -109,7 +117,7 @@ alembic upgrade head                         # 确保测试库已建表
 pytest tests/ -v                             # 运行全部测试（含会话 / 资源清理）
 ```
 
-> 测试连 `.env` 里的真实 MySQL，创建的用户带 `smoke_*` 前缀并在用例后自动清理；如需隔离，把 `MYSQL_URL` 指向独立的测试库。
+> 测试连 `.env` 里的真实 MySQL，创建的用户带 `smoke_*` 前缀并在用例后自动清理；如需隔离，把 `MYSQL_URL` 指向独立的测试库。提示词缓存用例在 Redis 不可用时自动跳过，不影响其余用例。
 
 ## 用户接口
 
@@ -133,6 +141,10 @@ pytest tests/ -v                             # 运行全部测试（含会话 / 
 | GET | `/api/sessions/{id}/messages?page=&page_size=` | 会话消息分页（正文 + 附件段 + status/interview_id） | 200 |
 | POST | `/api/sessions/{id}/stream-chat` | 流式对话（SSE：meta → delta* → done / error） | 200 |
 | GET | `/api/interviews/{id}` | 面试详情（含 `qa_object`，按 id + 当前用户查询） | 200 |
+| GET | `/api/prompt/templates/{agent_name}/{scene}` | 指定作用域的生效模板（只返回自身，不拼接） | 200 |
+| POST | `/api/prompt/rollback` | 一键回滚到指定版本（body `template_id`） | 200 |
+| GET | `/api/prompt/full-prompt?agent_name=&scene=` | 完整提示词（公共 + 私有拼接） | 200 |
+| GET | `/api/prompt/config/agents` | 7 个智能体映射（名称 / 展示名 / 专属场景） | 200 |
 
 不带 `/api` 前缀的端点：`GET /health`（存活 + 数据库连通性探活）与 `/uploads/*`（旧版本地头像的静态访问，新上传统一走 MinIO）。
 
@@ -243,6 +255,51 @@ data: {"message_id":12,"status":1}
 - 落库语义：用户消息先写入 `status=0`；成功后回写 `response_text` 并置 `status=1`；模型失败或客户端断开时保留部分内容并置 `status=2`。
 - AI 代码分三层：`app/services/ai/llm.py`（provider → 模型实例）、`prompt_layer.py`（系统提示词与链路组装）、`memory.py`（数据库多轮历史 → 上下文）；`chat_service.py` 负责编排与 SSE 输出。
 - 记忆层只取最近 `MEMORY_MAX_TURNS` 轮 `status=1` 的消息，单条超过 `MEMORY_MESSAGE_MAX_CHARS` 截断，`file_extracted_text` 非空时拼入对应用户消息。
+
+### 提示词版本管理
+
+> 技术方案与业务流程（数据模型、版本链、缓存一致性、接口契约）见 **[docs/prompt-template-guide.md](./docs/prompt-template-guide.md)**。
+> Redis 安装、缓存结构与排错完整上手流程见 **[docs/redis-guide.md](./docs/redis-guide.md)**（环境准备、缓存结构、常用命令、常见问题）。
+
+多智能体提示词按 `(agent_name, scene)` 维护独立版本链：公共通用模板固定 `agent_name='common'` + `scene='common'`，叠加在私有模板之前。数据源是 MySQL，Redis Hash `prompt:templates:active` 只缓存当前生效版本（启动预热、变更即刷新、未命中回源）。
+
+**7 个智能体映射**
+
+| agent_name | 展示名 | scene |
+| --- | --- | --- |
+| `flow_controller` | 流程总控 | `workflow` |
+| `resume_parser` | 资料解析 | `resume` |
+| `quiz_generate` | 出题题库 | `quiz` |
+| `interview_host` | 面试主考官 | `interview` |
+| `interview_evaluator` | 面试评测 | `evaluation` |
+| `difficulty_learner` | 难点学习 | `study` |
+| `note_archiver` | 笔记归档 | `note` |
+
+```bash
+# 1) 指定作用域的生效模板（只返回自身，不拼接）
+curl http://127.0.0.1:8000/api/prompt/templates/difficulty_learner/study \
+  -H "Authorization: Bearer <access_token>"
+# 公共通用模板：GET /api/prompt/templates/common/common
+
+# 2) 完整提示词：公共通用模板 + 私有模板拼接（公共在前，空行分隔）
+curl 'http://127.0.0.1:8000/api/prompt/full-prompt?agent_name=difficulty_learner&scene=study' \
+  -H "Authorization: Bearer <access_token>"
+# → {public_template, private_template, final_template, variables, ...}
+# 只看公共通用模板：?agent_name=common&scene=common
+
+# 3) 一键回滚：把历史版本重新置为生效
+curl -X POST http://127.0.0.1:8000/api/prompt/rollback \
+  -H "Authorization: Bearer <access_token>" -H 'Content-Type: application/json' \
+  -d '{"template_id":1}'
+
+# 4) 智能体映射（7 个）
+curl http://127.0.0.1:8000/api/prompt/config/agents -H "Authorization: Bearer <access_token>"
+```
+
+- **写入**：新建版本功能暂未实现，待提示词注入功能需求确定后再补充；当前仅提供读取与回滚。
+- **规则**：公共通用模板固定 `agent_name='common', scene='common', template_type=2`；私有模板为智能体名 + 专属场景、`template_type=1`；未知智能体 / 场景 `404`，智能体不支持的场景 `400`。
+- **版本与生效**：版本号按作用域自增；新版本默认生效并下线旧版本，同一作用域始终只有一条 `is_active=1`（事务行锁 + 唯一键兜底）。
+- **缓存**：私有字段 `{agent_name}:{scene}`、公共字段 `common:common`；Redis 故障不影响接口，读取自动回源 MySQL 并回填。缓存 Key 可用 `PROMPT_CACHE_KEY` 覆盖。
 
 ### 统一响应信封
 
