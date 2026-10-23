@@ -4,6 +4,7 @@ import { Service, User } from '@element-plus/icons-vue'
 import InterviewCard from './InterviewCard.vue'
 import MsgFile from './MsgFile.vue'
 import type { ChatMessage } from '@/types/chat'
+import { renderMarkdown } from '@/utils/markdownUtil'
 
 const props = defineProps<{ message: ChatMessage }>()
 
@@ -24,6 +25,9 @@ const responsePlaceholder = computed(() => {
   if (props.message.status === 2) return '生成失败'
   return ''
 })
+
+/** AI 回复按 Markdown 渲染（支持代码高亮、表格等），用户消息仍按纯文本展示。 */
+const renderedResponse = computed(() => renderMarkdown(props.message.responseText))
 
 const hasResponse = computed(
   () =>
@@ -75,11 +79,12 @@ const timeLabel = computed(() => {
 
       <div class="msg__body">
         <div
-          v-if="message.responseText.trim().length || responsePlaceholder"
+          v-if="message.responseText.trim().length"
           class="msg__bubble"
-          :class="{ 'msg__bubble--muted': !message.responseText.trim().length }"
-        >
-          {{ message.responseText.trim().length ? message.responseText : responsePlaceholder }}
+          v-html="renderedResponse"
+        />
+        <div v-else-if="responsePlaceholder" class="msg__bubble msg__bubble--muted">
+          {{ responsePlaceholder }}
         </div>
         <div v-if="message.responseSegments.length" class="msg__files">
           <MsgFile
