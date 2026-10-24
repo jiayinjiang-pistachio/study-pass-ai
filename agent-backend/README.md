@@ -27,7 +27,7 @@ uvicorn app.main:app --reload --port 8000
 - Swagger UI：http://127.0.0.1:8000/docs
 - 健康检查：`GET /health`（存活 + 数据库连通性；数据库异常返回 503）
 - 流式对话需在 `.env` 中配置 `LLM_PROVIDER / LLM_MODEL / LLM_API_KEY`（OpenAI 兼容协议，可选 `LLM_BASE_URL`）；未配置时仅该接口返回 503，其他接口不受影响。
-- 提示词版本管理默认使用本机 Redis 做缓存（`REDIS_HOST=127.0.0.1`、`REDIS_PORT=6379`、`REDIS_DB=0`，可选 `REDIS_PASSWORD`）；Redis 不可用时自动回源 MySQL，接口不受影响。
+- 提示词版本管理默认使用本机 Redis 做缓存（`REDIS_HOST=127.0.0.1`、`REDIS_PORT=6379`、`REDIS_DB=1`，可选 `REDIS_PASSWORD`）。默认 db1 是为与其他项目常用的 db0 隔离；Redis 不可用时自动回源 MySQL，接口不受影响。
 
 ## 数据库迁移（Alembic）
 

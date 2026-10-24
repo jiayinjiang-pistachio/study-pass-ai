@@ -68,16 +68,17 @@ redis-cli ping
 Redis 配置都有默认值，本机默认配置可以**完全不填**。需要改时在 `agent-backend/.env` 中覆盖：
 
 ```dotenv
-# 可选：默认 127.0.0.1:6379 / db 0 / 无密码
+# 可选：默认 127.0.0.1:6379 / db 1 / 无密码
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
-REDIS_DB=0
+# 本项目默认 db1，与其他项目常用的 db0 隔离
+REDIS_DB=1
 # REDIS_PASSWORD=your_password
 # PROMPT_CACHE_KEY=prompt:templates:active
 ```
 
 - 生产环境建议用真实环境变量注入密码，不落 `.env.prod`。
-- 多个项目共用一台 Redis 时，用 `REDIS_DB` 或 `PROMPT_CACHE_KEY` 前缀隔离。
+- 多个项目共用一台 Redis 时，用 `REDIS_DB` 或 `PROMPT_CACHE_KEY` 前缀隔离；本项目默认 `REDIS_DB=1`，避免占用其他项目的 db0。
 
 ### 4. 装依赖
 
