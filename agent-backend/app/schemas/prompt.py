@@ -19,7 +19,7 @@ class PromptTemplateOut(BaseModel):
 
 
 class ActivePromptOut(BaseModel):
-    """生效提示词出参：公共模板 + 私有模板及其拼接结果。"""
+    """生效提示词出参：公共 + 私有拼接结果，以及注入用户变量后的最终提示词。"""
 
     agent_name: str | None
     scene: str
@@ -27,6 +27,10 @@ class ActivePromptOut(BaseModel):
     private_template: PromptTemplateOut | None
     final_template: str
     variables: list[str]
+    # 占位符替换后的提示词（未登录 / 无资料时按默认值渲染）
+    rendered_template: str
+    # 实际注入的变量（仅包含模板已声明且属于用户资料的白名单变量）
+    injected_variables: dict[str, str]
 
 
 class RollbackIn(BaseModel):

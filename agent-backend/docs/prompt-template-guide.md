@@ -1,6 +1,7 @@
 # 提示词版本管理：技术方案与业务流程
 
 > 本文说明 **prompt_templates 模块**的设计取舍、数据模型、分层实现与核心业务流程。
+> 想直接跑通「初始化 → 注入 → 改资料 → 回滚」的全流程，见 [`prompt-injection-guide.md`](./prompt-injection-guide.md)。
 > 上手指令（环境、缓存命令、排错）见 [`redis-guide.md`](./redis-guide.md)；开发规范见 [`AGENTS.md`](../AGENTS.md)。
 
 ---
@@ -23,10 +24,11 @@
 | 一键回滚 | 按 `template_id` 恢复历史版本 |
 | Redis 缓存 | 启动预热 + 读取回源 + 变更刷新 |
 | 智能体配置 | 7 个智能体映射，配置接口对外暴露 |
+| 用户变量注入 | `user_profiles` + 验证 / 转换 / 填充三层管线，`full-prompt` 返回 `rendered_template` |
 
 | 未包含 | 说明 |
 | --- | --- |
-| 新建版本（接口与服务层） | 暂未实现，待提示词注入功能需求确定后补充 |
+| 新建版本（接口与服务层） | 暂未实现，待后续需求确定后补充 |
 | 模板删除 / 版本列表接口 | 当前仅读取、回滚 |
 | 管理员权限 | 任意登录用户均可管理模板，后续按角色收敛 |
 | 变量占位符强校验 | `variables` 仅登记变量名，不校验正文中是否使用 |
@@ -130,6 +132,11 @@ HTTP
 ③ app/services/prompt_template_service.py
  │     智能体与场景校验、版本编排、公共+私有拼接、Redis 缓存
  │
+ ├──────────────► app/services/prompt_injection_service.py
+ │                      验证（清洗 / 限长）→ 转换（格式化 / 默认值）→ 填充（占位符替换）
+ │                      │
+ │                      └──────────────► app/db/user_profile_repo.py  ◄──► MySQL
+ │
  ├──────────────► app/db/prompt_template_repo.py   ◄──► MySQL
  │                      生效查询 / 生效切换（事务）
  │
@@ -141,18 +148,21 @@ HTTP
 | `app/routers/prompt.py` | 4 个 HTTP 接口 | 整组 `Depends(get_current_user)` |
 | `app/schemas/prompt.py` | 请求 / 响应模型 | 公共模板强制 `common/common` |
 | `app/services/prompt_template_service.py` | 业务规则与缓存编排 | `AGENT_CONFIG`、`get_combined_template`、`rollback` |
+| `app/services/prompt_injection_service.py` | 用户变量注入三层管线 | `sanitize_text` / `build_variables` / `render_template` |
 | `app/db/prompt_template_repo.py` | 数据存取 | `get_active` / `list_active` / `activate` 事务 |
-| `app/db/models.py` | ORM 声明 | `PromptTemplate` |
+| `app/db/user_profile_repo.py` | 用户背景资料存取 | `get_by_user_id` / `upsert` |
+| `app/db/models.py` | ORM 声明 | `PromptTemplate`、`UserProfile` |
 | `app/core/redis_client.py` | Redis 单例 | 1 秒超时，懒加载 |
 | `app/core/config.py` | 配置入口 | `REDIS_*`、`PROMPT_CACHE_KEY` |
 | `app/main.py` | 启动预热 | `lifespan` 调 `load_active_templates()` |
 | `tests/test_prompt_templates.py` | 冒烟测试 | 12 个用例，Redis 不可用自动跳过缓存用例 |
+| `tests/test_prompt_injection.py` | 注入测试 | 12 个用例：清洗 / 格式化 / 替换 / 接口集成 |
 
 ---
 
 ## 五、核心业务流程
 
-> 新建版本暂未实现，待提示词注入功能需求确定后补充；以下为读取、回滚与预热流程。
+> 新建版本暂未实现，待后续需求确定后补充；以下为读取、回滚与预热流程。
 
 ### 1. 读取生效模板
 
@@ -253,12 +263,120 @@ Service._refresh_scope → Redis 刷新该字段
 
 ---
 
-## 七、接口契约
+## 七、用户变量注入
+
+### 1. 数据表 `user_profiles`
+
+用户背景资料，一人一行，作为提示词变量来源。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | `BIGINT` PK | 自增主键 |
+| `user_id` | `BIGINT` 唯一 | 外键 `users.id`，`ON DELETE CASCADE`；唯一约束兼作查询索引 |
+| `target_job` | `VARCHAR(64)` NULL | 目标岗位 |
+| `years_experience` | `INT` NULL | 工作年限，0 表示应届 / 无经验 |
+| `target_level` | `VARCHAR(32)` NULL | 目标职级 |
+| `target_skills` | `JSON` NULL | 已掌握技能，字符串数组 |
+| `weak_topics` | `JSON` NULL | 薄弱点，字符串数组 |
+| `created_at` | `BIGINT` NOT NULL | Unix 秒，数据库 `UNIX_TIMESTAMP()` 填充 |
+
+迁移脚本：`alembic/versions/a458fe295081_create_user_profiles_table.py`。
+仓储入口：`app/db/user_profile_repo.py`（`get_by_user_id` / `upsert`）。
+
+### 2. 三层处理流程
+
+注入实现在 `app/services/prompt_injection_service.py`，只处理纯文本，不感知 HTTP：
+
+```text
+final_template（公共 + 私有拼接）
+        │
+        ▼
+① 验证层  sanitize_text / sanitize_items
+   去控制字符与换行 → 移除 { } \ → 折叠空白 → 截断
+        │
+        ▼
+② 转换层  build_variables(profile, declared)
+   只取模板 variables 已声明且属于用户资料白名单的字段
+   数组用「、」连接；缺失走默认值；年限格式化
+        │
+        ▼
+③ 填充层  render_template(template, variables)
+   正则 \{变量名\} + re.sub 回调，按字面替换
+   未声明的占位符原样保留
+        │
+        ▼
+rendered_template + injected_variables
+```
+
+- 变量白名单固定为 `target_job` / `years_experience` / `target_level` / `target_skills` / `weak_topics`；
+- 是否注入由模板自身 `variables` 字段决定，模板未声明的变量不进入 `injected_variables`；
+- 用户未填写资料时按默认值渲染（`target_job` 等为 `未提供`，数组为 `暂无`）。
+
+### 3. 占位符与默认值
+
+占位符为单花括号 `{变量名}`，变量名须以字母或下划线开头，仅含字母、数字、下划线。
+
+| 变量 | 示例值 | 缺失时 |
+| --- | --- | --- |
+| `target_job` | `后端工程师` | `未提供` |
+| `years_experience` | `3 年`（0 → `应届/无经验`） | `未提供` |
+| `target_level` | `P6` | `未提供` |
+| `target_skills` | `Python、MySQL` | `暂无` |
+| `weak_topics` | `分布式、缓存` | `暂无` |
+
+### 4. 安全边界
+
+| 项 | 限制 |
+| --- | --- |
+| 标量长度 | 100 字符 |
+| 数组单项长度 | 50 字符 |
+| 数组项数 | 最多 20 项（去空、去重后） |
+| 总注入文本 | 1000 字符（按固定变量顺序截断） |
+| 清洗字符 | 控制字符 / 换行转空格，移除 `{` `}` `\` |
+
+填充层使用 `re.sub` 回调按字面插入变量值，**注入内容不会被当作模板二次解析**；即使值中包含 `{target_job}` 也会原样输出。
+
+### 5. 响应示例
+
+`GET /api/prompt/full-prompt?agent_name=difficulty_learner&scene=study`：
+
+```jsonc
+{
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "final_template": "请用中文回答。\n\n目标岗位：{target_job}；薄弱点：{weak_topics}",
+    "variables": ["target_job", "weak_topics"],
+    "rendered_template": "请用中文回答。\n\n目标岗位：后端工程师；薄弱点：分布式、缓存",
+    "injected_variables": {
+      "target_job": "后端工程师",
+      "weak_topics": "分布式、缓存"
+    }
+  }
+}
+```
+
+### 6. 资料 CRUD 接口
+
+`/api/profiles` 整组需登录，`user_id` 一律取自令牌，只能操作当前用户自己的资料。
+
+| 方法 | 路径 | 说明 | 异常 |
+| --- | --- | --- | --- |
+| `POST` | `/api/profiles` | 创建资料 | 已存在 `409` |
+| `GET` | `/api/profiles/me` | 查询资料 | 未填写 `404` |
+| `PUT` | `/api/profiles/me` | 局部更新（只更新显式传入且非空的字段） | 未填写 `404` |
+| `DELETE` | `/api/profiles/me` | 删除资料 | 未填写 `404` |
+
+字段校验（`app/schemas/profile.py`）：`target_job` ≤64、`years_experience` 0..60、`target_level` ≤32、`target_skills` / `weak_topics` ≤20 项且单项 ≤50 字；出参不含 `user_id`。删除资料后，注入自动回退为默认值。
+
+---
+
+## 八、接口契约
 
 > 统一信封 `{code, message, data}`；整组需登录。
 
 > 共 4 个接口：作用域生效模板、一键回滚、完整提示词、智能体配置。
-> 新建版本暂未实现，待提示词注入功能需求确定后补充；当前接口只读与回滚。
+> 新建版本暂未实现，待后续需求确定后补充；当前接口只读与回滚。
 
 ### 1. 指定作用域的生效模板
 
@@ -302,10 +420,15 @@ Service._refresh_scope → Redis 刷新该字段
     "public_template": { "id": 1, "version": 2, "is_active": 1, "variables": ["language"], "...": "..." },
     "private_template": { "id": 5, "version": 3, "is_active": 1, "variables": ["tone"], "...": "..." },
     "final_template": "请用中文回答，先给结论。\n\n先讲原理再举例。",
-    "variables": ["language", "tone"]
+    "variables": ["language", "tone"],
+    "rendered_template": "请用中文回答，先给结论。\n\n先讲原理再举例。",
+    "injected_variables": { "target_job": "未提供" }
   }
 }
 ```
+
+- `final_template` 是未渲染的原始拼接，`rendered_template` 是注入用户变量后的结果；
+- `injected_variables` 只包含模板 `variables` 已声明的用户资料变量，详见第七节。
 
 - `common/common`：只返回公共模板（`private_template=null`）；
 - 公共缺失：`public_template=null`，只返回私有；
@@ -351,7 +474,7 @@ Service._refresh_scope → Redis 刷新该字段
 
 ---
 
-## 八、与聊天链路的接入建议（未实现）
+## 九、与聊天链路的接入建议（未实现）
 
 当前聊天仍使用 `app/services/ai/prompt_layer.py` 的硬编码系统提示词。后续接入建议：
 
@@ -364,7 +487,7 @@ Service._refresh_scope → Redis 刷新该字段
 
 ---
 
-## 九、并发与一致性
+## 十、并发与一致性
 
 | 风险 | 处理 |
 | --- | --- |
@@ -377,7 +500,7 @@ Service._refresh_scope → Redis 刷新该字段
 
 ---
 
-## 十、扩展指引
+## 十一、扩展指引
 
 ### 新增智能体
 
@@ -398,7 +521,7 @@ Service._refresh_scope → Redis 刷新该字段
 
 ---
 
-## 十一、测试覆盖
+## 十二、测试覆盖
 
 `tests/test_prompt_templates.py`（12 个用例）：
 
@@ -412,15 +535,22 @@ Service._refresh_scope → Redis 刷新该字段
 
 > 新建版本功能未提供，测试数据直接写 `prompt_templates` 表构造。
 
+`tests/test_prompt_injection.py`（12 个用例）：
+
+- 验证层：控制字符 / 换行 / 花括号清洗、标量截断、数组去重与限项；
+- 转换层：数组「、」连接、默认值、年限 0 / N / 缺失、只转换已声明变量、总长度上限；
+- 填充层：重复占位符、未声明占位符保留、注入值不被二次解析；
+- 接口集成：按登录用户资料渲染 `rendered_template` / `injected_variables`，无资料时走默认值。
+
 运行：
 
 ```bash
-pytest tests/test_prompt_templates.py -v
+pytest tests/test_prompt_templates.py tests/test_prompt_injection.py -v
 ```
 
 ---
 
-## 十二、红线
+## 十三、红线
 
 - ❌ Redis 当数据源 —— 数据源只能是 MySQL。
 - ❌ 绕过仓储层直接拼 SQL 改 `is_active` —— 会破坏单一生效约束。

@@ -14,6 +14,7 @@ os.environ.setdefault("JWT_SECRET", "test-only-secret")
 import httpx
 import pytest
 import pytest_asyncio
+from sqlalchemy import delete as sa_delete, select
 
 from app.core import minio_client, rate_limit
 from app.core.security import hash_password
@@ -24,6 +25,8 @@ from app.db import (
     session_repo,
     user_repo,
 )
+from app.db.models import PromptTemplate
+from app.db.session import SessionLocal
 from app.main import app
 
 # 本轮测试运行唯一的前缀，用于精确清理测试期间创建的用户
@@ -95,6 +98,38 @@ async def other_auth(
     assert resp.status_code == 200, resp.text
     token = resp.json()["data"]["access_token"]
     return user, {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def isolated_prompt_templates():
+    """让提示词用例在空表下运行，结束后原样恢复（含 init_prompt 种子数据）。
+
+    提示词模板是全局数据，而用例需要「作用域无生效版本 → 404」等干净前置状态；
+    直接删除会破坏开发库中已初始化的数据，因此统一快照 + 还原。
+    """
+    with SessionLocal() as session:
+        snapshot = [
+            {column.name: getattr(row, column.name) for column in row.__table__.columns}
+            for row in session.scalars(select(PromptTemplate)).all()
+        ]
+        session.execute(sa_delete(PromptTemplate))
+        session.commit()
+
+    yield
+
+    with SessionLocal() as session:
+        session.execute(sa_delete(PromptTemplate))
+        for row in snapshot:
+            session.add(PromptTemplate(**row))
+        session.commit()
+
+    try:
+        from app.services import prompt_template_service
+
+        prompt_template_service.load_active_templates()
+    except Exception:
+        # 缓存刷新失败不影响测试结论：读取会自动回源 MySQL
+        pass
 
 
 @pytest.fixture(scope="session")

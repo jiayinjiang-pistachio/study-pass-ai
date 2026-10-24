@@ -64,7 +64,8 @@ app/
 │   ├── session.py            #   会话管理 + 会话内消息（整组需登录）
 │   ├── interview.py          #   面试详情（按 interview_id + user_id）
 │   ├── file.py               #   文件上传 / 头像读取
-│   ├── prompt.py             #   提示词版本管理（读取 / 新建 / 回滚 / 智能体配置）
+│   ├── profile.py            #   用户背景资料 CRUD（仅当前用户）
+│   ├── prompt.py             #   提示词版本管理（读取 / 回滚 / 智能体配置）
 │   └── health.py             #   健康检查（存活 + 数据库连通性）
 ├── schemas/
 │   ├── user.py               # ② 校验层：Pydantic v2 请求 / 响应模型
@@ -72,6 +73,7 @@ app/
 │   ├── session.py            #   会话入参 / 出参
 │   ├── message.py            #   聊天消息出参（正文 + 附件段）
 │   ├── interview.py          #   面试详情出参（含 qa_object）
+│   ├── profile.py            #   背景资料入参 / 出参
 │   ├── prompt.py             #   提示词入参 / 出参
 │   ├── file.py               #   文件上传出参
 │   ├── health.py             #   健康检查出参
@@ -81,16 +83,19 @@ app/
 │   ├── auth_service.py       #   鉴权业务：登录校验、签发 / 刷新令牌、解析当前用户
 │   ├── session_service.py    #   会话分页 / 创建 / 编辑 + 级联删除
 │   ├── message_service.py    #   会话消息分页（正文与附件段分离）
+│   ├── profile_service.py    #   用户背景资料 CRUD
 │   ├── prompt_template_service.py # 提示词版本管理：智能体配置 / 拼接 / 回滚 / Redis 缓存
+│   ├── prompt_injection_service.py # 提示词变量注入：验证 → 转换 → 填充
 │   ├── interview_service.py  #   面试详情（interview_id + user_id）
 │   ├── upload_service_minio.py # 文件上传（MinIO + resources 元数据）
 │   ├── resource_cleanup.py   #   过期资源清理
 │   └── health_service.py     #   健康检查：数据库探活，异常转 503
 └── db/                       # ④ 数据库层：SQLAlchemy 2.0 + MySQL
     ├── base.py               #   ORM 基类
-    ├── models.py             #   表结构声明（User / ChatSession / ChatMessage / Interview / PromptTemplate / Resource）
+    ├── models.py             #   表结构声明（User / UserProfile / ChatSession / ChatMessage / Interview / PromptTemplate / Resource）
     ├── session.py            #   engine + Session 工厂
     ├── user_repo.py          #   users 表读写仓储
+    ├── user_profile_repo.py  #   user_profiles 表读写仓储（按用户查询 / upsert）
     ├── session_repo.py       #   sessions 表读写仓储
     ├── message_repo.py       #   chat_messages 表读写仓储
     ├── interview_repo.py     #   interviews 表读写仓储
@@ -100,10 +105,14 @@ app/
 
 alembic/                      # 迁移脚本（versions/ 存版本）
 scripts/db_sync.sh            # 一键生成迁移并同步
+scripts/agent_prompt.py       # 各智能体动态提示词模板（v1/v2）+ 演示用户资料
+scripts/init_prompt.py        # 初始化模板与用户资料到 MySQL（可重复执行）
 tests/                        # pytest 冒烟测试（连真实 MySQL）
 ├── test_sessions.py          #   会话 / 消息 / 面试详情 / 级联删除
 ├── test_stream_chat.py       #   流式对话 / SSE / 上下文 / 失败落库
 ├── test_prompt_templates.py  #   提示词版本 / 拼接 / 回滚 / Redis 缓存
+├── test_prompt_injection.py  #   提示词变量注入（清洗 / 格式化 / 替换 / 接口）
+├── test_profiles.py          #   用户背景资料 CRUD / 冲突 / 校验
 └── test_resources.py         #   过期资源清理
 ```
 
@@ -141,9 +150,13 @@ pytest tests/ -v                             # 运行全部测试（含会话 / 
 | GET | `/api/sessions/{id}/messages?page=&page_size=` | 会话消息分页（正文 + 附件段 + status/interview_id） | 200 |
 | POST | `/api/sessions/{id}/stream-chat` | 流式对话（SSE：meta → delta* → done / error） | 200 |
 | GET | `/api/interviews/{id}` | 面试详情（含 `qa_object`，按 id + 当前用户查询） | 200 |
+| POST | `/api/profiles` | 创建当前用户背景资料（已存在 → 409） | 200 |
+| GET | `/api/profiles/me` | 查询当前用户背景资料（未填写 → 404） | 200 |
+| PUT | `/api/profiles/me` | 局部更新当前用户背景资料（未填写 → 404） | 200 |
+| DELETE | `/api/profiles/me` | 删除当前用户背景资料（未填写 → 404） | 200 |
 | GET | `/api/prompt/templates/{agent_name}/{scene}` | 指定作用域的生效模板（只返回自身，不拼接） | 200 |
 | POST | `/api/prompt/rollback` | 一键回滚到指定版本（body `template_id`） | 200 |
-| GET | `/api/prompt/full-prompt?agent_name=&scene=` | 完整提示词（公共 + 私有拼接） | 200 |
+| GET | `/api/prompt/full-prompt?agent_name=&scene=` | 完整提示词（公共 + 私有拼接 + 用户变量注入） | 200 |
 | GET | `/api/prompt/config/agents` | 7 个智能体映射（名称 / 展示名 / 专属场景） | 200 |
 
 不带 `/api` 前缀的端点：`GET /health`（存活 + 数据库连通性探活）与 `/uploads/*`（旧版本地头像的静态访问，新上传统一走 MinIO）。
@@ -259,7 +272,10 @@ data: {"message_id":12,"status":1}
 ### 提示词版本管理
 
 > 技术方案与业务流程（数据模型、版本链、缓存一致性、接口契约）见 **[docs/prompt-template-guide.md](./docs/prompt-template-guide.md)**。
+> **初始化与逐步验证（模板 + 用户资料 + 注入 + 回滚）见 [docs/prompt-injection-guide.md](./docs/prompt-injection-guide.md)**。
 > Redis 安装、缓存结构与排错完整上手流程见 **[docs/redis-guide.md](./docs/redis-guide.md)**（环境准备、缓存结构、常用命令、常见问题）。
+>
+> 初始化数据：`python scripts/init_prompt.py`（8 作用域 × v1/v2，v2 生效；同时创建演示账号 `prompt_demo / abc12345` 并写入背景资料）。可重复执行，不产生 v3。
 
 多智能体提示词按 `(agent_name, scene)` 维护独立版本链：公共通用模板固定 `agent_name='common'` + `scene='common'`，叠加在私有模板之前。数据源是 MySQL，Redis Hash `prompt:templates:active` 只缓存当前生效版本（启动预热、变更即刷新、未命中回源）。
 
@@ -281,10 +297,12 @@ curl http://127.0.0.1:8000/api/prompt/templates/difficulty_learner/study \
   -H "Authorization: Bearer <access_token>"
 # 公共通用模板：GET /api/prompt/templates/common/common
 
-# 2) 完整提示词：公共通用模板 + 私有模板拼接（公共在前，空行分隔）
+# 2) 完整提示词：公共通用模板 + 私有模板拼接 + 当前用户变量注入
 curl 'http://127.0.0.1:8000/api/prompt/full-prompt?agent_name=difficulty_learner&scene=study' \
   -H "Authorization: Bearer <access_token>"
-# → {public_template, private_template, final_template, variables, ...}
+# → {public_template, private_template, final_template, variables,
+#    rendered_template, injected_variables, ...}
+# final_template 为未渲染的原始拼接；rendered_template 为占位符替换后的最终提示词。
 # 只看公共通用模板：?agent_name=common&scene=common
 
 # 3) 一键回滚：把历史版本重新置为生效
@@ -296,10 +314,36 @@ curl -X POST http://127.0.0.1:8000/api/prompt/rollback \
 curl http://127.0.0.1:8000/api/prompt/config/agents -H "Authorization: Bearer <access_token>"
 ```
 
-- **写入**：新建版本功能暂未实现，待提示词注入功能需求确定后再补充；当前仅提供读取与回滚。
+- **写入**：新建版本功能暂未实现，待后续需求确定后再补充；当前仅提供读取与回滚。
 - **规则**：公共通用模板固定 `agent_name='common', scene='common', template_type=2`；私有模板为智能体名 + 专属场景、`template_type=1`；未知智能体 / 场景 `404`，智能体不支持的场景 `400`。
 - **版本与生效**：版本号按作用域自增；新版本默认生效并下线旧版本，同一作用域始终只有一条 `is_active=1`（事务行锁 + 唯一键兜底）。
 - **缓存**：私有字段 `{agent_name}:{scene}`、公共字段 `common:common`；Redis 故障不影响接口，读取自动回源 MySQL 并回填。缓存 Key 可用 `PROMPT_CACHE_KEY` 覆盖。
+- **用户变量注入**：`full-prompt` 会读取当前用户在 `user_profiles` 中的背景资料，把模板里声明的 `{target_job}` / `{years_experience}` / `{target_level}` / `{target_skills}` / `{weak_topics}` 替换为实际值，返回 `rendered_template` 与 `injected_variables`。处理分三层：验证层（去除控制字符 / 换行 / 花括号 / 反斜杠，长度上限）→ 转换层（数组用「、」连接、缺失默认 `未提供` / `暂无`、年限 0 为 `应届/无经验`）→ 填充层（只替换 `variables` 已声明的占位符，未声明的原样保留，注入值不被二次解析）。用户未填写资料时按默认值渲染。
+
+### 用户背景资料（供提示词变量注入）
+
+`/api/profiles` 整组需登录，`user_id` 一律取自令牌，只能读写自己的资料；一人一份。
+
+```bash
+# 创建（已存在 → 409）
+curl -X POST http://127.0.0.1:8000/api/profiles \
+  -H "Authorization: Bearer <access_token>" -H 'Content-Type: application/json' \
+  -d '{"target_job":"后端工程师","years_experience":3,"target_level":"P6",
+       "target_skills":["Python","MySQL"],"weak_topics":["分布式"]}'
+
+# 查询（未填写 → 404）
+curl http://127.0.0.1:8000/api/profiles/me -H "Authorization: Bearer <access_token>"
+
+# 局部更新（只更新传入字段）
+curl -X PUT http://127.0.0.1:8000/api/profiles/me \
+  -H "Authorization: Bearer <access_token>" -H 'Content-Type: application/json' \
+  -d '{"target_level":"P7"}'
+
+# 删除（未填写 → 404）
+curl -X DELETE http://127.0.0.1:8000/api/profiles/me -H "Authorization: Bearer <access_token>"
+```
+
+字段限制：`target_job` ≤64，`years_experience` 0..60，`target_level` ≤32，`target_skills` / `weak_topics` 为字符串数组（≤20 项、单项 ≤50 字）。删除资料后，`full-prompt` 注入回退为默认值。
 
 ### 统一响应信封
 

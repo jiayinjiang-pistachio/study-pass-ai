@@ -83,7 +83,8 @@ agent-backend/
 │   │   ├── session.py       #   会话管理 + 会话内聊天消息（整组需登录）
 │   │   ├── interview.py     #   面试详情（按 interview_id + user_id）
 │   │   ├── file.py          #   通用文件上传 / 头像读取（上传需登录，头像公开）
-│   │   ├── prompt.py        #   提示词版本管理（读取 / 新建 / 回滚 / 智能体配置）
+│   │   ├── profile.py       #   用户背景资料 CRUD（仅当前用户，整组需登录）
+│   │   ├── prompt.py        #   提示词版本管理（读取 / 回滚 / 智能体配置）
 │   │   └── health.py        #   健康检查（存活 + 数据库连通性），路径 /health
 │   ├── schemas/             # ② 校验层，按业务模块拆分
 │   │   ├── user.py
@@ -92,6 +93,7 @@ agent-backend/
 │   │   ├── message.py       #   聊天消息出参（MessageOut / MessageListOut / SegmentOut）
 │   │   ├── chat.py          #   流式对话入参（StreamChatIn / SegmentIn）
 │   │   ├── interview.py     #   面试详情出参（InterviewOut，含 qa_object）
+│   │   ├── profile.py       #   背景资料入参 / 出参（ProfileCreate / ProfileUpdate / ProfileOut）
 │   │   ├── prompt.py        #   提示词出参（PromptTemplateOut / ActivePromptOut / AgentConfigOut）
 │   │   ├── file.py          #   文件上传出参（FileOut：url / md5 / size / kind / resource_id 等）
 │   │   ├── health.py        #   健康检查出参（HealthOut）
@@ -103,7 +105,9 @@ agent-backend/
 │   │   ├── message_service.py #  会话消息分页查询（正文与附件段分离）
 │   │   ├── chat_service.py  #   流式对话：校验 / 落库 / 记忆上下文 / SSE 编排
 │   │   ├── ai/              #   AI 三层：llm（模型）/ prompt_layer（提示词与链路）/ memory（上下文）
+│   │   ├── profile_service.py #   用户背景资料 CRUD（一人一份，按当前用户隔离）
 │   │   ├── prompt_template_service.py # 提示词版本管理：智能体配置 / 拼接 / 回滚 / Redis 缓存
+│   │   ├── prompt_injection_service.py # 提示词变量注入：验证（清洗 / 限长）→ 转换（格式化 / 默认值）→ 填充（占位符替换）
 │   │   ├── interview_service.py # 面试详情查询（interview_id + user_id 防越权）
 │   │   ├── file_type.py     #   上传文件类型识别（文件头 / 扩展名）与大小上限
 │   │   ├── upload_service.py#   旧本地磁盘上传逻辑（教学保留，运行时不使用）
@@ -113,9 +117,10 @@ agent-backend/
 │   │   └── health_service.py#   健康检查：数据库探活，异常转 SystemException(503)
 │   └── db/                  # ④ 数据库层（SQLAlchemy 2.0 + MySQL）
 │       ├── base.py          #   ORM 基类（Alembic 感知表结构的入口）
-│       ├── models.py        #   表结构声明（User / ChatSession / ChatMessage / Interview / PromptTemplate / Resource）
+│       ├── models.py        #   表结构声明（User / UserProfile / ChatSession / ChatMessage / Interview / PromptTemplate / Resource）
 │       ├── session.py       #   engine + Session 工厂
 │       ├── user_repo.py     #   users 表读写仓储（上层唯一入口）
+│       ├── user_profile_repo.py # user_profiles 表读写仓储（按用户查询 / upsert）
 │       ├── session_repo.py  #   sessions 表读写仓储（列表 / 归属校验 / 更新 / 删除）
 │       ├── message_repo.py  #   chat_messages 表读写仓储（分页 / 记忆历史 / 回写 / 级联清理）
 │       ├── interview_repo.py#   interviews 表读写仓储（按 id + user_id 查询 / 按会话删除）
@@ -125,7 +130,9 @@ agent-backend/
 ├── alembic/                 # Alembic 迁移（versions/ 存版本脚本）
 │   └── env.py               #   注入 MYSQL_URL、暴露 Base.metadata
 ├── scripts/
-│   └── db_sync.sh           # 改模型后一键生成迁移并同步
+│   ├── db_sync.sh           # 改模型后一键生成迁移并同步
+│   ├── agent_prompt.py      # 各智能体动态提示词模板（v1/v2）+ 演示用户资料
+│   └── init_prompt.py       # 初始化模板与用户资料到 MySQL（可重复执行）
 ├── tests/                   # pytest 冒烟测试（连真实 MySQL，见 §9）
 │   ├── conftest.py          #   进程内 ASGI 客户端 + 测试数据清理 + 鉴权夹具
 │   ├── test_smoke.py        #   健康检查 + 用户 CRUD 冒烟用例（CRUD 需鉴权）
@@ -133,6 +140,9 @@ agent-backend/
 │   ├── test_sessions.py     #   会话 / 消息 / 面试详情 / 级联删除用例
 │   ├── test_stream_chat.py  #   流式对话用例（假链路，覆盖 SSE / 上下文 / 失败落库）
 │   ├── test_prompt_templates.py # 提示词版本 / 拼接 / 回滚 / Redis 缓存用例
+│   ├── test_prompt_injection.py # 提示词变量注入：清洗 / 格式化 / 替换 / 接口集成用例
+│   ├── test_profiles.py     # 用户背景资料 CRUD / 409 冲突 / 校验用例
+│   ├── test_agent_prompt.py # 初始化模板数据校验（作用域 / 占位符 / 变量白名单）
 │   └── test_resources.py    #   过期资源清理用例
 ├── alembic.ini              # Alembic 配置（连接串留空，由 env.py 注入）
 ├── pytest.ini               # pytest 配置（asyncio_mode=auto、pythonpath=.）
@@ -246,6 +256,10 @@ agent-backend/
   | 会话消息（分页） | `GET /api/sessions/{session_id}/messages?page=&page_size=` | `200` |
   | 流式对话（SSE） | `POST /api/sessions/{session_id}/stream-chat` | `200` |
   | 面试详情 | `GET /api/interviews/{interview_id}` | `200` |
+  | 创建背景资料 | `POST /api/profiles` | `200` |
+  | 查询背景资料 | `GET /api/profiles/me` | `200` |
+  | 更新背景资料 | `PUT /api/profiles/me` | `200` |
+  | 删除背景资料 | `DELETE /api/profiles/me` | `200` |
   | 作用域生效模板 | `GET /api/prompt/templates/{agent_name}/{scene}` | `200` |
   | 一键回滚 | `POST /api/prompt/rollback` | `200` |
   | 完整提示词（公共 + 私有） | `GET /api/prompt/full-prompt?agent_name=&scene=` | `200` |
@@ -272,13 +286,16 @@ agent-backend/
   - 记忆层仅取最近 `MEMORY_MAX_TURNS` 轮 `status=1` 的消息；单条消息超过 `MEMORY_MESSAGE_MAX_CHARS` 截断；`file_extracted_text` 非空时拼入对应的用户消息。
   - 模型统一走 OpenAI 兼容协议，配置项 `LLM_PROVIDER / LLM_MODEL / LLM_API_KEY / LLM_BASE_URL / LLM_TEMPERATURE / LLM_TIMEOUT / LLM_MAX_RETRIES`；密钥只放环境变量，缺失时该接口返回 503，不影响其他接口启动。
 - **面试记录约定**：`interviews.user_id` 记录归属；`GET /api/interviews/{interview_id}` 必须按 `interview_id + user_id` 查询，返回含 `qa_object` 的详情，防止越权读取他人面试记录。
+- **用户背景资料约定**（`/api/profiles`，整组需登录）：一人一份（`user_profiles.user_id` 唯一），`user_id` 一律取自令牌，不接受客户端传入，因此只能操作自己的资料。`POST /api/profiles` 创建（已存在 → `409`）；`GET/PUT/DELETE /api/profiles/me` 查询 / 局部更新 / 删除（不存在 → `404`）。字段：`target_job`（≤64）、`years_experience`（0..60）、`target_level`（≤32）、`target_skills` / `weak_topics`（字符串数组，≤20 项、单项 ≤50 字）。出参不含 `user_id`。资料供提示词变量注入使用，删除后注入回退为默认值。
 - **提示词版本管理约定**（`/api/prompt`，整组需登录）：
   - 数据表 `prompt_templates`：`agent_name`、`scene`、`template_type`（1=私有，2=公共）、`template_content`、`variables`（JSON 数组字符串）、`version`、`is_active`、`description`、`created_at`。
   - **公共通用模板固定标识 `agent_name='common'` + `scene='common'`**（`template_type=2`）；私有模板为智能体名 + 专属场景（`template_type=1`）。组合不符由校验层拦截 → 422；未知智能体 / 场景 → 404，智能体不支持的场景 → 400。
   - 7 个智能体映射（`prompt_template_service.AGENT_CONFIG`，`GET /api/prompt/config/agents` 暴露）：`flow_controller`/流程总控/`workflow`、`resume_parser`/资料解析/`resume`、`quiz_generate`/出题题库/`quiz`、`interview_host`/面试主考官/`interview`、`interview_evaluator`/面试评测/`evaluation`、`difficulty_learner`/难点学习/`study`、`note_archiver`/笔记归档/`note`。
-  - 版本号按 `(agent_name, scene)` 独立自增；同一作用域仅一条 `is_active=1`。**新建版本暂未实现**，待提示词注入功能需求确定后再补充（接口与服务层均不提供写入）；当前仅支持读取与回滚，回滚即把指定历史版本重新置为生效。
+  - 版本号按 `(agent_name, scene)` 独立自增；同一作用域仅一条 `is_active=1`。**新建版本暂未实现**，待后续需求确定后再补充（接口与服务层均不提供写入）；当前仅支持读取与回滚，回滚即把指定历史版本重新置为生效。
   - `GET /api/prompt/templates/{agent_name}/{scene}` 只返回该作用域自身的生效版本（`common/common` 即公共模板），返回 `PromptTemplateOut`。
   - `GET /api/prompt/full-prompt?agent_name=&scene=` 拼接公共与私有：返回 `public_template`、`private_template`、`final_template`（公共在前、空行分隔）与合并去重后的 `variables`；`common/common` 只取公共通用模板。
+  - **初始化与验证**：`scripts/agent_prompt.py` 维护各智能体 v1/v2 动态模板，`scripts/init_prompt.py` 幂等写入 `prompt_templates` + 演示用户资料并刷新缓存；逐步验证流程见 [`docs/prompt-injection-guide.md`](docs/prompt-injection-guide.md)。
+  - **用户变量注入**（`prompt_injection_service`）：按当前登录用户在 `user_profiles` 中的资料，把 `{target_job}` / `{years_experience}` / `{target_level}` / `{target_skills}` / `{weak_topics}` 替换为实际值，响应额外返回 `rendered_template` 与 `injected_variables`；`final_template` 保持未渲染原文。三层流程：验证层（去控制字符 / 换行 / 花括号 / 反斜杠，标量 100 字、数组项 50 字、最多 20 项、总注入 1000 字）→ 转换层（数组用「、」连接，缺失默认 `未提供` / `暂无`，年限 0 为 `应届/无经验`）→ 填充层（只替换模板 `variables` 已声明的占位符，未声明的原样保留，注入值不二次解析）。无资料时按默认值渲染。
   - Redis 只作缓存：Hash `prompt:templates:active`（`PROMPT_CACHE_KEY`），字段私有 `{agent}:{scene}`、公共 `common:common`。启动时全量预热，写入 / 回滚后刷新对应字段；未命中或 Redis 不可用一律回源 MySQL。TTL 1 小时用于多实例部署的最终一致。
 - **系统接口 / 静态资源**：`GET /health`（运维探活）与 `/uploads/*`（旧版本地文件静态访问，由 `main.py` 挂载）**有意不挂 `/api` 前缀**：前者校验服务存活 + 数据库连通性，正常 `200`、数据库异常 `503`（由 `health_service` 抛 `SystemException(503)`）；后者仅兼容历史上已落盘的头像/文件，新上传统一走 MinIO。这是对「路径以 `/api` 开头」的例外，新增此类端点需在本文档登记。
 - **头像读取例外**：`GET /api/files/avatar/{user_id}` **无需鉴权且返回二进制**（不是统一信封），因为浏览器 `<img src>` 不会携带 `Authorization` 头；供头像展示使用，按 user_id 只暴露头像对象，不暴露其他资源。
@@ -298,6 +315,7 @@ agent-backend/
 - `db` 层对外返回记录**副本**（普通 `dict`），不把会话内 ORM 对象交给调用方。
 - 更换存储实现时，**只改 `db/` 层**，上层调用签名保持不变。
 - `prompt_templates` 的 `(agent_name, scene, version)` 唯一键兜底版本号；公共通用模板固定作用域 `(common, common)`，与私有模板走同一套逻辑，「单一生效」由仓储层 `SELECT ... FOR UPDATE` 事务行锁保证。
+- `user_profiles` 一人一行（`user_id` 唯一，外键 `users.id` + `ON DELETE CASCADE`），存目标岗位 / 工作年限 / 目标等级 / 已掌握技能 / 薄弱点，供提示词变量注入读取；数组字段用 MySQL `JSON`。上层只经 `app/db/user_profile_repo.py` 读写。
 - `chat_messages` 的附件段用 MySQL `JSON` 列存储（`request_segments` / `response_segments`，可为 `NULL`），正文不入 JSON；`status` 为 `Integer`（0/1/2），`interview_id` 为可空 `BigInteger`（**不建外键**，避免与 `interviews.message_id` 形成循环依赖）。`interviews.user_id` 必填并建索引，所有详情查询必须同时带 `interview_id` 与 `user_id`。
 
 ---

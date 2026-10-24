@@ -110,3 +110,73 @@ MinIO 存原文件；
 7.新增过期清理：每天03:00扫描expire_time,先删MinIO对象，再删元数据；
 8.更新requirements(minio依赖)。
 9.代码简洁：职责单一、注释清晰、无冗余分支。
+
+
+# 请在现有FastAPI项目中实现并完善会话与聊天接口，严格遵守以下语义与约束：
+核心语义
+1.`ChatMessage.request_text/response_text`是聊天正文主字段；
+2.`request_segments/,response_segments`只存附件段(`file/image/audio`);
+3.用户提问可带附件；AI回复可带文本或附件（文本进`response_text`,附件进`response_segments);
+4.聊天消息返回需包含`status`与`interview_id`,用于前端面试卡片逻辑：
+5.`Interview`表包含`user_id,获取面试记录需要根据`interview_id`+`user_id`查询。
+需要实现/确认的接口
+1.`GET/sessions?page=&page_size=`会话列表分页（按当前用户）
+2.`POST/sessions` 创建会话主题(title+session_model)
+3.`PUT/sessions/{session_id)` 编辑会话标题
+4.`DELETE/sessions,/{session_id}` 删除会话（级联删除）
+-删除session
+-删除该session下`chat_messages`
+-删除关联`interviews`
+-解析消息segments收集`resource_id`
+-删除`resources`中文件元信息与对象存储文件
+5.`GET/sessions/{session_id}/messages?page=&page_Sze=`分页获取聊天消息
+- 返回：`request_text/response_text` + `request_segments/response_segments` + `status/interview_id/created_at`
+6.`GET/interviews/{interview_id)` 按`interview_id`获取面试详情文本（含`qa_object`)
+
+
+# 请按“三层架构”实现AI聊天流式响应：
+目标：
+
+实现接口：POST /sessions/{session_id}/stream-chat（SSE）
+架构要求：
+
+通过 langchain 实现下面三层功能：
+模型层（llm.py）：只负责 provider -> 模型实例
+提示词层（prompt_layer.py）：只负责 Prompt + 链路组装
+记忆层（memory.py）：负责从数据库查询多轮历史对话记录，构建并拼接成最终的上下文（Context），然后再发送给大模型。
+
+
+# 提示词工程核心需求
+FastAPI 中实现提示词版本管理：支持多智能体、公共模板、一键回滚、Redis缓存。
+
+数据表 (PromptTemplate)
+PromptTemplate 表：
+agent_name: VARCHAR(64) NULL（公共模板此字段为空）
+scene: VARCHAR(64) NOT NULL
+template_type: INT（1=私有, 2=公共）
+template_content: MEDIUMTEXT
+variables: VARCHAR(512)（JSON格式变量列表）
+version: INT（整数自增）
+is_active: INT（0/1，控制生效版本）
+description: VARCHAR(255)（版本说明）
+created_at: BIGINT
+关键规则
+公共模板：agent_name=NULL, template_type=2
+私有模板：agent_name有值, template_type=1
+同一(agent_name,scene)下版本独立
+同一(agent_name,scene)下仅一条is_active=1
+服务类 (PromptTemplateManager)
+实现计算下一版本、启动加载模板到Redis（私有Key为{agent}:{scene}，公共Key为common:{scene}）、从Redis读取模板、拼接公共和私有模板、以及支持一键回滚等核心功能。
+
+API端点 
+GET /prompt/templates/{agent_name}/{scene}
+POST /prompt/rollback（body: template_id）
+GET /prompt/full-prompt - 获取完整的模板提示词信息（公共+私有）
+GET /prompt/config/agents - 获取所有智能体配置信息
+
+配置
+- AGENT_CONFIG：7个智能体映射
+- Redis：支持host, port, db, password
+- 缓存Key：prompt:templates:active
+
+

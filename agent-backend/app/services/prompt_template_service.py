@@ -18,6 +18,7 @@ from ..core import redis_client
 from ..core.config import PROMPT_CACHE_KEY
 from ..core.exceptions import BusinessException
 from ..db import prompt_template_repo
+from . import prompt_injection_service
 
 logger = logging.getLogger(__name__)
 
@@ -245,10 +246,13 @@ def list_agents() -> list[dict]:
     ]
 
 
-def get_combined_template(agent_name: str, scene: str) -> dict:
+def get_combined_template(
+    agent_name: str, scene: str, user_id: int | None = None
+) -> dict:
     """读取生效模板并拼接：公共通用模板在前，私有模板在后，用空行分隔。
 
     agent_name='common' 且 scene='common' 时只返回公共通用模板。
+    user_id 用于注入用户背景变量；为空时按默认值渲染（如通用模板预览）。
     """
     agent = agent_name.strip()
 
@@ -288,13 +292,20 @@ def get_combined_template(agent_name: str, scene: str) -> dict:
         )
     )
 
+    final_template = "\n\n".join(parts)
+    rendered_template, injected_variables = prompt_injection_service.render_for_user(
+        final_template, variables, user_id
+    )
+
     return {
         "agent_name": agent,
         "scene": scene,
         "public_template": public,
         "private_template": private,
-        "final_template": "\n\n".join(parts),
+        "final_template": final_template,
         "variables": variables,
+        "rendered_template": rendered_template,
+        "injected_variables": injected_variables,
     }
 
 

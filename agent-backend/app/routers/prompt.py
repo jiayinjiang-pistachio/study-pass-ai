@@ -43,9 +43,14 @@ def get_active_template(agent_name: str, scene: str) -> dict:
 def get_full_prompt(
     agent_name: str = Query(..., description="智能体名"),
     scene: str = Query(..., description="使用场景"),
+    current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """返回公共模板、私有模板与拼接后的最终提示词。"""
-    return ok(prompt_template_service.get_combined_template(agent_name, scene))
+    """返回公共模板、私有模板、拼接结果与注入用户变量后的最终提示词。"""
+    return ok(
+        prompt_template_service.get_combined_template(
+            agent_name, scene, current_user["id"]
+        )
+    )
 
 
 @router.post(

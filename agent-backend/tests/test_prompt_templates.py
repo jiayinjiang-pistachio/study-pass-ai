@@ -48,8 +48,12 @@ def _cleanup() -> None:
 
 
 @pytest.fixture(autouse=True)
-def cleanup_prompt_templates() -> None:
-    """每个用例前后清理测试模板，避免版本链相互影响。"""
+def cleanup_prompt_templates(isolated_prompt_templates: None) -> None:
+    """每个用例前后清理测试模板，避免版本链相互影响。
+
+    依赖 isolated_prompt_templates：用例期间清空全表（含 init_prompt 种子），
+    结束后自动还原，保证「无生效模板 → 404」等前置状态成立。
+    """
     _cleanup()
     yield
     _cleanup()

@@ -20,6 +20,7 @@ from .routers import auth as auth_router
 from .routers import file as file_router
 from .routers import health as health_router
 from .routers import interview as interview_router
+from .routers import profile as profile_router
 from .routers import prompt as prompt_router
 from .routers import session as session_router
 from .routers import user as user_router
@@ -76,5 +77,6 @@ app.include_router(session_router.router)
 app.include_router(interview_router.router)
 app.include_router(file_router.router)
 app.include_router(file_router.public_router)
+app.include_router(profile_router.router)
 app.include_router(prompt_router.router)
 app.include_router(health_router.router)

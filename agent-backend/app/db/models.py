@@ -41,6 +41,30 @@ class User(Base):
     )
 
 
+class UserProfile(Base):
+    """用户背景资料表：一人一行，供提示词变量注入使用。"""
+
+    __tablename__ = "user_profiles"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # 一个用户只有一份资料；唯一约束同时承担按 user_id 查询的索引
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+    )
+    target_job: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    years_experience: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_level: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # JSON 数组，如 ["Python", "MySQL"]
+    target_skills: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    weak_topics: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[int] = mapped_column(
+        BigInteger, server_default=text("(UNIX_TIMESTAMP())"), nullable=False
+    )
+
+
 class ChatSession(Base):
     """会话表：一次学习 / 面试 / 笔记会话，归属单个用户。"""
 
