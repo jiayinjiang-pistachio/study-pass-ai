@@ -43,3 +43,16 @@ loguru==0.7.3
 # langchain-core 与 langchain-openai 存在版本配套关系，升级时需一起验证
 langchain-core==1.7.0
 langchain-openai==1.7.2
+
+# 向量检索：Qdrant 客户端（知识库 / 语义检索）
+qdrant-client==1.20.0
+
+# DashScope：阿里云百炼 SDK（通义千问对话与 embedding）
+dashscope==2.0.1
+
+# PDF 文本提取：知识库文档解析
+# 注意：PyPDF2 已停止维护（最后一版 3.0.1），新功能建议改用 pypdf；此处按需求引入 PyPDF2
+PyPDF2==3.0.1
+
+# Word 文本提取：知识库 .docx 文档解析
+python-docx==1.2.0

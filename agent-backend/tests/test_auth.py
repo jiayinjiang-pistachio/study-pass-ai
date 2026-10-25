@@ -17,6 +17,8 @@ from app.db import resource_repo
 VALID_PASSWORD = "abc12345"
 PNG_BYTES = b"\x89PNG\r\n\x1a\nfake-avatar"
 PDF_BYTES = b"%PDF-1.4\nfake-pdf"
+DOCX_BYTES = b"PK\x03\x04fake-docx"
+TXT_BYTES = "面试笔记：Redis 缓存穿透".encode()
 WAV_BYTES = b"RIFF\x24\x00\x00\x00WAVEfmt fake-audio"
 
 
@@ -306,6 +308,27 @@ async def test_upload_document_stores_object_without_updating_avatar(
     assert me.json()["data"]["avatar"] is None
 
 
+async def test_upload_docx_and_txt_documents(
+    client: httpx.AsyncClient,
+    auth_headers: dict,
+    minio_ready: None,
+) -> None:
+    """DOCX / TXT 在白名单内 → 200，kind=document。"""
+    docx = await _post_file(
+        client,
+        auth_headers,
+        "resume.docx",
+        DOCX_BYTES,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    txt = await _post_file(client, auth_headers, "notes.txt", TXT_BYTES, "text/plain")
+
+    assert docx.status_code == 200, docx.text
+    assert docx.json()["data"]["kind"] == "document"
+    assert txt.status_code == 200, txt.text
+    assert txt.json()["data"]["kind"] == "document"
+
+
 async def test_upload_audio_stores_object_as_audio_resource(
     client: httpx.AsyncClient,
     auth_user: dict,
@@ -340,6 +363,19 @@ async def test_upload_forged_audio_422(
         "/api/files",
         headers=auth_headers,
         files={"file": ("voice.wav", b"<html>fake</html>", "audio/wav")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == 422
+
+
+async def test_upload_forged_docx_422(
+    client: httpx.AsyncClient, auth_headers: dict
+) -> None:
+    """扩展名为 .docx 但文件头不符 → 422。"""
+    resp = await client.post(
+        "/api/files",
+        headers=auth_headers,
+        files={"file": ("resume.docx", b"<html>fake</html>", "application/msword")},
     )
     assert resp.status_code == 422
     assert resp.json()["code"] == 422
@@ -413,17 +449,15 @@ async def test_upload_extract_only_scene_skips_object(
     assert not minio_client.object_exists(_object_key(auth_user["id"], md5, ".pdf"))
 
 
-async def test_upload_image_without_avatar_purpose_keeps_avatar(
-    client: httpx.AsyncClient, auth_headers: dict, minio_ready: None
+async def test_upload_image_without_avatar_purpose_422(
+    client: httpx.AsyncClient, auth_headers: dict
 ) -> None:
-    """upload_purpose=0 的图片只存资源，不更新头像。"""
+    """图片仅用于头像；upload_purpose=0 的图片 → 422。"""
     resp = await _post_file(
         client, auth_headers, "photo.png", PNG_BYTES, "image/png"
     )
-    assert resp.status_code == 200, resp.text
-
-    me = await client.get("/api/auth/me", headers=auth_headers)
-    assert me.json()["data"]["avatar"] is None
+    assert resp.status_code == 422
+    assert resp.json()["code"] == 422
 
 
 async def test_upload_invalid_purpose_422(
@@ -479,12 +513,13 @@ async def test_upload_forged_pdf_422(client: httpx.AsyncClient, auth_headers: di
 async def test_upload_image_too_large_413(
     client: httpx.AsyncClient, auth_headers: dict
 ) -> None:
-    """图片超过头像上限 2MB → 413。"""
+    """头像图片超过 2MB → 413。"""
     oversized = PNG_BYTES + b"x" * (AVATAR_MAX_BYTES + 1 - len(PNG_BYTES))
     resp = await client.post(
         "/api/files",
         headers=auth_headers,
         files={"file": ("avatar.png", oversized, "image/png")},
+        data={"upload_purpose": "1"},
     )
     assert resp.status_code == 413
     assert resp.json()["code"] == 413

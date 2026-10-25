@@ -1,6 +1,8 @@
 """业务层：上传文件的类型识别与大小上限。
 
-图片以文件头为准（不信任客户端 MIME / 扩展名）；文档与音频按扩展名白名单 + 文件头校验。
+图片以文件头为准（不信任客户端 MIME / 扩展名），仅用于头像；
+文档按扩展名白名单 + 文件头校验，当前只支持 PDF / DOCX / TXT；
+音频同样按扩展名白名单 + 文件头校验。
 """
 
 import mimetypes
@@ -22,32 +24,14 @@ _IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"GIF89a", ".gif"),
 )
 
-# 文档扩展名白名单；带固定文件头的类型额外校验，防止伪造
-_DOCUMENT_SUFFIXES = {
-    ".pdf",
-    ".doc",
-    ".docx",
-    ".xls",
-    ".xlsx",
-    ".ppt",
-    ".pptx",
-    ".txt",
-    ".md",
-    ".csv",
-    ".rtf",
-    ".json",
-}
+# 文档扩展名白名单：只支持 PDF / DOCX / TXT
+_DOCUMENT_SUFFIXES = {".pdf", ".docx", ".txt"}
 _PDF_MAGIC = b"%PDF-"
 _ZIP_MAGICS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
-_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+# 带固定文件头的类型额外校验，防止伪造扩展名
 _DOCUMENT_SIGNATURES = {
     ".pdf": (_PDF_MAGIC,),
     ".docx": _ZIP_MAGICS,
-    ".xlsx": _ZIP_MAGICS,
-    ".pptx": _ZIP_MAGICS,
-    ".doc": (_OLE_MAGIC,),
-    ".xls": (_OLE_MAGIC,),
-    ".ppt": (_OLE_MAGIC,),
 }
 
 # 音频扩展名白名单；同样校验文件头，避免伪装成音频的任意文件落桶
@@ -69,8 +53,11 @@ _AUDIO_MAGICS = {
     ".webm": (b"\x1a\x45\xdf\xa3",),
 }
 
-# 显式声明音频 Content-Type：mimetypes 在不同系统对 .m4a / .opus 的推断不一致
-_AUDIO_CONTENT_TYPES = {
+# 显式声明支持类型的 Content-Type，避免不同系统 mimetypes 推断不一致
+_CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".txt": "text/plain",
     ".mp3": "audio/mpeg",
     ".wav": "audio/wav",
     ".ogg": "audio/ogg",
@@ -134,6 +121,7 @@ def size_limit(kind: str) -> int:
 
 def content_type_for(suffix: str) -> str:
     """按扩展名推断 Content-Type，未知类型回退 octet-stream。"""
-    return _AUDIO_CONTENT_TYPES.get(
+    return _CONTENT_TYPES.get(
         suffix, mimetypes.types_map.get(suffix, DEFAULT_CONTENT_TYPE)
     )
+

@@ -46,22 +46,23 @@ SCENE_TTL = {
 }
 
 
-def _classify(data: bytes, filename: str) -> tuple[str, str]:
-    """返回 (类型, 扩展名)；无法识别时抛 422。"""
+def _classify(data: bytes, filename: str, upload_purpose: int) -> tuple[str, str]:
+    """返回 (类型, 扩展名)；文档只支持 PDF / DOCX / TXT，图片仅用于头像。"""
     image_suffix = file_type.detect_image(data)
     if image_suffix:
-        return file_type.IMAGE, image_suffix
+        if upload_purpose == PURPOSE_AVATAR:
+            return file_type.IMAGE, image_suffix
+    else:
+        document_suffix = file_type.detect_document(data, filename)
+        if document_suffix:
+            return file_type.DOCUMENT, document_suffix
 
-    document_suffix = file_type.detect_document(data, filename)
-    if document_suffix:
-        return file_type.DOCUMENT, document_suffix
-
-    audio_suffix = file_type.detect_audio(data, filename)
-    if audio_suffix:
-        return file_type.AUDIO, audio_suffix
+        audio_suffix = file_type.detect_audio(data, filename)
+        if audio_suffix:
+            return file_type.AUDIO, audio_suffix
 
     raise BusinessException(
-        "不支持的文件类型",
+        "仅支持 PDF / DOCX / TXT 文档、音频文件（头像仅支持图片）",
         http_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=f"filename={filename or 'unknown'}",
     )
@@ -110,7 +111,7 @@ def upload(
             detail=f"user_id={user_id}",
         )
 
-    kind, suffix = _classify(data, filename)
+    kind, suffix = _classify(data, filename, upload_purpose)
     limit = file_type.size_limit(kind)
     if len(data) > limit:
         raise BusinessException(

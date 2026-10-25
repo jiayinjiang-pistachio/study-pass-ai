@@ -201,8 +201,8 @@ curl -X POST http://127.0.0.1:8000/api/files \
   -F "file=@avatar.png" -F "upload_purpose=1" -F "storage_scene=0"
 # → {"kind":"image","url":"minio:/ai-resource/users/1/<md5>.png","resource_id":1,
 #    "storage_path":"minio:/ai-resource/users/1/<md5>.png","expire_time":null,...}
-# 支持图片 / 文档 / 音频（MP3/WAV/OGG/OPUS/M4A/AAC/FLAC/WebM，音频按文档上限 10MB）。
-# upload_purpose=1 且为图片时更新 users.avatar（存 MinIO 路径）。
+# 文档仅支持 PDF / DOCX / TXT（最大 10MB）；音频支持 MP3/WAV/OGG/OPUS/M4A/AAC/FLAC/WebM。
+# 图片仅用于头像（upload_purpose=1，2MB）；upload_purpose=1 且为图片时更新 users.avatar。
 # storage_scene：0=长期 30 天，1=短期 2 小时，2=只写元数据不存原文件。
 # 元数据落 MySQL resources，原文件落 MinIO；同用户相同内容按 MD5 去重。
 
