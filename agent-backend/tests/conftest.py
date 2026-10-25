@@ -6,6 +6,7 @@
 
 import os
 import uuid
+from pathlib import Path
 
 # 在导入 app（进而导入 config）之前，为测试兜底一个 JWT 密钥：
 # 这样即使本地 .env 未配置 JWT_SECRET，测试也能跑；真实环境仍要求显式配置。
@@ -28,6 +29,7 @@ from app.db import (
 from app.db.models import PromptTemplate
 from app.db.session import SessionLocal
 from app.main import app
+from app.rag import core as rag_core
 
 # 本轮测试运行唯一的前缀，用于精确清理测试期间创建的用户
 TEST_PREFIX = f"smoke_{uuid.uuid4().hex[:6]}_"
@@ -44,6 +46,42 @@ def reset_limiter() -> None:
     导致后续用例被误限流。
     """
     rate_limit.reset()
+
+
+@pytest.fixture(autouse=True)
+def stub_rag_ingest(monkeypatch) -> list[dict]:
+    """上传文档会触发后台 RAG；测试中替换为记录器，避免访问 DashScope / Qdrant。"""
+    calls: list[dict] = []
+
+    def _fake_ingest(
+        file_path: str | Path,
+        user_id: int,
+        doc_category: str | None = None,
+        file_name: str | None = None,
+        resource_id: int | None = None,
+        replace: bool = False,
+    ) -> dict:
+        path = Path(file_path)
+        calls.append(
+            {
+                "content": path.read_bytes(),
+                "suffix": path.suffix,
+                "user_id": user_id,
+                "doc_category": doc_category,
+                "file_name": file_name,
+                "resource_id": resource_id,
+                "replace": replace,
+            }
+        )
+        return {
+            "file_name": file_name,
+            "doc_category": doc_category,
+            "chunk_count": 1,
+            "collection": "test",
+        }
+
+    monkeypatch.setattr(rag_core, "ingest_file", _fake_ingest)
+    return calls
 
 
 @pytest_asyncio.fixture

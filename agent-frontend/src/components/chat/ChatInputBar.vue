@@ -1,12 +1,21 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Paperclip, Promotion } from '@element-plus/icons-vue'
+import { Paperclip, Promotion, UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import type { UploadFile, UploadInstance } from 'element-plus'
+import { DocCategory, uploadFile } from '@/api/file'
 import { useCurrentChatModule } from '@/composables/useCurrentModule'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
 
 const MAX_HEIGHT = 120
+const MAX_DOC_SIZE = 10 * 1024 * 1024
+const DOC_EXTENSIONS = ['.pdf', '.doc', '.docx', '.txt']
+const DOC_CATEGORY_OPTIONS: Array<{ label: string; value: DocCategory }> = [
+  { label: '简历', value: DocCategory.Resume },
+  { label: '学习资料', value: DocCategory.StudyMaterial },
+  { label: '通用文档', value: DocCategory.General },
+]
 
 const chatStore = useChatStore()
 const conversationStore = useConversationStore()
@@ -14,6 +23,12 @@ const module = useCurrentChatModule()
 
 const draft = ref('')
 const fieldRef = ref<HTMLTextAreaElement | null>(null)
+
+const dialogVisible = ref(false)
+const uploadRef = ref<UploadInstance>()
+const selectedFile = ref<File | null>(null)
+const docCategory = ref<DocCategory | ''>('')
+const submitting = ref(false)
 
 const sessionId = computed(() =>
   module.value ? conversationStore.activeByModule[module.value] : null,
@@ -24,6 +39,9 @@ const sending = computed(
 const canSend = computed(
   () => draft.value.trim().length > 0 && !sending.value,
 )
+const canSubmit = computed(
+  () => selectedFile.value !== null && docCategory.value !== '' && !submitting.value,
+)
 
 function resize(): void {
   const el = fieldRef.value
@@ -32,8 +50,67 @@ function resize(): void {
   el.style.height = `${Math.min(el.scrollHeight, MAX_HEIGHT)}px`
 }
 
+function resetUpload(): void {
+  uploadRef.value?.clearFiles()
+  selectedFile.value = null
+  docCategory.value = ''
+  submitting.value = false
+}
+
 function handleAttach(): void {
-  ElMessage.info('附件上传功能开发中')
+  dialogVisible.value = true
+}
+
+function validateFile(file: File): boolean {
+  const name = file.name.toLowerCase()
+  if (!DOC_EXTENSIONS.some((suffix) => name.endsWith(suffix))) {
+    ElMessage.error('仅支持 PDF / DOC / DOCX / TXT 文档')
+    return false
+  }
+  if (file.size > MAX_DOC_SIZE) {
+    ElMessage.error('文档不能超过 10MB')
+    return false
+  }
+  return true
+}
+
+function handleFileChange(file: UploadFile): void {
+  const raw = file.raw
+  if (!raw) {
+    selectedFile.value = null
+    return
+  }
+  if (!validateFile(raw)) {
+    uploadRef.value?.clearFiles()
+    selectedFile.value = null
+    return
+  }
+  selectedFile.value = raw
+}
+
+function handleFileRemove(): void {
+  selectedFile.value = null
+}
+
+function handleExceed(): void {
+  ElMessage.warning('一次只能上传一个文档，请先移除已选文件')
+}
+
+async function handleSubmit(): Promise<void> {
+  const file = selectedFile.value
+  const category = docCategory.value
+  if (!file || category === '' || submitting.value) return
+
+  submitting.value = true
+  try {
+    const result = await uploadFile(file, { docCategory: category })
+    ElMessage.success(result.reused ? '文件已存在，已复用' : '文档上传成功')
+    dialogVisible.value = false
+  } catch {
+    // 请求层已统一提示错误，这里不重复弹出
+  } finally {
+    submitting.value = false
+  }
 }
 
 async function handleSend(): Promise<void> {
@@ -89,6 +166,68 @@ async function handleSend(): Promise<void> {
       </div>
     </div>
   </footer>
+
+  <el-dialog
+    v-model="dialogVisible"
+    title="上传文档"
+    width="min(520px, 92vw)"
+    append-to-body
+    :close-on-click-modal="false"
+    @closed="resetUpload"
+  >
+    <div class="doc-upload">
+      <el-upload
+        ref="uploadRef"
+        class="doc-upload__drop"
+        drag
+        :auto-upload="false"
+        :limit="1"
+        :multiple="false"
+        accept=".pdf,.doc,.docx,.txt"
+        :on-change="handleFileChange"
+        :on-remove="handleFileRemove"
+        :on-exceed="handleExceed"
+      >
+        <el-icon class="doc-upload__icon"><UploadFilled /></el-icon>
+        <div class="doc-upload__text">
+          将文档拖到此处，或 <em>点击选择</em>
+        </div>
+        <template #tip>
+          <div class="doc-upload__tip">
+            支持 PDF / DOC / DOCX / TXT，单个文件不超过 10MB
+          </div>
+        </template>
+      </el-upload>
+
+      <div class="doc-upload__field">
+        <span class="doc-upload__label">文档类型</span>
+        <el-select
+          v-model="docCategory"
+          class="doc-upload__select"
+          placeholder="请选择文档类型"
+        >
+          <el-option
+            v-for="option in DOC_CATEGORY_OPTIONS"
+            :key="option.value"
+            :label="option.label"
+            :value="option.value"
+          />
+        </el-select>
+      </div>
+    </div>
+
+    <template #footer>
+      <el-button @click="dialogVisible = false">取消</el-button>
+      <el-button
+        type="primary"
+        :disabled="!canSubmit"
+        :loading="submitting"
+        @click="handleSubmit"
+      >
+        提交
+      </el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style lang="scss" scoped>
@@ -172,6 +311,55 @@ async function handleSend(): Promise<void> {
       opacity: 0.5;
       cursor: not-allowed;
     }
+  }
+}
+
+.doc-upload {
+  &__drop {
+    :deep(.el-upload-dragger) {
+      padding: 26px 16px;
+    }
+  }
+
+  &__icon {
+    font-size: 42px;
+    color: var(--color-text-muted);
+  }
+
+  &__text {
+    margin-top: 8px;
+    font-size: 14px;
+    color: var(--color-text-secondary);
+
+    em {
+      font-style: normal;
+      color: var(--color-brand);
+    }
+  }
+
+  &__tip {
+    margin-top: 8px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--color-text-muted);
+    text-align: center;
+  }
+
+  &__field {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 18px;
+  }
+
+  &__label {
+    flex: none;
+    font-size: 14px;
+    color: var(--color-text);
+  }
+
+  &__select {
+    flex: 1;
   }
 }
 </style>

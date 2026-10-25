@@ -6,10 +6,19 @@ upload_purpose=1 且图片类型时更新头像。
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    Response,
+    UploadFile,
+    status,
+)
 
 from ..core.config import FILE_MAX_BYTES
-from ..schemas.file import FileOut
+from ..schemas.file import DocCategory, FileOut
 from ..schemas.response import ResponseModel, ok
 from ..services import avatar_service
 from ..services import upload_service_minio as upload_service
@@ -29,6 +38,7 @@ router = APIRouter(
     summary="上传文件（文档 PDF / DOC / DOCX / TXT、音频；图片仅头像）",
 )
 async def upload_file(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(
         ...,
         description="PDF / DOC / DOCX / TXT 文档或音频，最大 10MB；头像图片 2MB",
@@ -39,9 +49,13 @@ async def upload_file(
     storage_scene: Annotated[
         int, Form(ge=0, le=2, description="存储场景：0=长期，1=短期，2=只提取内容")
     ] = 0,
+    doc_category: Annotated[
+        DocCategory | None,
+        Form(description="文档业务类型：resume / study_material / general"),
+    ] = None,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """读取上传内容，交由业务层识别类型、去重落库并更新头像。"""
+    """读取上传内容，交由业务层识别类型、去重落库、更新头像并异步接入 RAG。"""
     # 多读 1 字节即可判断是否超限，避免把超大文件整体读进内存
     data = await file.read(FILE_MAX_BYTES + 1)
     return ok(
@@ -51,6 +65,8 @@ async def upload_file(
             file.filename or "",
             upload_purpose=upload_purpose,
             storage_scene=storage_scene,
+            doc_category=doc_category,
+            background_tasks=background_tasks,
         )
     )
 

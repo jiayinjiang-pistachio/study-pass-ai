@@ -48,6 +48,18 @@ def insert(record: dict) -> dict:
         return _to_dict(obj)
 
 
+def update_doc_category(resource_id: int, doc_category: str) -> dict | None:
+    """更新文档业务类型，未找到返回 None。"""
+    with SessionLocal() as session:
+        obj = session.get(Resource, resource_id)
+        if obj is None:
+            return None
+        obj.doc_category = doc_category
+        session.commit()
+        session.refresh(obj)
+        return _to_dict(obj)
+
+
 def delete(resource_id: int) -> bool:
     """按 id 删除，返回是否删除成功。"""
     with SessionLocal() as session:

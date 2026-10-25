@@ -230,6 +230,8 @@ class Resource(Base):
     upload_purpose: Mapped[int] = mapped_column(
         TINYINT, server_default=text("0"), nullable=False
     )  # 0=普通资源，1=用户头像
+    # 文档业务类型：resume / study_material / general；仅 resource_type=0（文档）有意义
+    doc_category: Mapped[str | None] = mapped_column(String(32), nullable=True)
     file_name: Mapped[str] = mapped_column(String(255), nullable=False)
     # 文件内容 MD5；与 user_id 组成唯一键，实现用户级去重
     file_hash: Mapped[str] = mapped_column(String(64), nullable=False)

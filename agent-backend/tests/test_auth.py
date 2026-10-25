@@ -285,25 +285,41 @@ async def test_upload_document_stores_object_without_updating_avatar(
     auth_user: dict,
     auth_headers: dict,
     minio_ready: None,
+    stub_rag_ingest: list[dict],
 ) -> None:
-    """文档 → 只存资源和对象，不修改 avatar；长期场景约 30 天过期。"""
+    """文档 → 只存资源和对象，不修改 avatar；长期场景约 30 天过期并异步接入 RAG。"""
     resp = await _post_file(
         client,
         auth_headers,
         "report.pdf",
         PDF_BYTES,
         "application/pdf",
+        doc_category="resume",
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
     md5 = hashlib.md5(PDF_BYTES).hexdigest()
 
     assert data["kind"] == "document"
+    assert data["doc_category"] == "resume"
+    assert data["reused"] is False
     assert data["storage_path"] == _storage_path(auth_user["id"], md5, ".pdf")
     assert minio_client.object_exists(_object_key(auth_user["id"], md5, ".pdf"))
 
     remaining = datetime.fromisoformat(data["expire_time"]) - datetime.now()
     assert timedelta(days=29) < remaining <= timedelta(days=30, minutes=5)
+
+    resource = resource_repo.get(data["resource_id"])
+    assert resource is not None
+    assert resource["doc_category"] == "resume"
+
+    assert len(stub_rag_ingest) == 1
+    call = stub_rag_ingest[0]
+    assert call["content"] == PDF_BYTES
+    assert call["suffix"] == ".pdf"
+    assert call["doc_category"] == "resume"
+    assert call["resource_id"] == data["resource_id"]
+    assert call["replace"] is False
 
     me = await client.get("/api/auth/me", headers=auth_headers)
     assert me.json()["data"]["avatar"] is None
@@ -314,23 +330,41 @@ async def test_upload_doc_docx_and_txt_documents(
     auth_headers: dict,
     minio_ready: None,
 ) -> None:
-    """DOC / DOCX / TXT 在白名单内 → 200，kind=document。"""
-    doc = await _post_file(client, auth_headers, "resume.doc", DOC_BYTES, "application/msword")
+    """DOC / DOCX / TXT 在白名单内 → 200，kind=document，分类原样返回。"""
+    doc = await _post_file(
+        client,
+        auth_headers,
+        "resume.doc",
+        DOC_BYTES,
+        "application/msword",
+        doc_category="resume",
+    )
     docx = await _post_file(
         client,
         auth_headers,
         "resume.docx",
         DOCX_BYTES,
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        doc_category="resume",
     )
-    txt = await _post_file(client, auth_headers, "notes.txt", TXT_BYTES, "text/plain")
+    txt = await _post_file(
+        client,
+        auth_headers,
+        "notes.txt",
+        TXT_BYTES,
+        "text/plain",
+        doc_category="study_material",
+    )
 
     assert doc.status_code == 200, doc.text
     assert doc.json()["data"]["kind"] == "document"
+    assert doc.json()["data"]["doc_category"] == "resume"
     assert docx.status_code == 200, docx.text
     assert docx.json()["data"]["kind"] == "document"
+    assert docx.json()["data"]["doc_category"] == "resume"
     assert txt.status_code == 200, txt.text
     assert txt.json()["data"]["kind"] == "document"
+    assert txt.json()["data"]["doc_category"] == "study_material"
 
 
 async def test_upload_audio_stores_object_as_audio_resource(
@@ -338,22 +372,31 @@ async def test_upload_audio_stores_object_as_audio_resource(
     auth_user: dict,
     auth_headers: dict,
     minio_ready: None,
+    stub_rag_ingest: list[dict],
 ) -> None:
-    """音频 → resource_type=2、kind=audio，落 MinIO 且不影响头像。"""
+    """音频 → resource_type=2、kind=audio；doc_category 被忽略且不触发 RAG。"""
     resp = await _post_file(
-        client, auth_headers, "voice.wav", WAV_BYTES, "audio/wav"
+        client,
+        auth_headers,
+        "voice.wav",
+        WAV_BYTES,
+        "audio/wav",
+        doc_category="resume",
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
     md5 = hashlib.md5(WAV_BYTES).hexdigest()
 
     assert data["kind"] == "audio"
+    assert data["doc_category"] is None
     assert data["storage_path"] == _storage_path(auth_user["id"], md5, ".wav")
     assert minio_client.object_exists(_object_key(auth_user["id"], md5, ".wav"))
 
     resource = resource_repo.get(data["resource_id"])
     assert resource is not None
     assert resource["resource_type"] == 2
+    assert resource["doc_category"] is None
+    assert stub_rag_ingest == []
 
     me = await client.get("/api/auth/me", headers=auth_headers)
     assert me.json()["data"]["avatar"] is None
@@ -385,27 +428,114 @@ async def test_upload_forged_docx_422(
     assert resp.json()["code"] == 422
 
 
+async def test_upload_document_requires_doc_category_422(
+    client: httpx.AsyncClient, auth_headers: dict
+) -> None:
+    """文档必须显式传 doc_category，否则 422。"""
+    resp = await _post_file(
+        client, auth_headers, "report.pdf", PDF_BYTES, "application/pdf"
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == 422
+
+
+async def test_upload_document_invalid_doc_category_422(
+    client: httpx.AsyncClient, auth_headers: dict
+) -> None:
+    """doc_category 不在枚举内 → 422（表单校验）。"""
+    resp = await _post_file(
+        client,
+        auth_headers,
+        "report.pdf",
+        PDF_BYTES,
+        "application/pdf",
+        doc_category="unknown",
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == 422
+
+
 async def test_upload_same_content_is_deduplicated(
     client: httpx.AsyncClient,
     auth_user: dict,
     auth_headers: dict,
     minio_ready: None,
+    stub_rag_ingest: list[dict],
 ) -> None:
-    """同用户同内容重复上传 → 复用同一条资源记录（文件名首次为准）。"""
+    """同用户同内容同分类重复上传 → 复用资源记录且不重复入库。"""
     first = await _post_file(
-        client, auth_headers, "a.pdf", PDF_BYTES, "application/pdf"
+        client,
+        auth_headers,
+        "a.pdf",
+        PDF_BYTES,
+        "application/pdf",
+        doc_category="resume",
     )
     second = await _post_file(
-        client, auth_headers, "b.pdf", PDF_BYTES, "application/pdf"
+        client,
+        auth_headers,
+        "b.pdf",
+        PDF_BYTES,
+        "application/pdf",
+        doc_category="resume",
     )
 
     assert first.status_code == 200 and second.status_code == 200
-    assert first.json()["data"]["resource_id"] == second.json()["data"]["resource_id"]
-    assert first.json()["data"]["storage_path"] == second.json()["data"]["storage_path"]
+    first_data = first.json()["data"]
+    second_data = second.json()["data"]
+    assert first_data["reused"] is False
+    assert second_data["reused"] is True
+    assert first_data["resource_id"] == second_data["resource_id"]
+    assert first_data["storage_path"] == second_data["storage_path"]
+    assert second_data["doc_category"] == "resume"
 
     rows = resource_repo.list_by_user(auth_user["id"])
     assert len(rows) == 1
     assert rows[0]["file_name"] == "a.pdf"
+    assert len(stub_rag_ingest) == 1
+
+
+async def test_upload_same_content_different_category_reingests(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    minio_ready: None,
+    stub_rag_ingest: list[dict],
+) -> None:
+    """重复上传但分类变化 → 更新 doc_category 并以 replace=True 重新入库。"""
+    first = await _post_file(
+        client,
+        auth_headers,
+        "a.pdf",
+        PDF_BYTES,
+        "application/pdf",
+        doc_category="resume",
+    )
+    second = await _post_file(
+        client,
+        auth_headers,
+        "b.pdf",
+        PDF_BYTES,
+        "application/pdf",
+        doc_category="study_material",
+    )
+
+    assert first.status_code == 200 and second.status_code == 200
+    first_data = first.json()["data"]
+    second_data = second.json()["data"]
+    assert second_data["reused"] is True
+    assert second_data["resource_id"] == first_data["resource_id"]
+    assert second_data["doc_category"] == "study_material"
+
+    rows = resource_repo.list_by_user(auth_user["id"])
+    assert len(rows) == 1
+    assert rows[0]["doc_category"] == "study_material"
+
+    assert len(stub_rag_ingest) == 2
+    assert stub_rag_ingest[0]["replace"] is False
+    assert stub_rag_ingest[1]["replace"] is True
+    assert stub_rag_ingest[1]["resource_id"] == first_data["resource_id"]
+    assert stub_rag_ingest[1]["doc_category"] == "study_material"
 
 
 async def test_upload_short_scene_sets_two_hour_expiry(
@@ -421,6 +551,7 @@ async def test_upload_short_scene_sets_two_hour_expiry(
         PDF_BYTES,
         "application/pdf",
         storage_scene="1",
+        doc_category="general",
     )
     assert resp.status_code == 200, resp.text
 
@@ -442,6 +573,7 @@ async def test_upload_extract_only_scene_skips_object(
         PDF_BYTES,
         "application/pdf",
         storage_scene="2",
+        doc_category="general",
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]

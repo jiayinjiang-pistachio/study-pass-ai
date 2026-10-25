@@ -15,7 +15,14 @@ from dashscope import TextEmbedding
 from docx import Document
 from PyPDF2 import PdfReader
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 
 from ..core import config
 from ..core.exceptions import BusinessException, SystemException
@@ -225,8 +232,16 @@ def _embed(texts: list[str]) -> list[list[float]]:
     return [vector for vector in vectors if vector is not None]
 
 
-def _write_qdrant(payloads: list[dict], vectors: list[list[float]]) -> None:
-    """确保 collection 存在后批量 upsert；每条文本生成独立 uuid4 点位。"""
+def _write_qdrant(
+    payloads: list[dict],
+    vectors: list[list[float]],
+    resource_id: int | None = None,
+    replace: bool = False,
+) -> None:
+    """确保 collection 存在；replace 时先删同一资源的旧向量，再批量 upsert。"""
+    if replace and resource_id is None:
+        raise ValueError("replace=True 时必须提供 resource_id")
+
     try:
         client = QdrantClient(
             host=config.QDRANT_HOST, port=config.QDRANT_PORT, timeout=30
@@ -240,6 +255,22 @@ def _write_qdrant(payloads: list[dict], vectors: list[list[float]]) -> None:
                 collection_name=COLLECTION_NAME,
                 vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
             )
+
+        # 分类变更重新入库前先清理旧向量，避免同一文件留下两套分类的 chunk
+        if replace and resource_id is not None:
+            client.delete(
+                collection_name=COLLECTION_NAME,
+                points_selector=Filter(
+                    must=[
+                        FieldCondition(
+                            key="resource_id",
+                            match=MatchValue(value=resource_id),
+                        )
+                    ]
+                ),
+                wait=True,
+            )
+
         client.upsert(
             collection_name=COLLECTION_NAME,
             points=[
@@ -259,11 +290,14 @@ def ingest_file(
     user_id: int,
     doc_category: str | None = None,
     file_name: str | None = None,
+    resource_id: int | None = None,
+    replace: bool = False,
 ) -> dict:
     """把单个文件向量化写入 Qdrant，返回入库摘要。
 
     doc_category 显式传入时优先使用（只接受 resume / study_material / general）；
-    file_name 用于保留上传时的原始文件名（落盘路径可能是 MD5 名）。
+    file_name 用于保留上传时的原始文件名（落盘路径可能是 MD5 名）；
+    resource_id 写入 payload 用于按资源重灌，replace=True 时先删除该资源旧向量。
     """
     path = Path(file_path)
     if not path.is_file():
@@ -317,10 +351,11 @@ def ingest_file(
             "doc_category": category,
             "file_name": resolved_name,
             "chunk_index": index,
+            "resource_id": resource_id,
         }
         for index, chunk in enumerate(chunks)
     ]
-    _write_qdrant(payloads, vectors)
+    _write_qdrant(payloads, vectors, resource_id=resource_id, replace=replace)
 
     logger.info(
         "知识库入库完成：file=%s user=%s category=%s chunks=%s",

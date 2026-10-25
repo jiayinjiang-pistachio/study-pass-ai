@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+DocCategory = Literal["resume", "study_material", "general"]
+
 
 class FileOut(BaseModel):
     """上传结果：图片可能同时更新了用户头像。"""
@@ -18,3 +20,7 @@ class FileOut(BaseModel):
     resource_id: int = Field(..., description="resources 表主键")
     storage_path: str = Field(..., description="MinIO 路径；只提取内容场景为空串")
     expire_time: datetime | None = Field(None, description="资源过期时间，空表示不过期")
+    doc_category: DocCategory | None = Field(
+        None, description="文档业务类型；非文档为 null"
+    )
+    reused: bool = Field(..., description="是否复用了该用户已上传的同内容资源")
