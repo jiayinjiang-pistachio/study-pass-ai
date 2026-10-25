@@ -203,6 +203,13 @@ def get_redis_config() -> RedisConfig:
     )
 
 
+# ---- RAG 知识库向量化配置（DashScope 向量化 + Qdrant 持久化）----
+# 密钥只走环境变量；Qdrant 默认本机 6333，部署时按实际地址覆盖。
+DASHSCOPE_API_KEY: str | None = os.getenv("DASHSCOPE_API_KEY")
+QDRANT_HOST: str = os.getenv("QDRANT_HOST", "127.0.0.1")
+QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", "6333"))
+
+
 class MinioConfig(NamedTuple):
     """MinIO 客户端连接参数。"""
 

@@ -13,7 +13,7 @@ class FileOut(BaseModel):
     md5: str = Field(..., description="文件内容的 MD5（用户级去重键）")
     size: int = Field(..., description="文件字节数")
     kind: Literal["image", "document", "audio"] = Field(
-        ..., description="识别出的文件类型：文档为 PDF / DOCX / TXT，图片仅头像"
+        ..., description="识别出的文件类型：文档为 PDF / DOC / DOCX / TXT，图片仅头像"
     )
     resource_id: int = Field(..., description="resources 表主键")
     storage_path: str = Field(..., description="MinIO 路径；只提取内容场景为空串")

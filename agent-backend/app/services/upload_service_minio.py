@@ -47,7 +47,7 @@ SCENE_TTL = {
 
 
 def _classify(data: bytes, filename: str, upload_purpose: int) -> tuple[str, str]:
-    """返回 (类型, 扩展名)；文档只支持 PDF / DOCX / TXT，图片仅用于头像。"""
+    """返回 (类型, 扩展名)；文档支持 PDF / DOC / DOCX / TXT，图片仅用于头像。"""
     image_suffix = file_type.detect_image(data)
     if image_suffix:
         if upload_purpose == PURPOSE_AVATAR:
@@ -62,7 +62,7 @@ def _classify(data: bytes, filename: str, upload_purpose: int) -> tuple[str, str
             return file_type.AUDIO, audio_suffix
 
     raise BusinessException(
-        "仅支持 PDF / DOCX / TXT 文档、音频文件（头像仅支持图片）",
+        "仅支持 PDF / DOC / DOCX / TXT 文档、音频文件（头像仅支持图片）",
         http_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=f"filename={filename or 'unknown'}",
     )

@@ -26,12 +26,12 @@ router = APIRouter(
     "",
     response_model=ResponseModel[FileOut],
     status_code=status.HTTP_200_OK,
-    summary="上传文件（文档 PDF / DOCX / TXT、音频；图片仅头像）",
+    summary="上传文件（文档 PDF / DOC / DOCX / TXT、音频；图片仅头像）",
 )
 async def upload_file(
     file: UploadFile = File(
         ...,
-        description="PDF / DOCX / TXT 文档或音频，最大 10MB；头像图片 2MB",
+        description="PDF / DOC / DOCX / TXT 文档或音频，最大 10MB；头像图片 2MB",
     ),
     upload_purpose: Annotated[
         int, Form(ge=0, le=1, description="上传用途：0=普通资源，1=用户头像")

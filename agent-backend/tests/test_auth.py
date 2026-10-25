@@ -17,6 +17,7 @@ from app.db import resource_repo
 VALID_PASSWORD = "abc12345"
 PNG_BYTES = b"\x89PNG\r\n\x1a\nfake-avatar"
 PDF_BYTES = b"%PDF-1.4\nfake-pdf"
+DOC_BYTES = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1fake-doc"
 DOCX_BYTES = b"PK\x03\x04fake-docx"
 TXT_BYTES = "面试笔记：Redis 缓存穿透".encode()
 WAV_BYTES = b"RIFF\x24\x00\x00\x00WAVEfmt fake-audio"
@@ -308,12 +309,13 @@ async def test_upload_document_stores_object_without_updating_avatar(
     assert me.json()["data"]["avatar"] is None
 
 
-async def test_upload_docx_and_txt_documents(
+async def test_upload_doc_docx_and_txt_documents(
     client: httpx.AsyncClient,
     auth_headers: dict,
     minio_ready: None,
 ) -> None:
-    """DOCX / TXT 在白名单内 → 200，kind=document。"""
+    """DOC / DOCX / TXT 在白名单内 → 200，kind=document。"""
+    doc = await _post_file(client, auth_headers, "resume.doc", DOC_BYTES, "application/msword")
     docx = await _post_file(
         client,
         auth_headers,
@@ -323,6 +325,8 @@ async def test_upload_docx_and_txt_documents(
     )
     txt = await _post_file(client, auth_headers, "notes.txt", TXT_BYTES, "text/plain")
 
+    assert doc.status_code == 200, doc.text
+    assert doc.json()["data"]["kind"] == "document"
     assert docx.status_code == 200, docx.text
     assert docx.json()["data"]["kind"] == "document"
     assert txt.status_code == 200, txt.text

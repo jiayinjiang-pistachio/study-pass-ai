@@ -28,6 +28,7 @@ uvicorn app.main:app --reload --port 8000
 - 健康检查：`GET /health`（存活 + 数据库连通性；数据库异常返回 503）
 - 流式对话需在 `.env` 中配置 `LLM_PROVIDER / LLM_MODEL / LLM_API_KEY`（OpenAI 兼容协议，可选 `LLM_BASE_URL`）；未配置时仅该接口返回 503，其他接口不受影响。
 - 提示词版本管理默认使用本机 Redis 做缓存（`REDIS_HOST=127.0.0.1`、`REDIS_PORT=6379`、`REDIS_DB=1`，可选 `REDIS_PASSWORD`）。默认 db1 是为与其他项目常用的 db0 隔离；Redis 不可用时自动回源 MySQL，接口不受影响。
+- RAG 向量化入库需配置 `DASHSCOPE_API_KEY`（text-embedding-v4，1024 维）与 Qdrant 地址 `QDRANT_HOST` / `QDRANT_PORT`（默认 `127.0.0.1:6333`）；collection `knowledge_chunks` 不存在时自动创建。
 
 ## 数据库迁移（Alembic）
 
@@ -90,6 +91,8 @@ app/
 │   ├── upload_service_minio.py # 文件上传（MinIO + resources 元数据）
 │   ├── resource_cleanup.py   #   过期资源清理
 │   └── health_service.py     #   健康检查：数据库探活，异常转 503
+├── rag/
+│   └── core.py               # RAG 入库：解析 → 清洗 → 分类 → 分块 → 向量化 → 写 Qdrant
 └── db/                       # ④ 数据库层：SQLAlchemy 2.0 + MySQL
     ├── base.py               #   ORM 基类
     ├── models.py             #   表结构声明（User / UserProfile / ChatSession / ChatMessage / Interview / PromptTemplate / Resource）
@@ -201,7 +204,7 @@ curl -X POST http://127.0.0.1:8000/api/files \
   -F "file=@avatar.png" -F "upload_purpose=1" -F "storage_scene=0"
 # → {"kind":"image","url":"minio:/ai-resource/users/1/<md5>.png","resource_id":1,
 #    "storage_path":"minio:/ai-resource/users/1/<md5>.png","expire_time":null,...}
-# 文档仅支持 PDF / DOCX / TXT（最大 10MB）；音频支持 MP3/WAV/OGG/OPUS/M4A/AAC/FLAC/WebM。
+# 文档支持 PDF / DOC / DOCX / TXT（最大 10MB）；音频支持 MP3/WAV/OGG/OPUS/M4A/AAC/FLAC/WebM。
 # 图片仅用于头像（upload_purpose=1，2MB）；upload_purpose=1 且为图片时更新 users.avatar。
 # storage_scene：0=长期 30 天，1=短期 2 小时，2=只写元数据不存原文件。
 # 元数据落 MySQL resources，原文件落 MinIO；同用户相同内容按 MD5 去重。
