@@ -129,6 +129,7 @@ export const useChatStore = defineStore('chat', () => {
       responseText: '',
       requestSegments: [],
       responseSegments: [],
+      sources: [],
       status: 0,
       interviewId: null,
       createdAt,
@@ -156,6 +157,10 @@ export const useChatStore = defineStore('chat', () => {
           onDelta: (delta) => {
             received += delta
             item.responseText = received
+          },
+          onDone: (done) => {
+            // 来源只挂在消息结构上展示，不拼进 responseText
+            item.sources = done.sources
           },
         },
       )

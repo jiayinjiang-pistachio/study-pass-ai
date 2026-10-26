@@ -56,7 +56,7 @@ src/
 │   ├── common/       # 通用展示组件（EmptyState / LoadingDots）
 │   ├── layout/       # 顶栏相关（TopNavBar / ModuleTabs）
 │   ├── sidebar/      # 侧栏（ConversationSidebar / ConversationList / NoteList / SidebarItem）
-│   └── chat/         # 聊天区（ChatMessageList / ChatMessageItem / MsgFile / InterviewCard / ChatInputBar）
+│   └── chat/         # 聊天区（ChatMessageList / ChatMessageItem / ChatSourceList / MsgFile / InterviewCard / ChatInputBar）
 ├── composables/      # 组合式函数，命名 useXxx.ts（useAutoScroll / useCurrentModule）
 ├── layouts/          # 布局组件（AppShell.vue）
 ├── mock/             # 接口 Mock（仅开发环境加载，见 §7.2；index.ts / notes.ts，会话已接真实后端）

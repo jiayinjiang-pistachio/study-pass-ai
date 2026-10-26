@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Service, User } from '@element-plus/icons-vue'
+import ChatSourceList from './ChatSourceList.vue'
 import InterviewCard from './InterviewCard.vue'
 import MsgFile from './MsgFile.vue'
 import type { ChatMessage } from '@/types/chat'
@@ -34,6 +35,7 @@ const hasResponse = computed(
   () =>
     props.message.responseText.trim().length > 0 ||
     props.message.responseSegments.length > 0 ||
+    props.message.sources.length > 0 ||
     showInterviewCard.value ||
     responsePlaceholder.value.length > 0,
 )
@@ -97,6 +99,10 @@ const timeLabel = computed(() => {
         <InterviewCard
           v-if="showInterviewCard && message.interviewId !== null"
           :interview-id="message.interviewId"
+        />
+        <ChatSourceList
+          v-if="message.sources.length"
+          :sources="message.sources"
         />
       </div>
     </div>
