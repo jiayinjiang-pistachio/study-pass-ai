@@ -1,20 +1,20 @@
-"""切片原文存储：Qdrant 只存向量与过滤字段，原文写入 MySQL knowledge_chunks。
+"""切片原文读写：Qdrant 只存向量与过滤字段，原文写入 MySQL knowledge_chunks。
 
 vector_id 与 Qdrant Point id 相同，检索命中向量后按它回表取原文。
-本模块只负责写库，commit / rollback 由调用方控制。
+写入的 commit / rollback 由调用方控制。
 """
 
 import logging
 from collections.abc import Sequence
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..db.models import KnowledgeChunk
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["save_chunks"]
+__all__ = ["fetch_chunks_by_vector_ids", "save_chunks"]
 
 
 def save_chunks(
@@ -49,3 +49,28 @@ def save_chunks(
     # 提前 flush，让唯一键 / 外键等数据库错误在调用方 commit 前暴露
     db.flush()
     return len(chunks)
+
+
+def fetch_chunks_by_vector_ids(
+    db: Session, vector_ids: Sequence[str]
+) -> dict[str, dict]:
+    """按 vector_id 批量回表取切片原文，返回 {vector_id: 记录}。
+
+    检索只命中部分切片，返回字典便于调用方按 Qdrant 得分顺序还原结果集。
+    """
+    if not vector_ids:
+        return {}
+
+    rows = db.scalars(
+        select(KnowledgeChunk).where(KnowledgeChunk.vector_id.in_(vector_ids))
+    ).all()
+    return {
+        row.vector_id: {
+            "vector_id": row.vector_id,
+            "resource_id": row.resource_id,
+            "chunk_index": row.chunk_index,
+            "text": row.text,
+            "char_count": row.char_count,
+        }
+        for row in rows
+    }

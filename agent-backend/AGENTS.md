@@ -117,7 +117,8 @@ agent-backend/
 │   │   └── health_service.py#   健康检查：数据库探活，异常转 SystemException(503)
 │   ├── rag/                 # RAG 知识库（向量化入库，独立于四层调用链）
 │   │   ├── core.py          #   解析 → 清洗 → 分类 → 分块 → 向量化 → 写 Qdrant + 原文入 MySQL（对外仅 ingest_file）
-│   │   ├── chunk_store.py   #   切片原文写 MySQL knowledge_chunks（save_chunks，commit 由调用方控制）
+│   │   ├── retriever.py     #   问题向量化 → Qdrant 近邻检索（user_id 隔离 + 可选 doc_category）→ 回表取原文（对外仅 search_similar_chunks）
+│   │   ├── chunk_store.py   #   切片原文读写 MySQL knowledge_chunks（save_chunks / fetch_chunks_by_vector_ids）
 │   │   └── ocr.py           #   扫描页 OCR 兜底：PDFium 渲染 → 火山引擎 OCRNormal（对外仅 ocr_pdf）
 │   └── db/                  # ④ 数据库层（SQLAlchemy 2.0 + MySQL）
 │       ├── base.py          #   ORM 基类（Alembic 感知表结构的入口）
