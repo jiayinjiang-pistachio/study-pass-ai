@@ -215,6 +215,43 @@ class PromptTemplate(Base):
     )
 
 
+class KnowledgeChunk(Base):
+    """知识库切片原文表：Qdrant 只存向量，原文与统计字段落 MySQL。
+
+    vector_id 与 Qdrant Point id 相同，检索命中向量后按它回表取原文。
+    """
+
+    __tablename__ = "knowledge_chunks"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # 与 Qdrant Point id 一一对应；全局唯一，避免两张存储出现错配
+    vector_id: Mapped[str] = mapped_column(
+        String(36), unique=True, index=True, nullable=False
+    )
+    # 归属资源：资源删除时级联清理切片，避免残留孤立原文
+    resource_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("resources.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    # 在本次入库切片序列中的位置，从 0 开始
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(MEDIUMTEXT, nullable=False)
+    # 字符数，便于统计切片长度分布；与 text 同时写入
+    char_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    create_time: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        # 同一资源的切片序号唯一；重灌时按 resource_id 整体替换
+        UniqueConstraint(
+            "resource_id", "chunk_index", name="uk_chunk_resource_index"
+        ),
+    )
+
+
 class Resource(Base):
     """资源元数据表：统一管理文件 / 图片 / 音频，原文件落在 MinIO。"""
 

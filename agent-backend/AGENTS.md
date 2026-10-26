@@ -116,11 +116,12 @@ agent-backend/
 │   │   ├── resource_cleanup.py # 每天 03:00 清理过期资源（先删对象再删元数据）
 │   │   └── health_service.py#   健康检查：数据库探活，异常转 SystemException(503)
 │   ├── rag/                 # RAG 知识库（向量化入库，独立于四层调用链）
-│   │   ├── core.py          #   解析 → 清洗 → 分类 → 分块 → 向量化 → 写 Qdrant（对外仅 ingest_file）
+│   │   ├── core.py          #   解析 → 清洗 → 分类 → 分块 → 向量化 → 写 Qdrant + 原文入 MySQL（对外仅 ingest_file）
+│   │   ├── chunk_store.py   #   切片原文写 MySQL knowledge_chunks（save_chunks，commit 由调用方控制）
 │   │   └── ocr.py           #   扫描页 OCR 兜底：PDFium 渲染 → 火山引擎 OCRNormal（对外仅 ocr_pdf）
 │   └── db/                  # ④ 数据库层（SQLAlchemy 2.0 + MySQL）
 │       ├── base.py          #   ORM 基类（Alembic 感知表结构的入口）
-│       ├── models.py        #   表结构声明（User / UserProfile / ChatSession / ChatMessage / Interview / PromptTemplate / Resource）
+│       ├── models.py        #   表结构声明（User / UserProfile / ChatSession / ChatMessage / Interview / PromptTemplate / KnowledgeChunk / Resource）
 │       ├── session.py       #   engine + Session 工厂
 │       ├── user_repo.py     #   users 表读写仓储（上层唯一入口）
 │       ├── user_profile_repo.py # user_profiles 表读写仓储（按用户查询 / upsert）
@@ -272,7 +273,7 @@ agent-backend/
 
 - **鉴权约定**：除注册 / 登录 / 刷新 / 健康检查外，接口需携带 `Authorization: Bearer <access_token>`；令牌缺失 / 过期 / 非法 / 类型不符一律返回 `401`（由 `core/security.decode_token` 与 `routers/deps.get_current_user` 抛 `BusinessException(401)`）。**刷新令牌只能用于 `/api/auth/refresh`**，不能访问受保护接口（`type` 声明区分）；访问令牌过期时由前端调 `/api/auth/refresh` 换新令牌后重试原请求。令牌为无状态 JWT，**暂不支持主动吊销 / 登出**（后续需要再引入黑名单或落库）。
 - **注册接口安全约定**（`POST /api/auth/register`）：复用 `user_service.create_user`（bcrypt 哈希，禁止明文入库）；弱密码（黑名单 / 缺字母 / 缺数字 / 含用户名）由**校验层** `schemas/auth.py` 拦截 → `422`；接口限流由 `core/rate_limit.py` 的依赖实现（固定窗口 + IP 维度，默认 5 次/min），超限抛 `BusinessException(429)`。限流为**进程内内存**实现，仅单机有效，多实例部署需换共享存储。
-- **通用文件上传约定**（`POST /api/files`）：`multipart/form-data`，字段 `file`，**需登录**；可选表单字段 `upload_purpose`（0=普通资源 / 1=用户头像，默认 0）与 `storage_scene`（0=长期 30 天 / 1=短期 2 小时 / 2=只提取内容不存原文件，默认 0）。**文档支持 PDF / DOC / DOCX / TXT，音频支持 MP3 / WAV / OGG / OPUS / M4A / AAC / FLAC / WebM**（均按扩展名白名单 + 文件头校验）；图片（JPG / PNG / WebP / GIF）仅用于头像（`upload_purpose=1`），普通上传不接受图片；其他类型或文件头不符一律 `422`，图片超 2MB（`AVATAR_MAX_BYTES`）或文档 / 音频超 10MB（`FILE_MAX_BYTES`）返回 `413`。**元数据写 `resources` 表，原文件落 MinIO**：对象 key 为 `users/{user_id}/{MD5}{ext}`，`storage_path` 格式 `minio:/{bucket}/{object_key}`；`(file_hash, user_id)` 唯一键实现用户级去重（先查库，数据库唯一键兜底）。仅 `upload_purpose=1` 且为图片时更新 `users.avatar`（库里存 `storage_path`）。对外响应中的 `avatar` 由校验层转成公开读取地址 `/api/files/avatar/{user_id}?v={md5}`（`v` 用于头像更新后失效缓存）。`storage_scene=2` 只写元数据、不上传对象（`storage_path` 为空串）。**文档必传表单字段 `doc_category`（`resume` / `study_material` / `general`），缺失或非法一律 `422`；音频 / 头像忽略该字段并存 `NULL`。** 文档落库后经 `BackgroundTasks` **异步**执行 RAG（解析 → 清洗 → 分块 → DashScope 向量化 → Qdrant），失败只记日志、不影响上传结果。PDF 解析用 PDFium 逐页取文本层，按「图片覆盖率 ≥ 0.5 且有效字符 < 200」判定扫描页，仅对这些页渲染 200 DPI 调火山引擎 `OCRNormal`，再与文本层按页序合并；方案说明见 [`docs/scanned-pdf-ocr.md`](docs/scanned-pdf-ocr.md)。同用户同内容重复上传时若分类相同则直接复用、不重复入库；分类变化则更新 `doc_category`，并以 `replace=True` 先按 `resource_id` 删除旧向量再重灌。响应返回 `{url, md5, size, kind, resource_id, storage_path, expire_time, doc_category, reused}`，`reused` 表示是否复用了已有资源。过期资源由 `resource_cleanup` 每天 03:00 先删 MinIO 对象、再删元数据。
+- **通用文件上传约定**（`POST /api/files`）：`multipart/form-data`，字段 `file`，**需登录**；可选表单字段 `upload_purpose`（0=普通资源 / 1=用户头像，默认 0）与 `storage_scene`（0=长期 30 天 / 1=短期 2 小时 / 2=只提取内容不存原文件，默认 0）。**文档支持 PDF / DOC / DOCX / TXT，音频支持 MP3 / WAV / OGG / OPUS / M4A / AAC / FLAC / WebM**（均按扩展名白名单 + 文件头校验）；图片（JPG / PNG / WebP / GIF）仅用于头像（`upload_purpose=1`），普通上传不接受图片；其他类型或文件头不符一律 `422`，图片超 2MB（`AVATAR_MAX_BYTES`）或文档 / 音频超 10MB（`FILE_MAX_BYTES`）返回 `413`。**元数据写 `resources` 表，原文件落 MinIO**：对象 key 为 `users/{user_id}/{MD5}{ext}`，`storage_path` 格式 `minio:/{bucket}/{object_key}`；`(file_hash, user_id)` 唯一键实现用户级去重（先查库，数据库唯一键兜底）。仅 `upload_purpose=1` 且为图片时更新 `users.avatar`（库里存 `storage_path`）。对外响应中的 `avatar` 由校验层转成公开读取地址 `/api/files/avatar/{user_id}?v={md5}`（`v` 用于头像更新后失效缓存）。`storage_scene=2` 只写元数据、不上传对象（`storage_path` 为空串）。**文档必传表单字段 `doc_category`（`resume` / `study_material` / `general`），缺失或非法一律 `422`；音频 / 头像忽略该字段并存 `NULL`。** 文档落库后经 `BackgroundTasks` **异步**执行 RAG（解析 → 清洗 → 分块 → DashScope 向量化 → Qdrant 存向量 + MySQL `knowledge_chunks` 存原文），失败只记日志、不影响上传结果。PDF 解析用 PDFium 逐页取文本层，按「图片覆盖率 ≥ 0.5 且有效字符 < 200」判定扫描页，仅对这些页渲染 200 DPI 调火山引擎 `OCRNormal`，再与文本层按页序合并；方案说明见 [`docs/scanned-pdf-ocr.md`](docs/scanned-pdf-ocr.md)。同用户同内容重复上传时若分类相同则直接复用、不重复入库；分类变化则更新 `doc_category`，并以 `replace=True` 先按 `resource_id` 删除旧向量再重灌。响应返回 `{url, md5, size, kind, resource_id, storage_path, expire_time, doc_category, reused}`，`reused` 表示是否复用了已有资源。过期资源由 `resource_cleanup` 每天 03:00 先删 MinIO 对象、再删元数据。
 - **会话与聊天消息约定**：
   - 会话整组接口（`/api/sessions`、`/api/sessions/{id}/messages`）需登录，所有查询按令牌中的 `user_id` 隔离；资源不存在或不属于当前用户一律 `404`（不区分「不存在」与「无权限」，避免泄露）。
   - 创建会话入参 `title` + `session_mode`（0=学习，1=面试，2=笔记），同时兼容需求文档字段名 `session_model`（`AliasChoices`）；出参不暴露 `user_id`。
@@ -321,6 +322,7 @@ agent-backend/
 - `user_profiles` 一人一行（`user_id` 唯一，外键 `users.id` + `ON DELETE CASCADE`），存目标岗位 / 工作年限 / 目标等级 / 已掌握技能 / 薄弱点，供提示词变量注入读取；数组字段用 MySQL `JSON`。上层只经 `app/db/user_profile_repo.py` 读写。
 - `chat_messages` 的附件段用 MySQL `JSON` 列存储（`request_segments` / `response_segments`，可为 `NULL`），正文不入 JSON；`status` 为 `Integer`（0/1/2），`interview_id` 为可空 `BigInteger`（**不建外键**，避免与 `interviews.message_id` 形成循环依赖）。`interviews.user_id` 必填并建索引，所有详情查询必须同时带 `interview_id` 与 `user_id`。
 - `resources.doc_category` 为可空 `String(32)`，取值 `resume` / `study_material` / `general`，仅 `resource_type=0` 文档有意义，非文档为 `NULL`。同内容去重命中且分类变化时，由 `app/db/resource_repo.py` 的 `update_doc_category()` 更新，并触发该 `resource_id` 的向量重灌。
+- **RAG 双存储**：Qdrant 集合 `knowledge_chunks` 只存向量与过滤字段（`user_id` / `doc_category` / `file_name` / `chunk_index` / `resource_id`），**不存原文**；原文与统计字段落 MySQL `knowledge_chunks`（`vector_id` / `resource_id` / `chunk_index` / `text` / `char_count`），`vector_id` 即 Qdrant Point id，两边一一对应。`resource_id` 外键级联删除，重灌时按 `resource_id` 先删后插；写入顺序为「先 Qdrant、后 MySQL」，MySQL 失败会尽力回删刚写入的向量。
 
 ---
 
