@@ -42,6 +42,18 @@ SELECT_MODE_PROMPTS: dict[int, str] = {
 }
 
 
+# 仅在本轮确实检索到知识片段时追加，避免干扰普通对话
+RAG_SYSTEM_PROMPT = """本轮回答已附带用户知识库中检索到的参考资料。RAG 回答规则：
+1. 优先依据参考资料作答，不要与其矛盾；资料未覆盖的部分直说，不要臆造。
+2. 引用资料时用 [1] [2] 标注来源，编号与参考资料条目一致。
+3. 只使用与问题相关的资料，不要复述无关内容。"""
+
+
+def build_rag_system_prompt() -> str:
+    """返回 RAG 回答规则；命中资料时由 build_chat_chain 追加到系统提示词。"""
+    return RAG_SYSTEM_PROMPT
+
+
 def build_system_prompt(session_mode: int, select_mode: int = 0) -> str:
     """按会话模式 + 子模式组装系统提示词；未知模式回退到默认规则。"""
     parts = [SYSTEM_BASE]
@@ -54,14 +66,24 @@ def build_system_prompt(session_mode: int, select_mode: int = 0) -> str:
     return "\n\n".join(parts)
 
 
-def build_chat_chain(session_mode: int, select_mode: int = 0) -> Runnable[dict, str]:
+def build_chat_chain(
+    session_mode: int,
+    select_mode: int = 0,
+    *,
+    rag_enabled: bool = False,
+) -> Runnable[dict, str]:
     """组装对话链路：系统提示词 + 历史消息 + 当前问题 → 模型 → 纯文本。
 
-    入参固定为 {"history": list[BaseMessage], "input": str}，由记忆层构造。
+    入参固定为 {"history": list[BaseMessage], "input": str}，由记忆层构造；
+    rag_enabled=True 时在系统提示词后追加 RAG 回答规则。
     """
+    system_prompt = build_system_prompt(session_mode, select_mode)
+    if rag_enabled:
+        system_prompt = f"{system_prompt}\n\n{build_rag_system_prompt()}"
+
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", build_system_prompt(session_mode, select_mode)),
+            ("system", system_prompt),
             MessagesPlaceholder("history"),
             ("human", "{input}"),
         ]

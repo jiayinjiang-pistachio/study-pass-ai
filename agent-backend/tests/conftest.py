@@ -84,6 +84,16 @@ def stub_rag_ingest(monkeypatch) -> list[dict]:
     return calls
 
 
+@pytest.fixture(autouse=True)
+def stub_rag_search(monkeypatch) -> None:
+    """对话用例默认不访问 DashScope / Qdrant；需要 RAG 的用例自行覆盖返回值。"""
+    from app.rag import retriever
+
+    monkeypatch.setattr(
+        retriever, "search_similar_chunks", lambda *args, **kwargs: []
+    )
+
+
 @pytest_asyncio.fixture
 async def client() -> httpx.AsyncClient:
     """进程内驱动 FastAPI 的异步客户端，无需另起 uvicorn。"""

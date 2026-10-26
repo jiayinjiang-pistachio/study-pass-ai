@@ -107,6 +107,9 @@ class ChatMessage(Base):
     # 只存附件段（file / image / audio）；聊天正文始终在 request_text / response_text
     request_segments: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     response_segments: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    # 本轮回答参考的知识片段索引：[{chunk_id, score}]；原文留在 knowledge_chunks，
+    # 历史消息按 chunk_id 回查即可，避免重复保存知识块全文
+    reference_sources: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     # 0=生成中，1=完成，2=失败；前端据此展示消息状态
     status: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), nullable=False

@@ -9,6 +9,7 @@ import logging
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
+from sqlalchemy.orm import Session
 
 from ..core import config
 from ..core.exceptions import BusinessException, SystemException
@@ -32,6 +33,7 @@ MAX_TEXT_CHARS = 800
 def search_similar_chunks(
     query: str,
     user_id: int,
+    db: Session | None = None,
     top_k: int = DEFAULT_TOP_K,
     doc_category: str | None = None,
 ) -> list[dict]:
@@ -39,6 +41,7 @@ def search_similar_chunks(
 
     doc_category 传入时只在该分类内检索（resume / study_material / general），
     可在向量检索阶段直接收窄候选集；为 None 时检索用户全部知识库。
+    db 为空时自行开启短会话回表，传入时复用调用方会话（只读）。
 
     返回项包含 vector_id / resource_id / file_name / doc_category /
     chunk_index / score / text；text 超过 MAX_TEXT_CHARS 会被截断，
@@ -99,10 +102,15 @@ def search_similar_chunks(
     if not points:
         return []
 
-    with SessionLocal() as db:
+    owns_session = db is None
+    session = db or SessionLocal()
+    try:
         chunks = fetch_chunks_by_vector_ids(
-            db, [str(point.id) for point in points]
+            session, [str(point.id) for point in points]
         )
+    finally:
+        if owns_session:
+            session.close()
 
     results: list[dict] = []
     for point in points:
