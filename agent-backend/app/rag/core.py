@@ -14,6 +14,8 @@ from pathlib import Path
 import pypdfium2 as pdfium
 from dashscope import TextEmbedding
 from docx import Document
+from docx.text.paragraph import Paragraph
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -38,6 +40,23 @@ EMBED_BATCH_SIZE = 10
 
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
+
+# 递归切片分隔符，按优先级从结构到字符逐级回退：
+# 标题（由 _parse_docx 注入）→ 段落 → 中文句读 → 空格 → 字符兜底。
+CHUNK_SEPARATORS = (
+    "\n### ",
+    "\n## ",
+    "\n# ",
+    "\n\n",
+    "\n",
+    "。",
+    "！",
+    "？",
+    "；",
+    "，",
+    " ",
+    "",
+)
 
 # 逐页扫描件判定：仅当页面被图片大面积覆盖、且文本层字符很少时才转 OCR。
 # 双信号可避免两类误判：纯文本页面被平均字符数拉低（误 OCR），
@@ -65,6 +84,8 @@ _ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"))
 _PAGE_NUMBER_RE = re.compile(r"^\s*(?:[-—–]\s*)?\d{1,5}(?:\s*[-—–])?\s*$")
 _SPACE_RE = re.compile(r"[ \t\f\v\u00a0]+")
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
+# Word 内置标题样式名随语言变化（Heading 1 / 标题 1），style_id 则形如 Heading1
+_HEADING_STYLE_RE = re.compile(r"^(?:heading|标题)\s*([1-3])$", re.IGNORECASE)
 
 
 def _text_chars(text: str) -> int:
@@ -154,10 +175,26 @@ def _parse_pdf(path: Path) -> str:
     return "\n".join(merged)
 
 
+def _heading_level(paragraph: Paragraph) -> int:
+    """识别 Heading 1 / 2 / 3（兼容「标题 N」样式名）；非标题返回 0。"""
+    style = paragraph.style
+    name = (style.name if style is not None else "") or ""
+    match = _HEADING_STYLE_RE.match(name.strip())
+    return int(match.group(1)) if match else 0
+
+
 def _parse_docx(path: Path) -> str:
-    """段落 + 表格单元格；简历常用表格排版，只取段落会丢失关键信息。"""
+    """段落 + 表格单元格；Heading 1/2/3 注入 Markdown 标记供递归切片识别。"""
     document = Document(str(path))
-    lines = [paragraph.text for paragraph in document.paragraphs]
+    lines: list[str] = []
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        level = _heading_level(paragraph)
+        # 只给有内容的标题加标记；空段落保留，维持原有段落间距
+        if level and text:
+            lines.append(f"{'#' * level} {text}")
+        else:
+            lines.append(paragraph.text)
     for table in document.tables:
         for row in table.rows:
             lines.append(" | ".join(cell.text for cell in row.cells))
@@ -251,25 +288,14 @@ def _classify(text: str) -> str:
 
 
 def _chunk_text(text: str) -> list[str]:
-    """滑动窗口 500/50；窗口尾部优先回溯到最近的句子终止符，避免截断语义。"""
-    chunks: list[str] = []
-    start = 0
-    length = len(text)
-    while start < length:
-        end = min(start + CHUNK_SIZE, length)
-        if end < length:
-            window = text[start:end]
-            cut = max(window.rfind(mark) for mark in "。！？\n")
-            # 终止符太靠前时不回溯，否则会切出大量碎片
-            if cut >= CHUNK_SIZE // 2:
-                end = start + cut + 1
-        piece = text[start:end].strip()
-        if piece:
-            chunks.append(piece)
-        if end >= length:
-            break
-        start = max(end - CHUNK_OVERLAP, start + 1)
-    return chunks
+    """递归切片：标题 → 段落 → 中文句读 → 字符，尽量在语义边界断开。"""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        separators=list(CHUNK_SEPARATORS),
+        keep_separator=True,
+    )
+    return [chunk.strip() for chunk in splitter.split_text(text) if chunk.strip()]
 
 
 def _dedupe(chunks: list[str]) -> list[str]:

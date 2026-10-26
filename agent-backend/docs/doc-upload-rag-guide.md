@@ -23,6 +23,57 @@
 | 重复，分类不同 | `true` | 更新为本次分类 | 删除旧向量后重灌（`replace=true`） |
 | 音频 / 头像 | 按去重结果 | `null` | 不触发 |
 
+### 1.1 「文件已存在」是怎么判断的
+
+判断依据是 **MySQL `resources` 表的元数据**，不是文件名、不是 MinIO 对象、也不是 Qdrant。
+
+具体链路（`app/services/upload_service_minio.py:180-218`）：
+
+1. 读取上传字节，计算内容 MD5：`md5 = hashlib.md5(data).hexdigest()`；
+2. 调 `resource_repo.find_by_hash(user_id, md5)`，实际 SQL 为：
+   ```sql
+   SELECT * FROM resources
+   WHERE user_id = :user_id AND file_hash = :md5
+   LIMIT 1;
+   ```
+3. **查不到** → 写 MinIO 对象 `users/{user_id}/{md5}{ext}`，再向 `resources` 插入一条记录，响应 `reused=false`；
+4. **查到** → 直接复用已有记录（`resource_id`、`storage_path` 不变），**不重复写 MinIO**，响应 `reused=true`；若文档的 `doc_category` 与本次选择不同，则更新 `resources.doc_category`，并以 `replace=True` 触发该 `resource_id` 的向量重灌；
+5. **并发兜底**：`resources` 表有唯一键 `uk_file_hash_user_id(file_hash, user_id)`。两个请求同时插入同一内容时，后到的会触发 `IntegrityError`，代码回查一次并复用先写入的记录。
+
+```mermaid
+sequenceDiagram
+    participant F as 前端
+    participant API as 上传接口
+    participant DB as MySQL
+    participant M as MinIO
+    F->>API: 上传文件字节
+    API->>API: 计算内容 MD5
+    API->>DB: 按 user_id + file_hash 查询
+    alt 查不到
+        API->>M: 写入对象 users/用户ID/MD5.ext
+        API->>DB: INSERT resources
+        API-->>F: reused = false
+    else 已存在
+        API-->>F: reused = true，复用原 resource_id
+        opt 文档分类变化
+            API->>DB: UPDATE resources.doc_category
+            API->>DB: 后台按 resource_id 重灌 Qdrant
+        end
+    end
+```
+
+几个容易误解的点：
+
+| 问题 | 结论 |
+| --- | --- |
+| 按文件名判断吗？ | 不按。同内容改文件名（`a.pdf` → `b.pdf`）仍命中同一条资源，保留首次上传的 `file_name` |
+| 按 MinIO 对象判断吗？ | 不按。只查 MySQL；若对象被手工删除但元数据还在，仍返回 `reused=true`，此时访问 `storage_path` 可能 404 |
+| 按 Qdrant 判断吗？ | 不按。Qdrant 只存 chunk 向量，去重发生在写向量之前，不会查询向量库 |
+| 是全局去重吗？ | 不是。唯一键包含 `user_id`，**同一用户**相同内容才复用；不同用户上传同一文件会各自保留记录与对象 |
+| 内容怎样才算「相同」？ | 按字节 MD5。重新压缩、重新导出、改一个字符都会得到新 MD5，视为新文件 |
+| 重复上传会刷新有效期吗？ | 不会。复用分支不修改 `expire_time`、`storage_scene` 等字段 |
+| 前端如何提示？ | 上传响应 `reused=true` 时，聊天输入框提示「文件已存在，已复用」（`ChatInputBar.vue:107`） |
+
 ---
 
 ## 2. 前置依赖
