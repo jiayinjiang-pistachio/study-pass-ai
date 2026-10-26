@@ -30,6 +30,7 @@
 - MySQL、MinIO、Qdrant 已启动，且 `.env` 中已配置 `MYSQL_URL`、`MINIO_*`。
 - 已配置 `DASHSCOPE_API_KEY`（缺失时上传仍成功，但后台向量化失败）。
 - Qdrant 默认地址 `127.0.0.1:6333`，可用 `QDRANT_HOST` / `QDRANT_PORT` 覆盖。
+- 扫描版 PDF 需配置火山引擎 `VOLC_ACCESS_KEY` / `VOLC_SECRET_KEY`（可选 `VOLC_REGION`，默认 `cn-north-1`）；缺失时扫描页入库失败，普通可搜索 PDF 不受影响。判定与选型说明见 [`scanned-pdf-ocr.md`](scanned-pdf-ocr.md)。
 
 ```bash
 cd agent-backend
@@ -92,7 +93,7 @@ echo "$TOKEN"
 
 ### 6.1 正常上传文档
 
-准备一个可解析出文本的 PDF / DOCX / TXT（扫描件 PDF 可能解析为空文本，后台会记录“未解析出有效文本”）。
+准备一个可解析出文本的 PDF / DOCX / TXT。扫描版 PDF 会逐页判定并调用 OCR；日志出现 `PDF 含扫描页，转 OCR` 表示触发了兜底。
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/files \
@@ -289,7 +290,10 @@ pnpm dev
   | `向量化服务未配置` | `.env` 未配置 `DASHSCOPE_API_KEY` |
   | `文本向量化请求失败` | 网络 / DashScope 配额 / Key 无效 |
   | `Qdrant 连接失败` | Qdrant 未启动或 `QDRANT_HOST` / `QDRANT_PORT` 错误 |
-  | `文件未解析出有效文本` | 扫描件 PDF 无文本层，或文件内容为空 |
+  | `OCR 服务未配置` | 未配置 `VOLC_ACCESS_KEY` / `VOLC_SECRET_KEY`，扫描页无法识别 |
+  | `OCR 识别失败 ... AccessDenied` | 火山引擎账号未开通 `cv:OCRNormal` 权限或 Key 不匹配 |
+  | `OCR 识别失败 ... attempts=2` | 临时故障重试后仍失败，稍后重新上传 |
+  | `文件未解析出有效文本` | OCR 未识别出文字（空白页 / 图片无文字），或文件内容为空 |
   | `.doc 解析失败` | 系统缺少 `textutil` / `antiword` / `soffice` / `libreoffice` |
   | 上传 503 | MinIO 不可用，查看启动日志 |
 - 后台入库失败不会回滚上传结果。**同一文件同一分类重复上传不会自动重试**；需要重新入库时：

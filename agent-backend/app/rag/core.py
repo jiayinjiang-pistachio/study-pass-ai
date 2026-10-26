@@ -11,9 +11,9 @@ import subprocess
 import uuid
 from pathlib import Path
 
+import pypdfium2 as pdfium
 from dashscope import TextEmbedding
 from docx import Document
-from PyPDF2 import PdfReader
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -39,6 +39,12 @@ EMBED_BATCH_SIZE = 10
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
 
+# 逐页扫描件判定：仅当页面被图片大面积覆盖、且文本层字符很少时才转 OCR。
+# 双信号可避免两类误判：纯文本页面被平均字符数拉低（误 OCR），
+# 以及扫描页混在正常 PDF 中被整体判定为文本（漏 OCR）。
+SCAN_IMAGE_COVERAGE = 0.5
+SCAN_TEXT_MAX_CHARS = 200
+
 CATEGORIES = ("resume", "study_material", "general")
 
 # 分类关键字：命中次数计分，显式传入的分类优先于自动判断
@@ -61,10 +67,91 @@ _SPACE_RE = re.compile(r"[ \t\f\v\u00a0]+")
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
 
 
+def _text_chars(text: str) -> int:
+    """文本层有效字符数：去掉零宽字符、独立页码行与所有空白后计数。"""
+    text = text.translate(_ZERO_WIDTH)
+    lines = [
+        line
+        for line in text.splitlines()
+        if not _PAGE_NUMBER_RE.match(line.strip())
+    ]
+    return len(re.sub(r"\s+", "", "\n".join(lines)))
+
+
+def _image_coverage(page: pdfium.PdfPage) -> float:
+    """图片对象覆盖面积 / 页面面积，钳制到 0..1。
+
+    扫描件的整页位图通常接近 1；正文页的小图标 / 分隔线占比很低。
+    """
+    width, height = page.get_size()
+    area = width * height
+    if area <= 0:
+        return 0.0
+
+    covered = 0.0
+    for obj in page.get_objects(filter=[pdfium.raw.FPDF_PAGEOBJ_IMAGE]):
+        try:
+            left, bottom, right, top = obj.get_bounds()
+            covered += max(0.0, right - left) * max(0.0, top - bottom)
+        except Exception:  # 个别畸形对象读不到边界，跳过不影响其余页
+            logger.debug("读取图片对象边界失败", exc_info=True)
+        finally:
+            obj.close()
+    return min(covered / area, 1.0)
+
+
+def _needs_ocr(text: str, image_ratio: float) -> bool:
+    """图片覆盖率高且几乎没文字 → 扫描页；其余保留文本层。"""
+    return (
+        image_ratio >= SCAN_IMAGE_COVERAGE
+        and _text_chars(text) < SCAN_TEXT_MAX_CHARS
+    )
+
+
+def _analyze_pdf(path: Path) -> tuple[list[str], list[int]]:
+    """逐页取文本层并判定是否需要 OCR，返回 (每页文本, 待 OCR 页下标)。"""
+    document = pdfium.PdfDocument(str(path))
+    try:
+        pages: list[str] = []
+        ocr_pages: list[int] = []
+        for index in range(len(document)):
+            page = document[index]
+            try:
+                textpage = page.get_textpage()
+                try:
+                    text = textpage.get_text_range()
+                finally:
+                    textpage.close()
+                need_ocr = _needs_ocr(text, _image_coverage(page))
+            finally:
+                page.close()
+            pages.append(text)
+            if need_ocr:
+                ocr_pages.append(index)
+        return pages, ocr_pages
+    finally:
+        document.close()
+
+
 def _parse_pdf(path: Path) -> str:
-    """逐页提取文本；扫描件没有文本层时返回空串，由调用方判定为空。"""
-    reader = PdfReader(str(path))
-    return "\n".join(page.extract_text() or "" for page in reader.pages)
+    """逐页判定：文本层够用时直接取；扫描页单独 OCR 后按页序合并。"""
+    pages, ocr_pages = _analyze_pdf(path)
+    if not ocr_pages:
+        return "\n".join(pages)
+
+    logger.info(
+        "PDF 含扫描页，转 OCR：path=%s pages=%s ocr_pages=%s",
+        path,
+        len(pages),
+        len(ocr_pages),
+    )
+    # 延迟导入：只有扫描页才需要加载 volcengine / pillow，避免普通 PDF 付出导入成本
+    from .ocr import ocr_pdf
+
+    recognized = ocr_pdf(path, page_indices=ocr_pages)
+    # dict.get(key, default) 的语义：key 存在就取对应值，不存在就返回 default。
+    merged = [recognized.get(index, text) for index, text in enumerate(pages)]
+    return "\n".join(merged)
 
 
 def _parse_docx(path: Path) -> str:

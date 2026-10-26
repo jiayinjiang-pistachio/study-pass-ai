@@ -50,9 +50,14 @@ qdrant-client==1.20.0
 # DashScope：阿里云百炼 SDK（通义千问对话与 embedding）
 dashscope==2.0.1
 
-# PDF 文本提取：知识库文档解析
-# 注意：PyPDF2 已停止维护（最后一版 3.0.1），新功能建议改用 pypdf；此处按需求引入 PyPDF2
-PyPDF2==3.0.1
+# PDF 文本层提取 + 扫描件逐页渲染（PDFium）
+pypdfium2==5.14.0
 
 # Word 文本提取：知识库 .docx 文档解析
 python-docx==1.2.0
+
+# 图片处理：pypdfium2 渲染位图转 PNG 后上送 OCR
+pillow==13.0.0
+
+# 火山引擎 SDK：扫描版 PDF 的 OCR（VisualService / OCRNormal）
+volcengine==1.0.229

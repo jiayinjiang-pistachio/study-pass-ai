@@ -209,6 +209,12 @@ DASHSCOPE_API_KEY: str | None = os.getenv("DASHSCOPE_API_KEY")
 QDRANT_HOST: str = os.getenv("QDRANT_HOST", "127.0.0.1")
 QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", "6333"))
 
+# ---- 火山引擎 OCR（扫描版 PDF 文本识别）----
+# 仅在 PDF 文本层稀疏、判定为扫描件时使用；缺失时扫描件入库失败并记录日志。
+VOLC_ACCESS_KEY: str | None = os.getenv("VOLC_ACCESS_KEY")
+VOLC_SECRET_KEY: str | None = os.getenv("VOLC_SECRET_KEY")
+VOLC_REGION: str = os.getenv("VOLC_REGION", "cn-north-1")
+
 
 class MinioConfig(NamedTuple):
     """MinIO 客户端连接参数。"""
