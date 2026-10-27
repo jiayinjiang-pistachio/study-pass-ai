@@ -125,14 +125,32 @@ async def test_load_merges_extracted_text(auth_user: dict) -> None:
     assert history[1].content == "好的"
 
 
+class _StubRedis:
+    """最小 Redis 替身：占位后让 MemoryService 走 MySQL 回退分支。"""
+
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+
+    def get(self, key: str) -> str | None:
+        return self.store.get(key)
+
+    def set(self, key: str, value: str, ex: int | None = None) -> bool:
+        self.store[key] = value
+        return True
+
+    def expire(self, key: str, ttl: int) -> bool:
+        return key in self.store
+
+
 async def test_memory_service_builds_context(auth_user: dict) -> None:
     """统一入口返回链路所需的 history + input 结构。"""
     session = _new_session(auth_user["id"])
     _add_round(auth_user["id"], session["id"], "历史问题", "历史回答")
 
+    # 工作记忆为空时回退 MySQL；注入替身避免单测依赖真实 Redis
     context = MemoryService(
-        InstantMemory(char_budget=10000)
-    ).build_context(session["id"], "当前问题")
+        InstantMemory(char_budget=10000), redis_client=_StubRedis()
+    ).load_context(auth_user["id"], session["id"], "当前问题")
 
     assert context["input"] == "当前问题"
     assert [message.content for message in context["history"]] == [

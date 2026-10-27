@@ -172,9 +172,10 @@ def prepare_stream(
     )
 
     # 上下文在用户消息落库后构建：查询只取 status=1，当前这条生成中的消息不会重复注入；
-    # 历史读取（最近 N 轮 + 字符预算）封装在 MemoryService，主流程不关心查询细节
-    context = MemoryService().build_context(
-        session_id, _build_input(payload.request_text, retrieved)
+    # 记忆读取（Redis 工作记忆优先、MySQL 短期历史兜底）封装在 MemoryService，
+    # 主流程不关心存储细节。传入原始问题拼上检索资料，摘要注入也由记忆层内部处理。
+    context = MemoryService().load_context(
+        user_id, session_id, _build_input(payload.request_text, retrieved)
     )
     return StreamState(
         session=session,
@@ -232,6 +233,16 @@ async def stream_reply(state: StreamState) -> AsyncIterator[str]:
             state.reference_sources or None,
         )
         persisted = True
+        # 回复正文落库后再追加工作记忆：Redis / 总结异常均在记忆层内部降级，
+        # 这里不会因为记忆写入失败而影响 done 事件。记忆里存原始问题，不存拼接了
+        # 检索资料的 input，避免下轮把「参考片段」误当作用户历史。
+        await run_in_threadpool(
+            MemoryService().append_turn,
+            state.message["user_id"],
+            state.session["id"],
+            state.message["request_text"],
+            text,
+        )
         yield _sse(
             EVENT_DONE,
             {

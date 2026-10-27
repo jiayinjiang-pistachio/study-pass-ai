@@ -112,9 +112,11 @@ sequenceDiagram
 4. **检索**：需要时调用 `search_similar_chunks(request_text, user_id, top_k=3)`；异常只记日志并返回空列表（降级）。
 5. **构建链路**：`build_chat_chain(session_mode, select_mode, rag_enabled=bool(retrieved))`；命中资料时系统提示词追加 `RAG_SYSTEM_PROMPT`，要求优先依据资料、用 `[1] [2]` 标注来源。
 6. **落库用户消息**：`status=0`，`reference_sources` 暂为空。
-7. **构建上下文**：`MemoryService.build_context` 经 `InstantMemory.load()` 取最近 `MEMORY_MAX_TURNS` 轮 `status=1` 的历史，命中资料时把 `format_retrieved_chunks` 生成的文本拼在本轮问题前。
+7. **构建上下文**：`MemoryService.load_context()` 先读 Redis 工作记忆（`WorkingMemory`），有原文直接使用；为空（新会话 / 过期 / Redis 故障）时回退 `InstantMemory.load()` 取最近 `MEMORY_MAX_TURNS` 轮 `status=1` 的历史，并回填 Redis 供后续轮次追加。命中资料时把 `format_retrieved_chunks` 生成的文本拼在本轮问题前；存在摘要时由记忆层给 `input` 加 `【会话摘要】` 前缀。
 
 > 检索用**原始问题**，注入用**增强后的问题**：前者保证意图判断不被参考资料干扰，后者让模型看到 `[1] [2]` 编号。
+
+> 记忆系统的完整设计、存储结构与多轮时序见 [`memory-system-v1.md`](memory-system-v1.md)。
 
 ### 3.3 检索细节（`app/rag/retriever.py`）
 
@@ -136,7 +138,7 @@ done  {message_id, status, sources}          正文与来源已持久化
 error {code, message}                        生成失败（保留已生成的部分正文）
 ```
 
-- 成功：`update_result(message_id, text, 1, reference_sources)`，随后下发 `done`。
+- 成功：`update_result(message_id, text, 1, reference_sources)`，随后 `MemoryService.append_turn()` 把**原始问题**（不含检索资料）与回复追加到工作记忆；原文累计超过 8000 字时同步总结更早内容。记忆写入失败只记日志，不影响 `done`。之后下发 `done`。
 - `reference_sources` 只存 `[{chunk_id, score}]`；正文全文留在 `knowledge_chunks`，消息表不重复保存。
 - 失败 / 断开：`_persist_failed` 写入已生成正文并置 `status=2`，不下发 `done`，前端将消息标记为失败。
 
@@ -307,7 +309,8 @@ flowchart LR
 - `rag/retriever.py`：问题向量化 + Qdrant 检索 + 回表取原文，对外只暴露 `search_similar_chunks`。
 - `rag/chunk_store.py`：`knowledge_chunks` 读写（`save_chunks` / `fetch_chunks_by_vector_ids`）。
 - `services/chat_service.py`：编排检索、上下文、链路与 SSE，不直接操作存储细节。
-- `services/memory_service.py`：只负责查历史、按预算裁剪并转成 LangChain 消息（`InstantMemory` / `MemoryService`）；`services/ai/prompt_layer.py`：只定义提示词与链路。
+- `services/memory_service.py`：会话记忆的统一入口（`MemoryService`）。`WorkingMemory` 读写 Redis 原文窗口与摘要，`InstantMemory` 负责 MySQL 回退查询、预算裁剪与 LangChain 消息转换；Redis 异常在内部降级，主流程不感知。
+- `services/ai/prompt_layer.py`：只定义提示词与链路。
 
 ---
 
@@ -322,6 +325,11 @@ flowchart LR
 | 向量维度 | 1024（`text-embedding-v4`） | `app/rag/core.py` |
 | 记忆轮数 | `MEMORY_MAX_TURNS`（环境变量，默认 8） | `app/services/memory_service.py` |
 | 历史总字符预算 | 12000 字 | `app/services/memory_service.py` `HISTORY_CHAR_BUDGET` |
+| 工作记忆 key | `memory:working:{user_id}:{session_id}` | `app/services/memory_service.py` `WORKING_MEMORY_KEY` |
+| 工作记忆 TTL | 8 小时（读写续期） | `app/services/memory_service.py` `WORKING_MEMORY_TTL` |
+| 原文总结阈值 | 8000 字 | `app/services/memory_service.py` `WORKING_RAW_CHAR_LIMIT` |
+| 总结后保留原文 | 最近 6 条消息 | `app/services/memory_service.py` `WORKING_KEEP_MESSAGES` |
+| 摘要上限 | 500 字 | `app/services/memory_service.py` `SUMMARY_MAX_CHARS` |
 | 前端折叠阈值 | 120 字 | `agent-frontend/src/components/chat/ChatSourceList.vue` |
 
 ---
