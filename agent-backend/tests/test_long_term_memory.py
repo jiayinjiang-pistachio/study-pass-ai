@@ -170,6 +170,35 @@ def test_missing_required_fields(auth_user: dict, monkeypatch) -> None:
     assert memory.missing_required_fields(user_id) == []
 
 
+def test_extract_profile_fields_renders_prompt_with_json_example(monkeypatch) -> None:
+    """回归：系统提示词里的 JSON 示例不能被 ChatPromptTemplate 当成变量。
+
+    之前写成 ("system", EXTRACT_PROMPT) 会抛
+    KeyError: Input to ChatPromptTemplate is missing variables {'"target_job"'}。
+    """
+    captured: dict = {}
+
+    def _fake_model(prompt_value):
+        captured["messages"] = prompt_value.messages
+        return '{"weak_topics": ["分布式"]}'
+
+    monkeypatch.setattr(long_term_memory, "get_chat_model", lambda: _fake_model)
+
+    raw = LongTermMemory()._extract_profile_fields(
+        '{"target_job": "后端开发"}',
+        "我最近开始重点准备分布式系统",
+        [{"role": "assistant", "content": "好的"}],
+    )
+
+    assert raw == '{"weak_topics": ["分布式"]}'
+    messages = captured["messages"]
+    assert messages[0].content == long_term_memory.EXTRACT_PROMPT
+    human = messages[1].content
+    assert '{"target_job": "后端开发"}' in human
+    assert "我最近开始重点准备分布式系统" in human
+    assert "助手：好的" in human
+
+
 def test_update_profile_from_conversation_writes_fields(
     auth_user: dict, monkeypatch
 ) -> None:

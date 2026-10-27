@@ -16,6 +16,7 @@ import threading
 from collections.abc import Sequence
 from functools import lru_cache
 
+from langchain_core.messages import SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -424,9 +425,11 @@ class LongTermMemory:
         context: Context,
     ) -> str:
         """调用模型抽取画像字段；单独成方法便于测试替换模型。"""
+        # EXTRACT_PROMPT 含 JSON 示例的大括号，必须作为静态 SystemMessage 传入：
+        # 写成 ("system", EXTRACT_PROMPT) 会被当成模板，把 {"target_job"} 解析成变量。
         prompt = ChatPromptTemplate.from_messages(
             [
-                ("system", EXTRACT_PROMPT),
+                SystemMessage(content=EXTRACT_PROMPT),
                 (
                     "human",
                     "已有画像：\n{existing}\n\n用户提问：\n{request_text}\n\n"
