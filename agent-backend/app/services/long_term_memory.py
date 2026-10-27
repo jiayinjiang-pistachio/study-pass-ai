@@ -11,6 +11,7 @@
 import json
 import logging
 import math
+import re
 import threading
 from collections.abc import Sequence
 from functools import lru_cache
@@ -42,6 +43,8 @@ PROFILE_INTENT_EXAMPLES: tuple[str, ...] = (
     "我希望重点准备 Java 后端方向的面试",
     "我找工作时比较看重成长空间",
     "我的薄弱点是高并发和分布式",
+    "我熟悉 Python、MySQL 和 Redis",
+    "我的技术栈是 Java 和 Spring Boot",
 )
 
 EXTRACT_PROMPT = """你是用户画像抽取助手。请从「用户提问」和「对话上下文」中提取用户本人的长期特征，
@@ -49,6 +52,11 @@ EXTRACT_PROMPT = """你是用户画像抽取助手。请从「用户提问」和
 
 输出严格为 JSON 对象，字段如下：
 {
+  "target_job": "目标岗位（字符串；本轮没有新信息则为 null）",
+  "years_experience": "工作年限（整数 0-60，0 表示应届/无经验；无法确定则为 null，不要猜）",
+  "target_level": "目标职级（字符串，如 P6 / 高级工程师；本轮没有新信息则为 null）",
+  "target_skills": ["已掌握技能（与已有技能合并去重后的完整列表，没有则为 []）"],
+  "weak_topics": ["薄弱点 / 待提升项（与已有内容合并去重后的完整列表，没有则为 []）"],
   "learning_goal": "学习目标（字符串；本轮没有新信息则为 null）",
   "learning_style": "学习偏好（字符串；本轮没有新信息则为 null）",
   "interview_focus": ["面试重点 / 方向（输出合并后的完整列表，没有则为 []）"],
@@ -57,14 +65,32 @@ EXTRACT_PROMPT = """你是用户画像抽取助手。请从「用户提问」和
 
 要求：
 1. 只记录用户自己的目标、偏好、方向、关注点，忽略寒暄和一次性问题；
-2. interview_focus 每项不超过 50 字，最多 10 项，去重；
-3. 新信息与已有摘要冲突时以新信息为准；
-4. 只输出 JSON，不要 Markdown 代码块或额外解释。"""
+2. target_skills / weak_topics 每项不超过 50 字，最多 20 项，去重；
+3. interview_focus 每项不超过 50 字，最多 10 项，去重；
+4. 新信息与已有画像冲突时以新信息为准；
+5. 只输出 JSON，不要 Markdown 代码块或额外解释。"""
 
 SUMMARY_MAX_CHARS = 2000
 FIELD_MAX_CHARS = 255
 FOCUS_ITEM_MAX_CHARS = 50
 FOCUS_MAX_ITEMS = 10
+
+# 求职画像必填项：前端开场白表单与对话都以此判断资料是否齐全
+REQUIRED_PROFILE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("target_job", "目标岗位"),
+    ("years_experience", "工作年限"),
+    ("target_level", "目标职级"),
+)
+# 单字 / 空串不触发后台抽取，避免无意义模型调用；「3 年」这类短回答必须保留
+PROFILE_ANSWER_MIN_CHARS = 2
+
+# 字段长度与 schemas/profile.py、user_profiles 列定义保持一致
+JOB_MAX_CHARS = 64
+LEVEL_MAX_CHARS = 32
+YEARS_MIN = 0
+YEARS_MAX = 60
+LIST_ITEM_MAX_CHARS = 50
+LIST_MAX_ITEMS = 20
 
 # 后台更新需要的上下文字段，与 memory_service 的历史消息结构保持一致
 Context = str | Sequence[dict]
@@ -78,18 +104,59 @@ def _clean_text(value: object, limit: int) -> str | None:
     return value[:limit] or None
 
 
-def _clean_focus(value: object) -> list[str] | None:
-    """清洗面试重点数组：去空白、去重、限长、限项数。"""
+def _clean_list(
+    value: object, *, max_items: int, item_chars: int
+) -> list[str] | None:
+    """清洗字符串数组：去空白、去重、限长、限项数。"""
     if not isinstance(value, list):
         return None
     result: list[str] = []
     for item in value:
-        text = _clean_text(item, FOCUS_ITEM_MAX_CHARS)
+        text = _clean_text(item, item_chars)
         if text and text not in result:
             result.append(text)
-        if len(result) >= FOCUS_MAX_ITEMS:
+        if len(result) >= max_items:
             break
     return result or None
+
+
+def _clean_focus(value: object) -> list[str] | None:
+    """清洗面试重点数组：每项 50 字、最多 10 项。"""
+    return _clean_list(
+        value, max_items=FOCUS_MAX_ITEMS, item_chars=FOCUS_ITEM_MAX_CHARS
+    )
+
+
+def _is_missing(value: object) -> bool:
+    """画像字段是否算未填写：None 与空串算缺失，0 是有效年限。"""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    return False
+
+
+def _clean_years(value: object) -> int | None:
+    """把模型输出的工作年限转成 0..60 的整数；无法确定时返回 None。
+
+    兼容「3 年」这类带单位的字符串；bool 是 int 的子类，必须显式排除。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        years = value
+    elif isinstance(value, float):
+        if not value.is_integer():
+            return None
+        years = int(value)
+    elif isinstance(value, str):
+        match = re.search(r"\d+", value)
+        if match is None:
+            return None
+        years = int(match.group())
+    else:
+        return None
+    return years if YEARS_MIN <= years <= YEARS_MAX else None
 
 
 def _parse_json_object(raw: str) -> dict:
@@ -113,6 +180,29 @@ def _extract_fields(raw: str) -> dict:
         return {}
 
     fields: dict = {}
+    job = _clean_text(data.get("target_job"), JOB_MAX_CHARS)
+    if job:
+        fields["target_job"] = job
+    years = _clean_years(data.get("years_experience"))
+    if years is not None:
+        fields["years_experience"] = years
+    level = _clean_text(data.get("target_level"), LEVEL_MAX_CHARS)
+    if level:
+        fields["target_level"] = level
+    skills = _clean_list(
+        data.get("target_skills"),
+        max_items=LIST_MAX_ITEMS,
+        item_chars=LIST_ITEM_MAX_CHARS,
+    )
+    if skills:
+        fields["target_skills"] = skills
+    weak_topics = _clean_list(
+        data.get("weak_topics"),
+        max_items=LIST_MAX_ITEMS,
+        item_chars=LIST_ITEM_MAX_CHARS,
+    )
+    if weak_topics:
+        fields["weak_topics"] = weak_topics
     goal = _clean_text(data.get("learning_goal"), FIELD_MAX_CHARS)
     if goal:
         fields["learning_goal"] = goal
@@ -237,6 +327,28 @@ class LongTermMemory:
             + "\n".join(lines)
         )
 
+    def missing_required_fields(self, user_id: int) -> list[str]:
+        """返回尚未填写的必填画像字段名（键名）。
+
+        用于判断「用户在开场白跳过了表单」的场景：必填项缺失期间，
+        对话里的短回答也要触发后台抽取。读取失败返回空列表，
+        避免数据库故障时每轮都发起抽取请求。
+        """
+        try:
+            profile = profile_service.get_profile_dict(user_id) or {}
+        except Exception:
+            logger.warning(
+                "读取用户画像失败，跳过资料补全判断 | user_id=%s",
+                user_id,
+                exc_info=True,
+            )
+            return []
+        return [
+            key
+            for key, _ in REQUIRED_PROFILE_FIELDS
+            if _is_missing(profile.get(key))
+        ]
+
     def should_write(self, text: str, user_id: int | None = None) -> bool:
         """判断用户消息是否在描述自己的目标 / 偏好 / 方向。
 
@@ -281,6 +393,11 @@ class LongTermMemory:
         profile = profile_service.get_profile_dict(user_id) or {}
         existing = json.dumps(
             {
+                "target_job": profile.get("target_job"),
+                "years_experience": profile.get("years_experience"),
+                "target_level": profile.get("target_level"),
+                "target_skills": profile.get("target_skills"),
+                "weak_topics": profile.get("weak_topics"),
                 "learning_goal": profile.get("learning_goal"),
                 "learning_style": profile.get("learning_style"),
                 "interview_focus": profile.get("interview_focus"),

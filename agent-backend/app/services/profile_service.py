@@ -10,8 +10,14 @@ from ..core.exceptions import BusinessException
 from ..db import user_profile_repo as db
 from ..schemas.profile import ProfileCreate, ProfileUpdate
 
-# 长期记忆允许自动写入的字段：限定范围，避免后台任务覆盖用户手工维护的信息
+# 长期记忆允许自动写入的字段：覆盖全部业务画像字段，对话中的最新表述优先。
+# 白名单仍保留，防止抽取结果混入 user_id / created_at 等非业务字段。
 LONG_TERM_FIELDS: set[str] = {
+    "target_job",
+    "years_experience",
+    "target_level",
+    "target_skills",
+    "weak_topics",
     "learning_goal",
     "learning_style",
     "interview_focus",
@@ -75,8 +81,8 @@ def get_profile_dict(user_id: int) -> dict | None:
 def create_or_update(user_id: int, fields: dict) -> dict:
     """按 user_id 创建或局部更新画像，供长期记忆后台任务写入。
 
-    只接受 `LONG_TERM_FIELDS` 中的字段，防止后台抽取结果误改用户手工维护的
-    target_job / target_skills 等内容。
+    只接受 `LONG_TERM_FIELDS` 中的字段，防止抽取结果写入无关列；
+    岗位 / 年限 / 职级 / 技能 / 薄弱点与长期字段一样，以用户最新表述为准。
     """
     allowed = {
         key: value for key, value in fields.items() if key in LONG_TERM_FIELDS

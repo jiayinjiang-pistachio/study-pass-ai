@@ -50,18 +50,18 @@
 
 ```
 src/
-├── api/              # 接口层：request.ts（axios 统一请求）+ 按业务拆分（auth.ts / file.ts / conversation.ts / interview.ts / note.ts）
+├── api/              # 接口层：request.ts（axios 统一请求）+ 按业务拆分（auth.ts / file.ts / conversation.ts / interview.ts / note.ts / profile.ts）
 ├── assets/           # 需要经构建处理的静态资源（图片、svg、字体）
 ├── components/       # 可复用组件
 │   ├── common/       # 通用展示组件（EmptyState / LoadingDots）
 │   ├── layout/       # 顶栏相关（TopNavBar / ModuleTabs）
 │   ├── sidebar/      # 侧栏（ConversationSidebar / ConversationList / NoteList / SidebarItem）
-│   └── chat/         # 聊天区（ChatMessageList / ChatMessageItem / ChatSourceList / MsgFile / InterviewCard / ChatInputBar）
+│   └── chat/         # 聊天区（ChatMessageList / ChatMessageItem / ChatSourceList / MsgFile / InterviewCard / ChatInputBar / ProfileWelcomeCard）
 ├── composables/      # 组合式函数，命名 useXxx.ts（useAutoScroll / useCurrentModule）
 ├── layouts/          # 布局组件（AppShell.vue）
 ├── mock/             # 接口 Mock（仅开发环境加载，见 §7.2；index.ts / notes.ts，会话已接真实后端）
 ├── router/           # 路由配置
-├── stores/           # Pinia 状态（auth / conversation / chat / note）
+├── stores/           # Pinia 状态（auth / conversation / chat / note / profile）
 ├── styles/           # 全局样式与设计 token（_tokens.scss / index.scss）
 ├── types/            # 全局类型定义（api / conversation / chat / note）
 ├── utils/            # 纯工具函数（token.ts：令牌读写；sse.ts：SSE 响应解析；markdownUtil.ts：Markdown 渲染）
@@ -206,6 +206,7 @@ src/
 - **鉴权与续期**：请求层自动为受保护接口附加 `Authorization: Bearer <access_token>`；收到 `401` 时用本地 `refresh_token` 调 `/api/auth/refresh`（并发请求共享同一次刷新）并重试一次，刷新失败则清理本地令牌并跳转登录页。令牌存于 localStorage，读写统一走 `src/utils/token.ts`。
 - **头像上传**：注册页选择头像时**只做本地预览**（`URL.createObjectURL`，限制 JPG / PNG / WebP / GIF 且 ≤ 2MB），不发请求；点击注册后按「建号 → 自动登录拿令牌 → `POST /api/files` 上传」执行，上传用 `FormData`（字段 `file`），请求层自动带 Bearer。后端自动识别类型：图片会更新头像并返回 `{url, md5, size, kind}`，文档 / 音频只保存。头像上传失败不阻断登录。当前用户（含 `avatar` URL）由 `stores/auth.ts` 全局维护，顶栏从 store 读取展示。通用文件接口封装在 `src/api/file.ts`。
 - **错误提示**：请求层统一弹出后端 `message`（短时间去重，可用 `silent` 关闭），调用方不要重复提示同一错误。
+- **用户画像**：`src/api/profile.ts` 封装资料 CRUD（`GET /api/profiles/me` 未创建时 404 归一为 `null` 并用 `silent` 关闭提示；`POST /api/profiles` 创建；`PUT /api/profiles/me` 更新）。出参归一并去掉 `user_id`，请求体使用后端 snake_case 字段名。`stores/profile.ts` 维护 `profile` / `needsOnboarding`：新会话空聊天区由 `components/chat/ProfileWelcomeCard.vue` 展示开场白表单（前三项必填、技能 / 薄弱点选填、可跳过），保存成功后卡片随 `needsOnboarding=false` 消失；进入空会话时重新拉取画像，避免对话自动回填后卡片仍展示。
 - 每个接口在 `src/api/xxx.ts` 中定义明确的请求 / 响应类型，并按业务域拆分文件（如 `conversation.ts` / `interview.ts` / `note.ts`）。
 - 流式接口（AI 对话、语音播报等）需封装为独立的 SSE / 流式工具，并处理中断与错误重连。当前实现：`src/utils/sse.ts` 只做协议解析，`src/api/conversation.ts` 的 `streamChat` 负责鉴权（fetch 不经过 axios 拦截器，401 时手动续期一次）、错误与业务事件分发；`stores/chat.ts` 的 `sendMessage` 负责本地乐观消息与增量渲染。
 

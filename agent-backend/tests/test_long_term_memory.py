@@ -1,12 +1,19 @@
 """长期记忆测试：画像格式化、意图判断、结构化抽取与后台写入。"""
 
+import json
+
 from app.db import user_profile_repo
 from app.services import long_term_memory
-from app.services.long_term_memory import LongTermMemory, _extract_fields
+from app.services.long_term_memory import (
+    LongTermMemory,
+    _clean_years,
+    _extract_fields,
+)
 
 # 模块导入时保存真实实现：conftest 的 autouse 夹具会替换成测试替身，
 # 涉及真实逻辑的用例需要显式换回来。
 _REAL_SHOULD_WRITE = LongTermMemory.should_write
+_REAL_MISSING = LongTermMemory.missing_required_fields
 _REAL_SUBMIT = LongTermMemory.submit_profile_update_async
 
 
@@ -78,6 +85,11 @@ def test_extract_fields_parses_json_and_cleans_values() -> None:
     """支持代码块包裹的 JSON；空字段忽略、数组去重限长。"""
     raw = """```json
     {
+      "target_job": " 后端开发工程师 ",
+      "years_experience": "3 年",
+      "target_level": "P6",
+      "target_skills": ["Python", "Python", "MySQL"],
+      "weak_topics": ["分布式"],
       "learning_goal": "转行后端",
       "learning_style": "   ",
       "interview_focus": ["高并发", "高并发", "数据库"],
@@ -88,10 +100,74 @@ def test_extract_fields_parses_json_and_cleans_values() -> None:
     fields = _extract_fields(raw)
 
     assert fields == {
+        "target_job": "后端开发工程师",
+        "years_experience": 3,
+        "target_level": "P6",
+        "target_skills": ["Python", "MySQL"],
+        "weak_topics": ["分布式"],
         "learning_goal": "转行后端",
         "interview_focus": ["高并发", "数据库"],
         "long_term_summary": "关注后端与数据库",
     }
+
+
+def test_clean_years_accepts_valid_and_rejects_invalid() -> None:
+    """年限兼容字符串单位；越界、小数、布尔与无法识别的内容一律丢弃。"""
+    assert _clean_years(3) == 3
+    assert _clean_years(3.0) == 3
+    assert _clean_years("3 年") == 3
+    assert _clean_years(0) == 0
+    assert _clean_years(60) == 60
+    assert _clean_years(3.5) is None
+    assert _clean_years("无经验") is None
+    assert _clean_years(61) is None
+    assert _clean_years(-1) is None
+    assert _clean_years(True) is None
+    assert _clean_years(None) is None
+
+
+def test_extract_fields_keeps_zero_years() -> None:
+    """0 年（应届 / 无经验）是有效画像值，不能被当成空字段丢掉。"""
+    assert _extract_fields('{"years_experience": 0}') == {"years_experience": 0}
+
+
+def test_extract_fields_limits_list_items() -> None:
+    """技能 / 薄弱点最多 20 项，单项超长截断到 50 字。"""
+    raw = json.dumps(
+        {
+            "target_skills": [f"技能{i}" for i in range(25)],
+            "weak_topics": ["薄" * 60],
+        },
+        ensure_ascii=False,
+    )
+
+    fields = _extract_fields(raw)
+
+    assert len(fields["target_skills"]) == 20
+    assert fields["weak_topics"] == ["薄" * 50]
+
+
+def test_missing_required_fields(auth_user: dict, monkeypatch) -> None:
+    """必填项按缺失返回；0 年经验算已填写；资料齐全返回空列表。"""
+    monkeypatch.setattr(
+        LongTermMemory, "missing_required_fields", _REAL_MISSING
+    )
+    memory = LongTermMemory()
+    user_id = auth_user["id"]
+
+    assert memory.missing_required_fields(user_id) == [
+        "target_job",
+        "years_experience",
+        "target_level",
+    ]
+
+    user_profile_repo.insert(
+        user_id, {"target_job": "后端开发", "years_experience": 0}
+    )
+    assert memory.missing_required_fields(user_id) == ["target_level"]
+
+    user_profile_repo.update(user_id, {"target_level": "P6"})
+    assert memory.missing_required_fields(user_id) == []
 
 
 def test_update_profile_from_conversation_writes_fields(
@@ -100,7 +176,12 @@ def test_update_profile_from_conversation_writes_fields(
     """抽取结果写回画像，已有画像作为上下文传给模型。"""
     user_profile_repo.insert(
         auth_user["id"],
-        {"learning_goal": "旧目标", "interview_focus": ["旧重点"]},
+        {
+            "target_job": "旧岗位",
+            "target_skills": ["旧技能"],
+            "learning_goal": "旧目标",
+            "interview_focus": ["旧重点"],
+        },
     )
     captured: dict = {}
 
@@ -109,8 +190,10 @@ def test_update_profile_from_conversation_writes_fields(
         captured["request_text"] = request_text
         captured["context"] = context
         return (
-            '{"learning_goal": "新目标", "interview_focus": ["新重点"], '
-            '"long_term_summary": "新摘要"}'
+            '{"target_job": "新岗位", "years_experience": 3, '
+            '"target_level": "P6", "target_skills": ["Go", "Kafka"], '
+            '"weak_topics": ["分布式"], "learning_goal": "新目标", '
+            '"interview_focus": ["新重点"], "long_term_summary": "新摘要"}'
         )
 
     monkeypatch.setattr(LongTermMemory, "_extract_profile_fields", _fake_extract)
@@ -121,8 +204,14 @@ def test_update_profile_from_conversation_writes_fields(
         [{"role": "assistant", "content": "好的，我们按计划来"}],
     )
 
-    assert "旧目标" in captured["existing"]
+    assert "旧岗位" in captured["existing"]
+    assert "旧技能" in captured["existing"]
     assert captured["request_text"] == "我准备转做后端开发"
+    assert updated["target_job"] == "新岗位"
+    assert updated["years_experience"] == 3
+    assert updated["target_level"] == "P6"
+    assert updated["target_skills"] == ["Go", "Kafka"]
+    assert updated["weak_topics"] == ["分布式"]
     assert updated["learning_goal"] == "新目标"
     assert updated["interview_focus"] == ["新重点"]
     assert updated["long_term_summary"] == "新摘要"

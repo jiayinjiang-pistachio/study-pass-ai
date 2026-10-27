@@ -101,11 +101,16 @@ def stub_long_term_memory(monkeypatch) -> dict:
 
     返回记录器：用例可覆盖 should_write 返回值后，检查 submit 的入参。
     """
-    calls: dict = {"should_write": [], "submit": []}
+    calls: dict = {"should_write": [], "missing": [], "submit": []}
 
     def _fake_should_write(self, text: str, user_id: int | None = None) -> bool:
         calls["should_write"].append({"text": text, "user_id": user_id})
         return False
+
+    def _fake_missing(self, user_id: int) -> list[str]:
+        calls["missing"].append(user_id)
+        # 默认视为资料齐全：既有流式用例不会因测试用户没有画像而触发后台抽取
+        return []
 
     def _fake_submit(self, user_id: int, request_text: str, context) -> None:
         calls["submit"].append(
@@ -117,6 +122,7 @@ def stub_long_term_memory(monkeypatch) -> dict:
         )
 
     monkeypatch.setattr(LongTermMemory, "should_write", _fake_should_write)
+    monkeypatch.setattr(LongTermMemory, "missing_required_fields", _fake_missing)
     monkeypatch.setattr(
         LongTermMemory, "submit_profile_update_async", _fake_submit
     )

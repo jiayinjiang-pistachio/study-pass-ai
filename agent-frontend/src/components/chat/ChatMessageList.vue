@@ -2,11 +2,13 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { ArrowDown } from '@element-plus/icons-vue'
 import ChatMessageItem from './ChatMessageItem.vue'
+import ProfileWelcomeCard from './ProfileWelcomeCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { useAutoScroll } from '@/composables/useAutoScroll'
 import { useCurrentChatModule } from '@/composables/useCurrentModule'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
+import { useProfileStore } from '@/stores/profile'
 import type { ChatMessage } from '@/types/chat'
 
 /** 常量空数组，避免 computed 每次返回新引用触发无意义的 watch */
@@ -14,9 +16,12 @@ const EMPTY_MESSAGES: ChatMessage[] = []
 
 const chatStore = useChatStore()
 const conversationStore = useConversationStore()
+const profileStore = useProfileStore()
 const module = useCurrentChatModule()
 
 const scroller = ref<HTMLElement | null>(null)
+/** 按会话记录「稍后再说」，本次会话内不再弹出画像卡片 */
+const skippedSessions = ref<Record<number, boolean>>({})
 
 const activeSessionId = computed(() =>
   module.value ? conversationStore.activeByModule[module.value] : null,
@@ -28,6 +33,17 @@ const messages = computed(() => state.value?.items ?? EMPTY_MESSAGES)
 const loading = computed(() => state.value?.loading ?? false)
 const loadingOlder = computed(() => state.value?.loadingOlder ?? false)
 const hasActiveSession = computed(() => activeSessionId.value !== null)
+/** 空会话且画像未填时展示欢迎卡片；跳过或画像已齐全则回到默认空状态 */
+const showProfileCard = computed(() => {
+  const id = activeSessionId.value
+  return (
+    id !== null &&
+    !loading.value &&
+    messages.value.length === 0 &&
+    profileStore.needsOnboarding &&
+    !skippedSessions.value[id]
+  )
+})
 
 const { showScrollToBottom, scrollToBottom } = useAutoScroll(
   scroller,
@@ -39,11 +55,18 @@ watch(
   async (id) => {
     if (id === null) return
     await chatStore.loadLatest(id)
+    // 进入空会话时重读画像，避免对话自动回填后仍展示欢迎卡片
+    if (chatStore.stateOf(id).items.length === 0) void profileStore.refresh()
     await nextTick()
     scrollToBottom('auto')
   },
   { immediate: true },
 )
+
+function handleSkip(): void {
+  const id = activeSessionId.value
+  if (id !== null) skippedSessions.value[id] = true
+}
 
 /** 距离顶部 10px 内触发上拉分页，并保持当前视口位置不跳动 */
 async function handleScroll(): Promise<void> {
@@ -78,6 +101,11 @@ async function handleScroll(): Promise<void> {
         <ChatMessageItem v-for="item in messages" :key="item.id" :message="item" />
       </template>
 
+      <ProfileWelcomeCard
+        v-else-if="showProfileCard"
+        :key="activeSessionId ?? undefined"
+        @skip="handleSkip"
+      />
       <EmptyState
         v-else-if="!loading && hasActiveSession"
         description="暂无聊天记录"

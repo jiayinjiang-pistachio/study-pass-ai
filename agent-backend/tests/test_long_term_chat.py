@@ -116,6 +116,75 @@ async def test_profile_intent_submits_async_update(
     assert call["context"][-1]["role"] == "assistant"
 
 
+async def test_missing_profile_triggers_update_without_skipping_rag(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+    stub_long_term_memory: dict,
+) -> None:
+    """必填资料缺失时普通提问也触发抽取，但仍照常检索知识库。"""
+    session = _new_session(auth_user["id"])
+    retrieval_calls: list[tuple] = []
+
+    from app.rag import retriever
+
+    monkeypatch.setattr(
+        retriever,
+        "search_similar_chunks",
+        lambda *args, **kwargs: retrieval_calls.append(args) or [],
+    )
+    monkeypatch.setattr(
+        chat_service.LongTermMemory,
+        "should_write",
+        lambda self, text, user_id=None: False,
+    )
+    monkeypatch.setattr(
+        chat_service.LongTermMemory,
+        "missing_required_fields",
+        lambda self, user_id: ["target_job"],
+    )
+    _patch_chain(monkeypatch, _FakeChain(["好的"]))
+
+    resp = await client.post(
+        f"/api/sessions/{session['id']}/stream-chat",
+        headers=auth_headers,
+        json={"request_text": "我是做后端的"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert retrieval_calls  # 资料缺失不跳过 RAG
+    calls = stub_long_term_memory["submit"]
+    assert len(calls) == 1
+    assert calls[0]["request_text"] == "我是做后端的"
+
+
+async def test_single_char_does_not_trigger_profile_update(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+    stub_long_term_memory: dict,
+) -> None:
+    """单字确认语不触发后台抽取，避免无意义模型调用。"""
+    session = _new_session(auth_user["id"])
+    monkeypatch.setattr(
+        chat_service.LongTermMemory,
+        "missing_required_fields",
+        lambda self, user_id: ["target_job"],
+    )
+    _patch_chain(monkeypatch, _FakeChain(["好的"]))
+
+    resp = await client.post(
+        f"/api/sessions/{session['id']}/stream-chat",
+        headers=auth_headers,
+        json={"request_text": "好"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert stub_long_term_memory["submit"] == []
+
+
 async def test_non_profile_message_does_not_update_profile(
     client: httpx.AsyncClient,
     auth_user: dict,
