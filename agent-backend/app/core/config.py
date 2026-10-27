@@ -117,7 +117,7 @@ LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "60"))
 LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "1"))
 
 # 记忆层：取最近 N 轮（一问一答为一轮）已完成消息作为上下文
-MEMORY_MAX_TURNS: int = int(os.getenv("MEMORY_MAX_TURNS", "10"))
+MEMORY_MAX_TURNS: int = int(os.getenv("MEMORY_MAX_TURNS", "8"))
 # 单条历史消息注入上下文的最大字符数：附件提取文本可能很长，超限截断避免撑爆上下文
 MEMORY_MESSAGE_MAX_CHARS: int = int(os.getenv("MEMORY_MESSAGE_MAX_CHARS", "4000"))
 

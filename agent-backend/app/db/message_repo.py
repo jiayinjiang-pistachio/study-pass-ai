@@ -66,7 +66,8 @@ def list_recent_completed(session_id: int, limit: int) -> list[dict]:
             .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
             .limit(limit)
         ).all()
-        # 查询用倒序取最近 N 条，返回前恢复成正序，符合对话上下文顺序
+        # 查询用倒序（最新 → 最旧）取最近 N 条，返回前反转回时间正序
+        # （最早 → 最新），与模型接收的多轮对话顺序一致
         return [_to_dict(row) for row in reversed(rows)]
 
 

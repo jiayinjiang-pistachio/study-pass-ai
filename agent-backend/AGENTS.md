@@ -33,7 +33,7 @@
 | 表结构迁移 | Alembic `1.14.x` | 改模型后 `scripts/db_sync.sh` 一键同步 |
 | 配置读取 | `python-dotenv` | 分层加载：真实环境变量 > `.env.{APP_ENV}` > `.env`，入口 `app/core/config.py`（唯一读取入口） |
 | 日志 | Loguru `0.7.x` | 开发控制台 + 文件，生产只落文件；按大小滚动（10MB × 5），入口 `app/core/logging.py` |
-| AI 编排 | LangChain `langchain-core 1.7` + `langchain-openai 1.7` | OpenAI 兼容协议；模型 / 提示词 / 记忆三层封装在 `app/services/ai/` |
+| AI 编排 | LangChain `langchain-core 1.7` + `langchain-openai 1.7` | OpenAI 兼容协议；模型 / 提示词封装在 `app/services/ai/`，记忆读取在 `app/services/memory_service.py` |
 | 语言 | Python `3.13` | 使用 `X | None` 现代联合类型写法 |
 | 包管理 | **venv + pip** | 运行期依赖以 `requirements.txt` 为准；测试依赖另见 `requirements-dev.txt` |
 
@@ -103,8 +103,9 @@ agent-backend/
 │   │   ├── auth_service.py  #   鉴权业务：登录校验、签发 / 刷新令牌、解析当前用户
 │   │   ├── session_service.py #  会话分页 / 创建 / 编辑 + 级联删除（含附件资源）
 │   │   ├── message_service.py #  会话消息分页查询（正文与附件段分离）
-│   │   ├── chat_service.py  #   流式对话：校验 / 落库 / 记忆上下文 / SSE 编排
-│   │   ├── ai/              #   AI 三层：llm（模型）/ prompt_layer（提示词与链路）/ memory（上下文）
+│   │   ├── chat_service.py  #   流式对话：校验 / 检索 / 落库 / SSE 编排
+│   │   ├── memory_service.py #  记忆读取：InstantMemory（短期记忆）/ MemoryService（统一入口）
+│   │   ├── ai/              #   AI 两层：llm（模型）/ prompt_layer（提示词与链路）
 │   │   ├── profile_service.py #   用户背景资料 CRUD（一人一份，按当前用户隔离）
 │   │   ├── prompt_template_service.py # 提示词版本管理：智能体配置 / 拼接 / 回滚 / Redis 缓存
 │   │   ├── prompt_injection_service.py # 提示词变量注入：验证（清洗 / 限长）→ 转换（格式化 / 默认值）→ 填充（占位符替换）
@@ -291,8 +292,8 @@ agent-backend/
   - 事件：`meta`（`session_id` / `message_id` / `request_id`）→ `delta`（`{content}`）→ `done`（`{message_id, status, sources}`）；异常以 `error`（`{code, message}`）收尾。响应头含 `Cache-Control: no-cache`、`X-Accel-Buffering: no`，避免反向代理缓冲。
   - 落库：用户消息先以 `status=0`（生成中）写入；成功回写 `response_text` + `status=1`，并写入 `reference_sources`（只存 `[{chunk_id, score}]`）；模型失败或客户端断开时保留已生成的部分内容并置 `status=2`。
   - **RAG 按需检索**：`should_retrieve(request_text)` 先跳过空 / 极短 / 确认语 / 礼貌语 / 推进语；命中时才调用 `search_similar_chunks(query, user_id, top_k=3)`，把 `format_retrieved_chunks` 生成的参考文本拼到本轮问题前，并在系统提示词后追加 `build_rag_system_prompt` 的回答规则。检索失败降级为普通对话，不阻断流式生成。`done.sources` 为完整来源（`chunk_id` / `resource_id` / `chunk_index` / `file_name` / `score` / `text`），顺序与注入的 `[1] [2]` 编号一致。
-  - AI 分层（`app/services/ai/`）：`llm.py` 只负责 provider → 模型实例；`prompt_layer.py` 只负责系统提示词与 `prompt | model | parser` 链路；`memory.py` 只负责从数据库取多轮历史并构建 LangChain 消息上下文。`chat_service.py` 只做编排与 SSE 输出。
-  - 记忆层仅取最近 `MEMORY_MAX_TURNS` 轮 `status=1` 的消息；单条消息超过 `MEMORY_MESSAGE_MAX_CHARS` 截断；`file_extracted_text` 非空时拼入对应的用户消息。
+  - AI 分层（`app/services/ai/`）：`llm.py` 只负责 provider → 模型实例；`prompt_layer.py` 只负责系统提示词与 `prompt | model | parser` 链路。`chat_service.py` 只做编排与 SSE 输出。
+  - 记忆读取（`app/services/memory_service.py`）：`InstantMemory.load()` 按 `created_at` 倒序取最近 `MEMORY_MAX_TURNS` 轮 `status=1` 的消息 → `_fit_char_budget` 先按 `MEMORY_MESSAGE_MAX_CHARS` 截断单条、再按总预算丢弃更旧消息 → `build_chat_history_from_rows` 转成 LangChain 消息；`file_extracted_text` 非空时拼入对应的用户消息。`MemoryService.build_context` 是统一入口，为工作 / 长期记忆预留扩展位。
   - 模型统一走 OpenAI 兼容协议，配置项 `LLM_PROVIDER / LLM_MODEL / LLM_API_KEY / LLM_BASE_URL / LLM_TEMPERATURE / LLM_TIMEOUT / LLM_MAX_RETRIES`；密钥只放环境变量，缺失时该接口返回 503，不影响其他接口启动。
 - **面试记录约定**：`interviews.user_id` 记录归属；`GET /api/interviews/{interview_id}` 必须按 `interview_id + user_id` 查询，返回含 `qa_object` 的详情，防止越权读取他人面试记录。
 - **用户背景资料约定**（`/api/profiles`，整组需登录）：一人一份（`user_profiles.user_id` 唯一），`user_id` 一律取自令牌，不接受客户端传入，因此只能操作自己的资料。`POST /api/profiles` 创建（已存在 → `409`）；`GET/PUT/DELETE /api/profiles/me` 查询 / 局部更新 / 删除（不存在 → `404`）。字段：`target_job`（≤64）、`years_experience`（0..60）、`target_level`（≤32）、`target_skills` / `weak_topics`（字符串数组，≤20 项、单项 ≤50 字）。出参不含 `user_id`。资料供提示词变量注入使用，删除后注入回退为默认值。

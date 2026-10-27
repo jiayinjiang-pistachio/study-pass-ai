@@ -26,7 +26,8 @@ from ..core.exceptions import BusinessException, SystemException
 from ..db import message_repo, resource_repo, session_repo
 from ..rag.context import format_retrieved_chunks, should_retrieve
 from ..schemas.chat import StreamChatIn
-from .ai import memory, prompt_layer
+from .ai import prompt_layer
+from .memory_service import MemoryService
 
 logger = logging.getLogger(__name__)
 
@@ -170,8 +171,9 @@ def prepare_stream(
         }
     )
 
-    # 上下文在用户消息落库后构建：查询只取 status=1，当前这条生成中的消息不会重复注入
-    context = memory.build_context(
+    # 上下文在用户消息落库后构建：查询只取 status=1，当前这条生成中的消息不会重复注入；
+    # 历史读取（最近 N 轮 + 字符预算）封装在 MemoryService，主流程不关心查询细节
+    context = MemoryService().build_context(
         session_id, _build_input(payload.request_text, retrieved)
     )
     return StreamState(
