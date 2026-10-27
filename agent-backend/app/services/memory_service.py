@@ -15,7 +15,12 @@ from collections.abc import Sequence
 from typing import TypedDict
 
 import redis
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -23,6 +28,7 @@ from ..core import config
 from ..core.redis_client import get_client
 from ..db import message_repo
 from .ai.llm import get_chat_model
+from .long_term_memory import LongTermMemory
 
 logger = logging.getLogger(__name__)
 
@@ -374,20 +380,21 @@ def _build_working_history(raw: Sequence[dict]) -> list[BaseMessage]:
 
 
 class MemoryService:
-    """记忆统一入口：工作记忆（Redis）优先，短期记忆（MySQL）兜底。"""
+    """记忆统一入口：长期记忆（画像）+ 工作记忆（Redis）+ 短期记忆（MySQL）。"""
 
     def __init__(
         self,
         instant: InstantMemory | None = None,
         *,
         redis_client: redis.Redis | None = None,
+        long_term: LongTermMemory | None = None,
     ) -> None:
         # 为什么不直接写 instant: InstantMemory = InstantMemory()：
         # 1. 默认参数在函数定义（导入模块）时就求值，会让实例提前创建、被所有调用方共享；
         #    改成运行时按需创建，每个 MemoryService 持有独立实例，后续 InstantMemory
         #    若增加连接 / 缓存等状态也不会互相串用。
         # 2. 保留注入口：测试可传入自定义轮数 / 预算的 InstantMemory（或替身），
-        #    无需改全局 config；后续接入工作记忆、长期记忆时沿用同样的可选参数即可，
+        #    无需改全局 config；长期记忆同样通过 long_term 参数注入，
         #    调用方仍统一走 MemoryService。
         # 用 `is not None` 而非 `instant or ...`：只把「未传」视为缺省，
         # 不会因对象自定义了假值行为而误判。
@@ -399,17 +406,26 @@ class MemoryService:
         self._instant = instant if instant is not None else InstantMemory()
         # redis_client 同理：仅测试注入假客户端时非 None，生产走全局单例
         self._redis = redis_client
+        # 长期记忆同样支持注入替身；默认实例内部对 fastembed / LLM 懒加载
+        self._long_term = long_term if long_term is not None else LongTermMemory()
 
     def _working(self, user_id: int, session_id: int) -> WorkingMemory:
         return WorkingMemory(user_id, session_id, client=self._redis)
 
     def load_context(
-        self, user_id: int, session_id: int, user_text: str
+        self,
+        user_id: int,
+        session_id: int,
+        user_text: str,
+        *,
+        enable_long_term: bool = True,
     ) -> dict:
-        """构造链路入参：Redis 工作记忆优先，缺失时回退 MySQL 历史。
+        """构造链路入参：工作记忆（Redis）优先，短期记忆（MySQL）兜底。
 
         返回 `{history, input}`：history 为时间正序消息，input 为当前问题
         （存在摘要时，摘要作为本轮问题前缀注入，避免向历史插入额外 system 消息）。
+        `enable_long_term=True` 时，用户画像以 SystemMessage 插在 history 最前，
+        由 prompt_layer 在执行链路前合并进系统提示词。
         """
         working = self._working(user_id, session_id)
         state = working.get()
@@ -423,6 +439,13 @@ class MemoryService:
             # 冷启动回填：让后续轮次在 MySQL 历史基础上继续追加，而不是从零开始
             if history:
                 working.seed(history)
+
+        # 画像注入放在 seed 之后：SystemMessage 只进入本轮模型上下文，
+        # 不会被工作记忆当成原文消息持久化。
+        if enable_long_term:
+            memory_text = self._long_term.load_memory_context(user_id)
+            if memory_text:
+                history = [SystemMessage(content=memory_text), *history]
 
         input_text = user_text
         if raw and summary:

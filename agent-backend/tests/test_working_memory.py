@@ -8,7 +8,7 @@ import json
 import uuid
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.db import message_repo, session_repo
 from app.services import memory_service
@@ -257,3 +257,65 @@ def test_load_context_injects_summary_prefix(fake_redis: FakeRedis) -> None:
 
     assert context["input"] == "【会话摘要】\n会话摘要\n\n当前问题"
     assert [message.content for message in context["history"]] == ["近期问题"]
+
+
+class _StubLongTerm:
+    """长期记忆替身：只记录读取调用并返回固定画像文本。"""
+
+    def __init__(self, text: str = "") -> None:
+        self.text = text
+        self.calls: list[int] = []
+
+    def load_memory_context(self, user_id: int) -> str:
+        self.calls.append(user_id)
+        return self.text
+
+
+def test_load_context_prepends_long_term_system_message(
+    fake_redis: FakeRedis,
+) -> None:
+    """画像文本作为 SystemMessage 插在 history 最前。"""
+    stub = _StubLongTerm("【用户画像】\n- 学习目标：转行后端")
+    service = MemoryService(
+        InstantMemory(), redis_client=fake_redis, long_term=stub
+    )
+
+    context = service.load_context(1, 2, "当前问题")
+
+    assert isinstance(context["history"][0], SystemMessage)
+    assert context["history"][0].content == "【用户画像】\n- 学习目标：转行后端"
+    assert stub.calls == [1]
+
+
+def test_load_context_can_disable_long_term(fake_redis: FakeRedis) -> None:
+    """enable_long_term=False 时不读画像，也不注入 SystemMessage。"""
+    stub = _StubLongTerm("【用户画像】\n- 学习目标：转行后端")
+    service = MemoryService(
+        InstantMemory(), redis_client=fake_redis, long_term=stub
+    )
+
+    context = service.load_context(1, 2, "当前问题", enable_long_term=False)
+
+    assert context["history"] == []
+    assert stub.calls == []
+
+
+def test_long_term_message_is_not_seeded_to_redis(
+    auth_user: dict, fake_redis: FakeRedis
+) -> None:
+    """冷启动回填只写 MySQL 历史，画像 SystemMessage 不进入工作记忆。"""
+    session = _new_session(auth_user["id"])
+    _add_round(auth_user["id"], session["id"], "历史问题", "历史回答")
+    stub = _StubLongTerm("【用户画像】\n- 学习目标：转行后端")
+    service = MemoryService(
+        InstantMemory(char_budget=10000), redis_client=fake_redis, long_term=stub
+    )
+
+    service.load_context(auth_user["id"], session["id"], "当前问题")
+
+    memory = WorkingMemory(auth_user["id"], session["id"], client=fake_redis)
+    data = json.loads(fake_redis.store[memory.key])
+    assert data["raw"] == [
+        {"role": "user", "content": "历史问题"},
+        {"role": "assistant", "content": "历史回答"},
+    ]

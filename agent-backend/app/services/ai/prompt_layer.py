@@ -5,9 +5,10 @@
 - 不查数据库、不做流式输出，历史消息由记忆层以消息列表注入。
 """
 
+from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.runnables import Runnable
+from langchain_core.runnables import Runnable, RunnableLambda
 
 from .llm import get_chat_model
 
@@ -66,6 +67,37 @@ def build_system_prompt(session_mode: int, select_mode: int = 0) -> str:
     return "\n\n".join(parts)
 
 
+def merge_history_system_messages(
+    history: list[BaseMessage], system_prompt: str
+) -> tuple[list[BaseMessage], str]:
+    """把历史中的 SystemMessage 合并进 system_prompt，并从 history 中移除。
+
+    记忆层会把用户画像作为 SystemMessage 插在 history 最前。若原样交给模型，
+    SystemMessage 会出现在多轮对话中间；这里统一前移合并，保证消息结构是
+    「system → 历史 Human/AI → 当前问题」。多个 SystemMessage 按原顺序追加。
+    """
+    extracted: list[str] = []
+    remaining: list[BaseMessage] = []
+    saw_system = False
+    for message in history:
+        if isinstance(message, SystemMessage):
+            saw_system = True
+            if isinstance(message.content, str) and message.content.strip():
+                extracted.append(message.content.strip())
+        else:
+            remaining.append(message)
+
+    # 没有 SystemMessage 时直接返回原列表；有过 SystemMessage（哪怕内容为空）
+    # 也统一移除，避免空系统消息留在多轮对话中间。
+    if not saw_system:
+        return history, system_prompt
+    if not extracted:
+        return remaining, system_prompt
+
+    merged = "\n\n".join([system_prompt, *extracted])
+    return remaining, merged
+
+
 def build_chat_chain(
     session_mode: int,
     select_mode: int = 0,
@@ -76,16 +108,28 @@ def build_chat_chain(
 
     入参固定为 {"history": list[BaseMessage], "input": str}，由记忆层构造；
     rag_enabled=True 时在系统提示词后追加 RAG 回答规则。
+    执行前由 RunnableLambda 合并 history 中的 SystemMessage（如用户画像）。
     """
     system_prompt = build_system_prompt(session_mode, select_mode)
     if rag_enabled:
         system_prompt = f"{system_prompt}\n\n{build_rag_system_prompt()}"
 
+    def _merge_system_messages(payload: dict) -> dict:
+        history, merged_prompt = merge_history_system_messages(
+            list(payload.get("history") or []), system_prompt
+        )
+        return {**payload, "history": history, "system_prompt": merged_prompt}
+
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", system_prompt),
+            ("system", "{system_prompt}"),
             MessagesPlaceholder("history"),
             ("human", "{input}"),
         ]
     )
-    return prompt | get_chat_model() | StrOutputParser()
+    return (
+        RunnableLambda(_merge_system_messages)
+        | prompt
+        | get_chat_model()
+        | StrOutputParser()
+    )

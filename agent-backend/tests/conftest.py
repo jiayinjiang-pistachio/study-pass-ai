@@ -30,6 +30,7 @@ from app.db.models import PromptTemplate
 from app.db.session import SessionLocal
 from app.main import app
 from app.rag import core as rag_core
+from app.services.long_term_memory import LongTermMemory
 
 # 本轮测试运行唯一的前缀，用于精确清理测试期间创建的用户
 TEST_PREFIX = f"smoke_{uuid.uuid4().hex[:6]}_"
@@ -92,6 +93,34 @@ def stub_rag_search(monkeypatch) -> None:
     monkeypatch.setattr(
         retriever, "search_similar_chunks", lambda *args, **kwargs: []
     )
+
+
+@pytest.fixture(autouse=True)
+def stub_long_term_memory(monkeypatch) -> dict:
+    """默认关闭长期记忆的模型调用，避免测试触发 fastembed 下载与 LLM 请求。
+
+    返回记录器：用例可覆盖 should_write 返回值后，检查 submit 的入参。
+    """
+    calls: dict = {"should_write": [], "submit": []}
+
+    def _fake_should_write(self, text: str, user_id: int | None = None) -> bool:
+        calls["should_write"].append({"text": text, "user_id": user_id})
+        return False
+
+    def _fake_submit(self, user_id: int, request_text: str, context) -> None:
+        calls["submit"].append(
+            {
+                "user_id": user_id,
+                "request_text": request_text,
+                "context": list(context) if not isinstance(context, str) else context,
+            }
+        )
+
+    monkeypatch.setattr(LongTermMemory, "should_write", _fake_should_write)
+    monkeypatch.setattr(
+        LongTermMemory, "submit_profile_update_async", _fake_submit
+    )
+    return calls
 
 
 @pytest_asyncio.fixture

@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator
 from typing import NamedTuple
 
 from fastapi import status
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.runnables import Runnable
 from starlette.concurrency import run_in_threadpool
 
@@ -27,6 +28,7 @@ from ..db import message_repo, resource_repo, session_repo
 from ..rag.context import format_retrieved_chunks, should_retrieve
 from ..schemas.chat import StreamChatIn
 from .ai import prompt_layer
+from .long_term_memory import LongTermMemory
 from .memory_service import MemoryService
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,8 @@ class StreamState(NamedTuple):
     chain: Runnable
     sources: list[dict]
     reference_sources: list[dict]
+    # 本轮是否命中「画像写入意图」：命中时跳过 RAG，成功后异步更新用户画像
+    profile_intent: bool
 
 
 def _get_owned_session(user_id: int, session_id: int) -> dict:
@@ -139,6 +143,27 @@ def _build_input(request_text: str, retrieved: list[dict]) -> str:
     return f"{rag_text}\n\n{request_text}"
 
 
+def _recent_context(
+    history: list[BaseMessage], limit: int = 4
+) -> list[dict]:
+    """取最近 limit 条历史问答，供后台画像抽取使用。
+
+    过滤掉长期记忆注入的 SystemMessage：它只是提示词，不是用户说过的话。
+    """
+    recent: list[dict] = []
+    for message in history:
+        if isinstance(message, HumanMessage):
+            role = "user"
+        elif isinstance(message, AIMessage):
+            role = "assistant"
+        else:
+            continue
+        content = message.content if isinstance(message.content, str) else ""
+        if content.strip():
+            recent.append({"role": role, "content": content})
+    return recent[-limit:]
+
+
 def prepare_stream(
     user_id: int, session_id: int, payload: StreamChatIn
 ) -> StreamState:
@@ -149,8 +174,13 @@ def prepare_stream(
     session = _get_owned_session(user_id, session_id)
     _ensure_segments_owned(user_id, payload)
 
+    # 先判断是否在描述用户自己的目标 / 偏好：命中时不走 RAG，
+    # 避免把「我想转行做后端」这类画像表达误当成知识库问答。
+    long_term = LongTermMemory()
+    profile_intent = long_term.should_write(payload.request_text, user_id)
+
     # 用原始问题做检索：确认 / 寒暄 / 推进语等无意义输入在这里被跳过
-    retrieved = _retrieve(user_id, payload.request_text)
+    retrieved = [] if profile_intent else _retrieve(user_id, payload.request_text)
     chain = _build_chain(
         session["session_mode"],
         payload.select_mode,
@@ -184,6 +214,7 @@ def prepare_stream(
         chain=chain,
         sources=[_to_source(chunk) for chunk in retrieved],
         reference_sources=[_to_reference(chunk) for chunk in retrieved],
+        profile_intent=profile_intent,
     )
 
 
@@ -243,6 +274,21 @@ async def stream_reply(state: StreamState) -> AsyncIterator[str]:
             state.message["request_text"],
             text,
         )
+        # 命中画像写入意图时，用「最近 4 条历史 + 本轮回复」触发后台抽取；
+        # 线程内异常自吞，这里的兜底只防止线程创建失败影响 done。
+        if state.profile_intent:
+            try:
+                context = _recent_context(state.context["history"])
+                context.append({"role": "assistant", "content": text})
+                LongTermMemory().submit_profile_update_async(
+                    state.message["user_id"],
+                    state.message["request_text"],
+                    context,
+                )
+            except Exception:
+                logger.warning(
+                    "触发长期记忆更新失败 | message_id=%s", message_id, exc_info=True
+                )
         yield _sse(
             EVENT_DONE,
             {

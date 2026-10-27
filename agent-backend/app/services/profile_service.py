@@ -10,6 +10,14 @@ from ..core.exceptions import BusinessException
 from ..db import user_profile_repo as db
 from ..schemas.profile import ProfileCreate, ProfileUpdate
 
+# 长期记忆允许自动写入的字段：限定范围，避免后台任务覆盖用户手工维护的信息
+LONG_TERM_FIELDS: set[str] = {
+    "learning_goal",
+    "learning_style",
+    "interview_focus",
+    "long_term_summary",
+}
+
 
 def _not_found(user_id: int) -> BusinessException:
     """统一的「资料不存在」错误。"""
@@ -53,3 +61,24 @@ def delete_profile(user_id: int) -> None:
     """删除背景资料，不存在则 404。"""
     if not db.delete(user_id):
         raise _not_found(user_id)
+
+
+def get_profile_dict(user_id: int) -> dict | None:
+    """读取用户画像原始字典；不存在返回 None。
+
+    与 `get_profile` 不同：这是给长期记忆内部使用的读取入口，不抛 404，
+    也不经过接口出参裁剪，因此包含长期记忆字段。
+    """
+    return db.get_by_user_id(user_id)
+
+
+def create_or_update(user_id: int, fields: dict) -> dict:
+    """按 user_id 创建或局部更新画像，供长期记忆后台任务写入。
+
+    只接受 `LONG_TERM_FIELDS` 中的字段，防止后台抽取结果误改用户手工维护的
+    target_job / target_skills 等内容。
+    """
+    allowed = {
+        key: value for key, value in fields.items() if key in LONG_TERM_FIELDS
+    }
+    return db.upsert(user_id, allowed)

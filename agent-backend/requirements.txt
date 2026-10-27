@@ -47,6 +47,9 @@ langchain-openai==1.7.2
 # 知识库切片：递归字符切片（按标题 / 段落 / 句子逐级回退）
 langchain-text-splitters==1.1.3
 
+# 长期记忆：本地语义相似度判断（BAAI/bge-small-zh-v1.5，首次使用时下载模型）
+fastembed==0.9.1
+
 # 向量检索：Qdrant 客户端（知识库 / 语义检索）
 qdrant-client==1.20.0
 

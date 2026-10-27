@@ -13,6 +13,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
     text,
@@ -60,6 +61,13 @@ class UserProfile(Base):
     # JSON 数组，如 ["Python", "MySQL"]
     target_skills: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     weak_topics: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # 长期记忆：由对话内容自动抽取，不通过资料 CRUD 接口写入
+    learning_goal: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    learning_style: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # JSON 数组，如 ["Java 后端", "数据库原理"]
+    interview_focus: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # 滚动摘要：合并历次画像抽取结果，避免只保留最近一轮信息
+    long_term_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[int] = mapped_column(
         BigInteger, server_default=text("(UNIX_TIMESTAMP())"), nullable=False
     )

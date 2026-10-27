@@ -116,7 +116,7 @@ sequenceDiagram
 
 > 检索用**原始问题**，注入用**增强后的问题**：前者保证意图判断不被参考资料干扰，后者让模型看到 `[1] [2]` 编号。
 
-> 记忆系统的完整设计、存储结构与多轮时序见 [`memory-system-v1.md`](memory-system-v1.md)。
+> 记忆系统的完整设计、存储结构与多轮时序见 [`memory-system-v1.md`](memory-system-v1.md)（工作记忆）与 [`memory-system-v2.md`](memory-system-v2.md)（长期画像）。
 
 ### 3.3 检索细节（`app/rag/retriever.py`）
 
