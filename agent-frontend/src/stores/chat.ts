@@ -107,6 +107,12 @@ export const useChatStore = defineStore('chat', () => {
     delete states.value[sessionId]
   }
 
+  /** 退出 / 切换账号时清空消息缓存与发送态，避免串用上一个账号的数据 */
+  function reset(): void {
+    states.value = {}
+    sendingBySession.value = {}
+  }
+
   function isSending(sessionId: number): boolean {
     return Boolean(sendingBySession.value[sessionId])
   }
@@ -173,5 +179,14 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  return { states, stateOf, loadLatest, loadOlder, clear, isSending, sendMessage }
+  return {
+    states,
+    stateOf,
+    loadLatest,
+    loadOlder,
+    clear,
+    reset,
+    isSending,
+    sendMessage,
+  }
 })

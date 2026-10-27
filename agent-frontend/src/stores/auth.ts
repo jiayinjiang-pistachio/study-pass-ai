@@ -4,6 +4,21 @@ import * as authApi from '@/api/auth'
 import type { AuthUser } from '@/api/auth'
 import * as fileApi from '@/api/file'
 import { clearTokens, getAccessToken, setTokens } from '@/utils/token'
+import { useChatStore } from './chat'
+import { useConversationStore } from './conversation'
+import { useNoteStore } from './note'
+import { useProfileStore } from './profile'
+
+/**
+ * 清空所有按用户隔离的页面状态（会话列表、消息缓存、笔记、画像）。
+ * 这些 store 跨路由存活，不清理会导致切换账号后仍展示上一个账号的数据。
+ */
+function resetUserScopedStores(): void {
+  useConversationStore().reset()
+  useChatStore().reset()
+  useNoteStore().reset()
+  useProfileStore().reset()
+}
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<AuthUser | null>(null)
@@ -23,6 +38,8 @@ export const useAuthStore = defineStore('auth', () => {
     const tokens = await authApi.login({ username, password })
     setTokens(tokens.access_token, tokens.refresh_token)
     loggedIn.value = true
+    // 令牌过期后重新登录、或直接切换账号时也要清掉上一个账号的页面状态
+    resetUserScopedStores()
     await loadUser()
     // 若加载用户时令牌已被请求层判定失效，这里同步回真实状态
     loggedIn.value = Boolean(getAccessToken())
@@ -45,6 +62,7 @@ export const useAuthStore = defineStore('auth', () => {
     clearTokens()
     user.value = null
     loggedIn.value = false
+    resetUserScopedStores()
   }
 
   return { user, loggedIn, loadUser, login, register, uploadAvatar, logout }
