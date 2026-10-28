@@ -158,6 +158,33 @@ def test_append_turn_summarizes_over_limit(
     assert len(data["raw"]) == memory_service.WORKING_KEEP_MESSAGES
 
 
+def test_no_summary_when_older_messages_empty(
+    fake_redis: FakeRedis, monkeypatch
+) -> None:
+    """消息不足保留窗口时不调用总结：否则空对话会让模型返回拒绝话术并被存成摘要。"""
+    monkeypatch.setattr(memory_service, "WORKING_RAW_CHAR_LIMIT", 5)
+    memory = WorkingMemory(1, 2, client=fake_redis)
+    _seed(
+        fake_redis,
+        memory,
+        [
+            {"role": "user", "content": "旧问题"},
+            {"role": "assistant", "content": "旧回答"},
+        ],
+    )
+
+    def _unexpected(previous_summary: str, messages) -> str:
+        raise AssertionError("没有更早消息时不应调用总结")
+
+    monkeypatch.setattr(memory_service, "quick_summarize", _unexpected)
+
+    memory.append_turn("新问题", "新回答")
+
+    data = json.loads(fake_redis.store[memory.key])
+    assert data["summary"] == ""
+    assert len(data["raw"]) == 4
+
+
 def test_summary_failure_keeps_raw(fake_redis: FakeRedis, monkeypatch) -> None:
     """总结失败时保留完整原文，避免丢上下文，下一轮会再次尝试。"""
     monkeypatch.setattr(memory_service, "WORKING_RAW_CHAR_LIMIT", 5)

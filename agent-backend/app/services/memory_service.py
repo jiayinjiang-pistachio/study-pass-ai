@@ -292,21 +292,24 @@ class WorkingMemory:
             # 交给总结并入摘要；[-6:] 是最近 6 条原文，总结后继续保留。
             older = raw[:-WORKING_KEEP_MESSAGES]
             keep = raw[-WORKING_KEEP_MESSAGES:]
-            try:
-                new_summary = quick_summarize(summary, older)
-                if not new_summary:
-                    raise ValueError("摘要结果为空")
-            except Exception:
-                # 总结失败时保留完整原文，避免丢上下文；下一轮会再次尝试
-                logger.warning(
-                    "工作记忆总结失败，暂不裁剪 | user_id=%s session_id=%s",
-                    self.user_id,
-                    self.session_id,
-                    exc_info=True,
-                )
-            else:
-                raw = keep
-                summary = new_summary
+            # 消息不足 6 条时 older 为空，没有可压缩内容；此时若仍调用模型，
+            # 会把「待合并对话为空」之类的拒绝话术当成摘要存下来。
+            if older:
+                try:
+                    new_summary = quick_summarize(summary, older)
+                    if not new_summary:
+                        raise ValueError("摘要结果为空")
+                except Exception:
+                    # 总结失败时保留完整原文，避免丢上下文；下一轮会再次尝试
+                    logger.warning(
+                        "工作记忆总结失败，暂不裁剪 | user_id=%s session_id=%s",
+                        self.user_id,
+                        self.session_id,
+                        exc_info=True,
+                    )
+                else:
+                    raw = keep
+                    summary = new_summary
 
         self._save(raw, summary)
 
@@ -435,6 +438,7 @@ class MemoryService:
         if raw:
             history = _build_working_history(raw)
         else:
+            # 读取短期记忆（最新8轮+字符裁剪+格式化输出）
             history = self._instant.load(session_id)
             # 冷启动回填：让后续轮次在 MySQL 历史基础上继续追加，而不是从零开始
             if history:
@@ -443,6 +447,7 @@ class MemoryService:
         # 画像注入放在 seed 之后：SystemMessage 只进入本轮模型上下文，
         # 不会被工作记忆当成原文消息持久化。
         if enable_long_term:
+            # 获取的是存在MySQL的用户画像信息（长期记忆）
             memory_text = self._long_term.load_memory_context(user_id)
             if memory_text:
                 history = [SystemMessage(content=memory_text), *history]
