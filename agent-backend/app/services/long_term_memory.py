@@ -408,7 +408,7 @@ class LongTermMemory:
         )
 
         fields = _extract_fields(
-            self._extract_profile_fields(existing, request_text, context)
+            self._extract_profile_fields(existing, request_text, context) # 这里调用后是返回了LLM模型生成的JSON(用户画像)
         )
         if not fields:
             return None

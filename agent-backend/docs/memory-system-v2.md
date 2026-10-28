@@ -7,6 +7,8 @@
 
 实现位置：`app/services/long_term_memory.py`、`app/services/memory_service.py`、`app/services/ai/prompt_layer.py`、`app/services/chat_service.py`。
 
+> 三层记忆的端到端链路、Redis 工作记忆的缓存读/写/过期路径、三个意图判断的底层原理与示意图，见 [`memory-system-flow.md`](memory-system-flow.md)。
+
 ---
 
 ## 1. V2 新增能力
