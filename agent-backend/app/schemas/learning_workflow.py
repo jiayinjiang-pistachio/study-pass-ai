@@ -1,0 +1,94 @@
+"""校验层：学习测评工作流的请求 / 响应模型。
+
+只约束 HTTP 契约；题目归一化与作答合法性（选项是否存在）在业务层完成，
+因为校验层拿不到生成后的 quiz。
+"""
+
+from typing import Annotated, Any
+
+from pydantic import BaseModel, Field, StringConstraints
+
+# 与 services/learning_workflow.py 的题目数量上限保持一致
+DEFAULT_QUESTION_COUNT = 5
+MAX_QUESTION_COUNT = 20
+
+RequestText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20000)
+]
+ProviderName = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=32)
+]
+
+
+class LearningWorkflowStartIn(BaseModel):
+    """发起学习测评：描述需求，后端生成结构化题目。"""
+
+    session_id: int = Field(..., ge=1, description="所属会话 ID")
+    request_text: RequestText = Field(..., description="测评需求（学什么、测什么）")
+    question_count: int = Field(
+        DEFAULT_QUESTION_COUNT,
+        ge=1,
+        le=MAX_QUESTION_COUNT,
+        description=f"题目数量，1..{MAX_QUESTION_COUNT}",
+    )
+    provider: ProviderName | None = Field(
+        None, description="模型服务商标识（仅记录，缺省取全局 LLM_PROVIDER）"
+    )
+
+
+class AnswerItem(BaseModel):
+    """单题作答：单选题传字符串，多选题传字符串数组，简答题传字符串。"""
+
+    question_id: int = Field(..., ge=1, description="题目 ID（由出题接口返回）")
+    value: str | list[str] = Field(..., description="作答内容")
+
+
+class LearningWorkflowSubmitIn(BaseModel):
+    """提交整套作答：必须覆盖全部题目。"""
+
+    answers: list[AnswerItem] = Field(
+        ..., min_length=1, max_length=MAX_QUESTION_COUNT, description="逐题作答"
+    )
+
+
+class QuizOptionOut(BaseModel):
+    key: str = Field(..., description="选项标识，如 A / B")
+    text: str = Field(..., description="选项内容")
+
+
+class QuizQuestionOut(BaseModel):
+    question_id: int = Field(..., description="题目 ID")
+    type: str = Field(
+        ..., description="题型：single_choice / multiple_choice / short_answer"
+    )
+    stem: str = Field(..., description="题干")
+    options: list[QuizOptionOut] = Field(
+        default_factory=list, description="选项；简答题为空数组"
+    )
+
+
+class LearningWorkflowStartOut(BaseModel):
+    run_id: str = Field(..., description="工作流运行 ID")
+    status: str = Field(..., description="流程状态，出题成功为 quiz_ready")
+    quiz: list[QuizQuestionOut] = Field(..., description="结构化题目")
+
+
+class EvaluationItemOut(BaseModel):
+    question_id: int = Field(..., description="题目 ID")
+    correct: bool = Field(..., description="是否答对")
+    comment: str = Field(..., description="逐题点评")
+
+
+class LearningWorkflowSubmitOut(BaseModel):
+    run_id: str = Field(..., description="工作流运行 ID")
+    status: str = Field(..., description="流程状态，提交成功为 completed")
+    score: int = Field(..., description="总分 0..100")
+    evaluation: list[EvaluationItemOut] = Field(..., description="逐题评分与点评")
+    weaknesses: list[str] = Field(..., description="薄弱点")
+    review: str = Field(..., description="整体学习建议")
+
+
+class LearningWorkflowDetailOut(BaseModel):
+    run_id: str = Field(..., description="工作流运行 ID")
+    status: str = Field(..., description="流程状态")
+    state: dict[str, Any] = Field(..., description="完整工作流状态")

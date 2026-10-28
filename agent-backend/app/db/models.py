@@ -179,6 +179,57 @@ class Interview(Base):
     )
 
 
+class WorkflowRun(Base):
+    """工作流运行表：一次跨请求的流程实例，状态与中间结果全部存在 state_json。
+
+    以 run_id 作为对外标识（UUID），用户只能按自己的 user_id 查询；
+    会话删除时级联清理，避免残留无法再进入的流程。
+    """
+
+    __tablename__ = "workflow_runs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # 对外暴露的运行标识；UUID 字符串，避免暴露自增 id
+    run_id: Mapped[str] = mapped_column(
+        String(36), unique=True, index=True, nullable=False
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    session_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    # 流程类型，如 learning_quiz；为后续接入其他工作流预留
+    workflow_type: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    # 流程状态：running / quiz_ready / completed / failed（常量见 learning_workflow_service）
+    status: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    # 完整工作流状态（LearningWorkflowState），第二次请求据此恢复题目与上下文
+    state_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # 失败原因，仅后端排查使用，不直接返回给前端
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[int] = mapped_column(
+        BigInteger, server_default=text("(UNIX_TIMESTAMP())"), nullable=False
+    )
+    updated_at: Mapped[int] = mapped_column(
+        BigInteger,
+        server_default=text("(UNIX_TIMESTAMP())"),
+        onupdate=text("UNIX_TIMESTAMP()"),
+        nullable=False,
+    )
+    completed_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        # 按用户查历史运行（列表 / 排查）依赖此复合索引
+        Index("ix_workflow_runs_user_id_created_at", "user_id", "created_at"),
+    )
+
+
 class PromptTemplate(Base):
     """提示词模板表：按 (agent_name, scene) 维护独立版本链。
 
