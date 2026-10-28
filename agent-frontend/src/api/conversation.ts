@@ -1,6 +1,11 @@
 import { ApiError, handleAuthExpired, refreshAccessToken, request } from './request'
 import type { PageResult } from '@/types/api'
-import type { ChatMessage, MessageSegment, SegmentType } from '@/types/chat'
+import type {
+  ChatMessage,
+  MessageSegment,
+  MessageSource,
+  SegmentType,
+} from '@/types/chat'
 import type { ChatModule, Conversation } from '@/types/conversation'
 import { MODULE_ICONS, ModuleKey, SESSION_MODE_BY_MODULE } from '@/types/conversation'
 import { readSse } from '@/utils/sse'
@@ -28,6 +33,7 @@ interface RawMessage {
   response_text?: string | null
   request_segments?: unknown
   response_segments?: unknown
+  sources?: unknown
   status?: number | null
   interview_id?: number | string | null
   created_at?: number | null
@@ -92,6 +98,34 @@ function toSegments(value: unknown): MessageSegment[] {
     .filter((segment): segment is MessageSegment => segment !== null)
 }
 
+function toSource(raw: unknown): MessageSource | null {
+  if (!isRecord(raw)) return null
+  const chunkId = typeof raw.chunk_id === 'string' ? raw.chunk_id : ''
+  const text = typeof raw.text === 'string' ? raw.text : ''
+  if (!chunkId || !text) return null
+  return {
+    chunkId,
+    resourceId: toNumber(raw.resource_id) || null,
+    chunkIndex:
+      typeof raw.chunk_index === 'number' && Number.isFinite(raw.chunk_index)
+        ? raw.chunk_index
+        : null,
+    fileName: typeof raw.file_name === 'string' ? raw.file_name : '',
+    score:
+      typeof raw.score === 'number' && Number.isFinite(raw.score)
+        ? raw.score
+        : null,
+    text,
+  }
+}
+
+function toSources(value: unknown): MessageSource[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map(toSource)
+    .filter((source): source is MessageSource => source !== null)
+}
+
 function toMessage(raw: RawMessage): ChatMessage {
   const status = raw.status === 0 || raw.status === 2 ? raw.status : 1
   const createdSeconds = toNumber(raw.created_at)
@@ -101,6 +135,7 @@ function toMessage(raw: RawMessage): ChatMessage {
     responseText: raw.response_text ?? '',
     requestSegments: toSegments(raw.request_segments),
     responseSegments: toSegments(raw.response_segments),
+    sources: toSources(raw.sources),
     status,
     interviewId: toNumber(raw.interview_id) || null,
     createdAt: createdSeconds > 0 ? createdSeconds * 1000 : Date.now(),
@@ -183,11 +218,20 @@ export interface StreamMeta {
   requestId: string
 }
 
+export interface StreamDone {
+  messageId: number
+  status: number
+  /** 本轮回答参考的知识片段；未检索或未命中为空数组 */
+  sources: MessageSource[]
+}
+
 export interface StreamChatHandlers {
   /** 收到 meta：服务端已完成落库，返回真实消息 ID */
   onMeta?: (meta: StreamMeta) => void
   /** 收到增量文本 */
   onDelta?: (content: string) => void
+  /** 收到 done：本轮生成完成，携带完整来源列表 */
+  onDone?: (done: StreamDone) => void
 }
 
 function buildStreamHeaders(token: string | null): Headers {
@@ -271,6 +315,11 @@ export async function streamChat(
       }
     } else if (event === 'done') {
       finished = true
+      handlers.onDone?.({
+        messageId: toNumber(parsed.message_id),
+        status: toNumber(parsed.status),
+        sources: toSources(parsed.sources),
+      })
     } else if (event === 'error') {
       errorMessage =
         typeof parsed.message === 'string'

@@ -1,4 +1,7 @@
-"""RAG 知识库入库：解析 → 清洗 → 分类 → 分块 → 向量化 → 写 Qdrant。
+"""RAG 知识库入库：解析 → 清洗 → 分类 → 分块 → 向量化 → 写 Qdrant + 原文写 MySQL。
+
+Qdrant 只存向量与过滤字段，切片原文落 MySQL knowledge_chunks，两边用同一批
+UUID 关联（vector_id = Qdrant Point id）。
 
 对外只暴露 ingest_file；其余函数均为单文件流水线内部的私有步骤。
 """
@@ -22,12 +25,16 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     MatchValue,
+    PointIdsList,
     PointStruct,
     VectorParams,
 )
+from sqlalchemy.orm import Session
 
 from ..core import config
 from ..core.exceptions import BusinessException, SystemException
+from ..db.session import SessionLocal
+from .chunk_store import save_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -348,12 +355,16 @@ def _embed(texts: list[str]) -> list[list[float]]:
 def _write_qdrant(
     payloads: list[dict],
     vectors: list[list[float]],
-    resource_id: int | None = None,
+    vector_ids: list[str],
+    resource_id: int,
     replace: bool = False,
 ) -> None:
-    """确保 collection 存在；replace 时先删同一资源的旧向量，再批量 upsert。"""
-    if replace and resource_id is None:
-        raise ValueError("replace=True 时必须提供 resource_id")
+    """确保 collection 存在；replace 时先删同一资源的旧向量，再批量 upsert。
+
+    Point id 使用调用方预生成的 UUID，与 MySQL knowledge_chunks.vector_id 保持一致。
+    """
+    if not (len(payloads) == len(vectors) == len(vector_ids)):
+        raise ValueError("payloads / vectors / vector_ids 数量不一致")
 
     try:
         client = QdrantClient(
@@ -370,7 +381,7 @@ def _write_qdrant(
             )
 
         # 分类变更重新入库前先清理旧向量，避免同一文件留下两套分类的 chunk
-        if replace and resource_id is not None:
+        if replace:
             client.delete(
                 collection_name=COLLECTION_NAME,
                 points_selector=Filter(
@@ -387,8 +398,8 @@ def _write_qdrant(
         client.upsert(
             collection_name=COLLECTION_NAME,
             points=[
-                PointStruct(id=str(uuid.uuid4()), vector=vector, payload=payload)
-                for payload, vector in zip(payloads, vectors)
+                PointStruct(id=vector_id, vector=vector, payload=payload)
+                for vector_id, vector, payload in zip(vector_ids, vectors, payloads)
             ],
             wait=True,
         )
@@ -398,19 +409,68 @@ def _write_qdrant(
         client.close()
 
 
+def _delete_qdrant_points(vector_ids: list[str]) -> None:
+    """MySQL 写入失败时尽力回删刚写入的向量，避免留下无原文的孤立点。"""
+    if not vector_ids:
+        return
+    try:
+        client = QdrantClient(
+            host=config.QDRANT_HOST, port=config.QDRANT_PORT, timeout=30
+        )
+        try:
+            client.delete(
+                collection_name=COLLECTION_NAME,
+                points_selector=PointIdsList(points=vector_ids),
+                wait=True,
+            )
+        finally:
+            client.close()
+    except Exception:
+        logger.exception("回滚 Qdrant 向量失败：vector_ids=%s", vector_ids)
+
+
+def _persist_chunks(
+    db: Session | None,
+    resource_id: int,
+    chunks: list[str],
+    vector_ids: list[str],
+) -> None:
+    """把切片原文写入 MySQL 并提交；未传 db 时自行开启短会话。
+
+    调用方传入 db 时同样在此提交：上传链路里资源与切片需要立即持久化，
+    后台任务结束后会话即关闭，交由调用方管理反而容易漏提交。
+    """
+    owns_session = db is None
+    session = db or SessionLocal()
+    try:
+        save_chunks(session, resource_id, chunks, vector_ids)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        _delete_qdrant_points(vector_ids)
+        raise SystemException("切片原文入库失败", detail=str(exc)) from exc
+    finally:
+        if owns_session:
+            session.close()
+
+
 def ingest_file(
     file_path: str | Path,
     user_id: int,
     doc_category: str | None = None,
     file_name: str | None = None,
-    resource_id: int | None = None,
+    *,
+    resource_id: int,
     replace: bool = False,
+    db: Session | None = None,
 ) -> dict:
-    """把单个文件向量化写入 Qdrant，返回入库摘要。
+    """把单个文件向量化写入 Qdrant，并把切片原文写入 MySQL，返回入库摘要。
 
     doc_category 显式传入时优先使用（只接受 resume / study_material / general）；
     file_name 用于保留上传时的原始文件名（落盘路径可能是 MD5 名）；
-    resource_id 写入 payload 用于按资源重灌，replace=True 时先删除该资源旧向量。
+    resource_id 关联 resources 表，也是 Qdrant 按资源重灌的过滤字段；
+    replace=True 时先删除该资源的旧向量；
+    db 为空时内部开启短会话，传入时由本函数提交。
     """
     path = Path(file_path)
     if not path.is_file():
@@ -457,18 +517,22 @@ def ingest_file(
 
     vectors = _embed(chunks)
     resolved_name = file_name or path.name
+    # Qdrant 只保留过滤字段，原文存 MySQL；两边用同一批 UUID 关联
+    vector_ids = [str(uuid.uuid4()) for _ in chunks]
     payloads = [
         {
-            "text": chunk,
             "user_id": user_id,
             "doc_category": category,
             "file_name": resolved_name,
             "chunk_index": index,
             "resource_id": resource_id,
         }
-        for index, chunk in enumerate(chunks)
+        for index, _ in enumerate(chunks)
     ]
-    _write_qdrant(payloads, vectors, resource_id=resource_id, replace=replace)
+    _write_qdrant(
+        payloads, vectors, vector_ids, resource_id=resource_id, replace=replace
+    )
+    _persist_chunks(db, resource_id, chunks, vector_ids)
 
     logger.info(
         "知识库入库完成：file=%s user=%s category=%s chunks=%s",

@@ -13,6 +13,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
     text,
@@ -60,6 +61,13 @@ class UserProfile(Base):
     # JSON 数组，如 ["Python", "MySQL"]
     target_skills: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     weak_topics: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # 长期记忆：由对话内容自动抽取，不通过资料 CRUD 接口写入
+    learning_goal: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    learning_style: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # JSON 数组，如 ["Java 后端", "数据库原理"]
+    interview_focus: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # 滚动摘要：合并历次画像抽取结果，避免只保留最近一轮信息
+    long_term_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[int] = mapped_column(
         BigInteger, server_default=text("(UNIX_TIMESTAMP())"), nullable=False
     )
@@ -107,6 +115,9 @@ class ChatMessage(Base):
     # 只存附件段（file / image / audio）；聊天正文始终在 request_text / response_text
     request_segments: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     response_segments: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    # 本轮回答参考的知识片段索引：[{chunk_id, score}]；原文留在 knowledge_chunks，
+    # 历史消息按 chunk_id 回查即可，避免重复保存知识块全文
+    reference_sources: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     # 0=生成中，1=完成，2=失败；前端据此展示消息状态
     status: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), nullable=False
@@ -211,6 +222,43 @@ class PromptTemplate(Base):
         # 版本号由数据库兜底防重；单一生效由仓储层事务行锁保证
         UniqueConstraint(
             "agent_name", "scene", "version", name="uk_prompt_agent_scene_version"
+        ),
+    )
+
+
+class KnowledgeChunk(Base):
+    """知识库切片原文表：Qdrant 只存向量，原文与统计字段落 MySQL。
+
+    vector_id 与 Qdrant Point id 相同，检索命中向量后按它回表取原文。
+    """
+
+    __tablename__ = "knowledge_chunks"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # 与 Qdrant Point id 一一对应；全局唯一，避免两张存储出现错配
+    vector_id: Mapped[str] = mapped_column(
+        String(36), unique=True, index=True, nullable=False
+    )
+    # 归属资源：资源删除时级联清理切片，避免残留孤立原文
+    resource_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("resources.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    # 在本次入库切片序列中的位置，从 0 开始
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(MEDIUMTEXT, nullable=False)
+    # 字符数，便于统计切片长度分布；与 text 同时写入
+    char_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    create_time: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        # 同一资源的切片序号唯一；重灌时按 resource_id 整体替换
+        UniqueConstraint(
+            "resource_id", "chunk_index", name="uk_chunk_resource_index"
         ),
     )
 

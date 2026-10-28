@@ -137,6 +137,12 @@ export const useConversationStore = defineStore('conversation', () => {
     activeByModule.value[module] = id
   }
 
+  /** 退出 / 切换账号时清空会话列表与选中态，避免展示上一个账号的数据 */
+  function reset(): void {
+    states.value = { study: emptyState(), interview: emptyState() }
+    activeByModule.value = { study: null, interview: null }
+  }
+
   return {
     states,
     activeByModule,
@@ -150,5 +156,6 @@ export const useConversationStore = defineStore('conversation', () => {
     rename,
     remove,
     select,
+    reset,
   }
 })

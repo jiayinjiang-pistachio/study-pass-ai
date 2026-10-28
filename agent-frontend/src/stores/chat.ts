@@ -107,6 +107,12 @@ export const useChatStore = defineStore('chat', () => {
     delete states.value[sessionId]
   }
 
+  /** 退出 / 切换账号时清空消息缓存与发送态，避免串用上一个账号的数据 */
+  function reset(): void {
+    states.value = {}
+    sendingBySession.value = {}
+  }
+
   function isSending(sessionId: number): boolean {
     return Boolean(sendingBySession.value[sessionId])
   }
@@ -129,6 +135,7 @@ export const useChatStore = defineStore('chat', () => {
       responseText: '',
       requestSegments: [],
       responseSegments: [],
+      sources: [],
       status: 0,
       interviewId: null,
       createdAt,
@@ -157,6 +164,10 @@ export const useChatStore = defineStore('chat', () => {
             received += delta
             item.responseText = received
           },
+          onDone: (done) => {
+            // 来源只挂在消息结构上展示，不拼进 responseText
+            item.sources = done.sources
+          },
         },
       )
       item.status = 1
@@ -168,5 +179,14 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  return { states, stateOf, loadLatest, loadOlder, clear, isSending, sendMessage }
+  return {
+    states,
+    stateOf,
+    loadLatest,
+    loadOlder,
+    clear,
+    reset,
+    isSending,
+    sendMessage,
+  }
 })

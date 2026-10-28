@@ -10,6 +10,20 @@ from ..core.exceptions import BusinessException
 from ..db import user_profile_repo as db
 from ..schemas.profile import ProfileCreate, ProfileUpdate
 
+# 长期记忆允许自动写入的字段：覆盖全部业务画像字段，对话中的最新表述优先。
+# 白名单仍保留，防止抽取结果混入 user_id / created_at 等非业务字段。
+LONG_TERM_FIELDS: set[str] = {
+    "target_job",
+    "years_experience",
+    "target_level",
+    "target_skills",
+    "weak_topics",
+    "learning_goal",
+    "learning_style",
+    "interview_focus",
+    "long_term_summary",
+}
+
 
 def _not_found(user_id: int) -> BusinessException:
     """统一的「资料不存在」错误。"""
@@ -53,3 +67,24 @@ def delete_profile(user_id: int) -> None:
     """删除背景资料，不存在则 404。"""
     if not db.delete(user_id):
         raise _not_found(user_id)
+
+
+def get_profile_dict(user_id: int) -> dict | None:
+    """读取用户画像原始字典；不存在返回 None。
+
+    与 `get_profile` 不同：这是给长期记忆内部使用的读取入口，不抛 404，
+    也不经过接口出参裁剪，因此包含长期记忆字段。
+    """
+    return db.get_by_user_id(user_id)
+
+
+def create_or_update(user_id: int, fields: dict) -> dict:
+    """按 user_id 创建或局部更新画像，供长期记忆后台任务写入。
+
+    只接受 `LONG_TERM_FIELDS` 中的字段，防止抽取结果写入无关列；
+    岗位 / 年限 / 职级 / 技能 / 薄弱点与长期字段一样，以用户最新表述为准。
+    """
+    allowed = {
+        key: value for key, value in fields.items() if key in LONG_TERM_FIELDS
+    }
+    return db.upsert(user_id, allowed)

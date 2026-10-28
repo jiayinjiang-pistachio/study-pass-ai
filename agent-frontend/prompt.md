@@ -40,4 +40,27 @@ I.基于MarkdownIt解析Markdown,兼容基础语法；
 4 支持代码主题高亮显示；
 5,代码低耦合，可直接迁移至任意系统。
 
+# 请在现有流式对话页面中增加“参考知识片段”展示功能。
+后端会在 SSE done 事件和历史消息接口中返回 sources。
+
+实现思路：
+
+保留现有流式 delta 渲染逻辑。
+done 事件到达时，把 data.sources 保存到当前 AI 消息。
+历史消息中的 message.sources 也使用同一组件展示。
+sources 为空时不展示。
+sources 有数据时，在 AI 回答下方显示默认收起的折叠面板： “参考了 N 个知识片段”
+展开后展示 file_name、score 百分比、text。
+不把 sources 拼进 response_text。
+
+测试实时sources 展示
+
+测试历史消息sources回显
+
+测试闲聊短句跳过检索、不展示sources
+
+测试无关问题无RAG溯源
+
+长文本折叠交互
+
 

@@ -262,7 +262,9 @@ curl -s -X POST http://127.0.0.1:8000/api/files \
 
 ## 7. Qdrant 验证
 
-集合固定为 `knowledge_chunks`。按 `resource_id` 查看向量：
+集合固定为 `knowledge_chunks`。**Qdrant 只存向量与检索过滤字段，切片原文在 MySQL `knowledge_chunks`**，两边通过同一个 UUID 关联（Qdrant Point id = MySQL `vector_id`）。
+
+按 `resource_id` 查看向量：
 
 ```bash
 curl -s -X POST http://127.0.0.1:6333/collections/knowledge_chunks/points/scroll \
@@ -275,21 +277,35 @@ curl -s -X POST http://127.0.0.1:6333/collections/knowledge_chunks/points/scroll
     },
     "limit": 5,
     "with_payload": true
-  }' | jq '.result.points[].payload'
+  }' | jq '.result.points[] | {id, payload}'
 ```
 
-预期每条 payload 包含：
+预期每条结果形如：
 
 ```jsonc
 {
-  "text": "chunk 文本",
-  "user_id": 1,
-  "doc_category": "resume",
-  "file_name": "resume.pdf",
-  "chunk_index": 0,
-  "resource_id": 1
+  "id": "0b8f...-uuid",
+  "payload": {
+    "user_id": 1,
+    "doc_category": "resume",
+    "file_name": "resume.pdf",
+    "chunk_index": 0,
+    "resource_id": 1
+  }
 }
 ```
+
+payload 中**不含 `text`**；原文按 `id` 回 MySQL 取：
+
+```sql
+SELECT vector_id, chunk_index, char_count, LEFT(text, 30) AS text_head
+FROM knowledge_chunks
+WHERE resource_id = 1
+ORDER BY chunk_index
+LIMIT 5;
+```
+
+预期 `vector_id` 与上面 Qdrant 的 `id` 一一对应，`char_count = CHAR_LENGTH(text)`，`chunk_index` 从 0 连续递增。
 
 查看点数：
 

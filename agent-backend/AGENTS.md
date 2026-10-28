@@ -29,11 +29,12 @@
 | 令牌鉴权 | `PyJWT` `2.10.x` | HS256 签发 / 校验 Access、Refresh 令牌，入口 `app/core/security.py`；密钥走环境变量 `JWT_SECRET` |
 | ORM / 数据库 | SQLAlchemy `2.0.x` + PyMySQL | MySQL 同步驱动，模型声明于 `app/db/models.py` |
 | 对象存储 | MinIO Python SDK `7.1.x` | 原文件落桶，元数据存 MySQL；入口 `app/core/minio_client.py` |
-| 缓存 | Redis（`redis-py 8.1.x`） | 提示词生效模板缓存（Hash），不可用时回源 MySQL；入口 `app/core/redis_client.py` |
+| 缓存 | Redis（`redis-py 8.1.x`） | 提示词生效模板缓存（Hash）+ 会话工作记忆，不可用时分别回源 MySQL；入口 `app/core/redis_client.py` |
 | 表结构迁移 | Alembic `1.14.x` | 改模型后 `scripts/db_sync.sh` 一键同步 |
 | 配置读取 | `python-dotenv` | 分层加载：真实环境变量 > `.env.{APP_ENV}` > `.env`，入口 `app/core/config.py`（唯一读取入口） |
 | 日志 | Loguru `0.7.x` | 开发控制台 + 文件，生产只落文件；按大小滚动（10MB × 5），入口 `app/core/logging.py` |
-| AI 编排 | LangChain `langchain-core 1.7` + `langchain-openai 1.7` | OpenAI 兼容协议；模型 / 提示词 / 记忆三层封装在 `app/services/ai/` |
+| AI 编排 | LangChain `langchain-core 1.7` + `langchain-openai 1.7` | OpenAI 兼容协议；模型 / 提示词封装在 `app/services/ai/`，记忆读取在 `app/services/memory_service.py`，长期记忆在 `app/services/long_term_memory.py` |
+| 语义判断 | fastembed `0.9.x` | 长期记忆写入意图判断（`BAAI/bge-small-zh-v1.5`，首次使用时下载模型并缓存）；入口 `app/services/long_term_memory.py` |
 | 语言 | Python `3.13` | 使用 `X | None` 现代联合类型写法 |
 | 包管理 | **venv + pip** | 运行期依赖以 `requirements.txt` 为准；测试依赖另见 `requirements-dev.txt` |
 
@@ -74,7 +75,7 @@ agent-backend/
 │   │   ├── logging.py       #   日志配置（Loguru + InterceptHandler）：控制台 + 文件滚动
 │   │   ├── handlers.py      #   全局异常处理器（统一转错误响应信封）
 │   │   ├── minio_client.py  #   MinIO 客户端：建桶、对象读写、storage_path 转换
-│   │   ├── redis_client.py  #   Redis 客户端：懒加载单例（提示词缓存，不可用不阻断启动）
+│   │   ├── redis_client.py  #   Redis 客户端：懒加载单例（提示词缓存 + 工作记忆，不可用不阻断启动）
 │   │   └── rate_limit.py    #   进程内固定窗口限流（IP 维度），注册接口依赖
 │   ├── routers/             # ① 路由层，按业务模块拆分
 │   │   ├── deps.py          #   路由层共享依赖：get_current_user（Bearer 鉴权）
@@ -103,8 +104,10 @@ agent-backend/
 │   │   ├── auth_service.py  #   鉴权业务：登录校验、签发 / 刷新令牌、解析当前用户
 │   │   ├── session_service.py #  会话分页 / 创建 / 编辑 + 级联删除（含附件资源）
 │   │   ├── message_service.py #  会话消息分页查询（正文与附件段分离）
-│   │   ├── chat_service.py  #   流式对话：校验 / 落库 / 记忆上下文 / SSE 编排
-│   │   ├── ai/              #   AI 三层：llm（模型）/ prompt_layer（提示词与链路）/ memory（上下文）
+│   │   ├── chat_service.py  #   流式对话：校验 / 检索 / 落库 / SSE 编排
+│   │   ├── memory_service.py #  记忆：WorkingMemory（Redis）/ InstantMemory（MySQL 短期）/ LongTermMemory 挂载与统一入口
+│   │   ├── long_term_memory.py # 长期记忆：画像读取 / fastembed 意图判断 / 后台 LLM 抽取画像
+│   │   ├── ai/              #   AI 两层：llm（模型）/ prompt_layer（提示词与链路）
 │   │   ├── profile_service.py #   用户背景资料 CRUD（一人一份，按当前用户隔离）
 │   │   ├── prompt_template_service.py # 提示词版本管理：智能体配置 / 拼接 / 回滚 / Redis 缓存
 │   │   ├── prompt_injection_service.py # 提示词变量注入：验证（清洗 / 限长）→ 转换（格式化 / 默认值）→ 填充（占位符替换）
@@ -116,11 +119,14 @@ agent-backend/
 │   │   ├── resource_cleanup.py # 每天 03:00 清理过期资源（先删对象再删元数据）
 │   │   └── health_service.py#   健康检查：数据库探活，异常转 SystemException(503)
 │   ├── rag/                 # RAG 知识库（向量化入库，独立于四层调用链）
-│   │   ├── core.py          #   解析 → 清洗 → 分类 → 分块 → 向量化 → 写 Qdrant（对外仅 ingest_file）
+│   │   ├── core.py          #   解析 → 清洗 → 分类 → 分块 → 向量化 → 写 Qdrant + 原文入 MySQL（对外仅 ingest_file）
+│   │   ├── retriever.py     #   问题向量化 → Qdrant 近邻检索（user_id 隔离 + 可选 doc_category）→ 回表取原文（对外仅 search_similar_chunks）
+│   │   ├── context.py       #   检索意图判断（should_retrieve）+ 命中片段格式化（format_retrieved_chunks）
+│   │   ├── chunk_store.py   #   切片原文读写 MySQL knowledge_chunks（save_chunks / fetch_chunks_by_vector_ids）
 │   │   └── ocr.py           #   扫描页 OCR 兜底：PDFium 渲染 → 火山引擎 OCRNormal（对外仅 ocr_pdf）
 │   └── db/                  # ④ 数据库层（SQLAlchemy 2.0 + MySQL）
 │       ├── base.py          #   ORM 基类（Alembic 感知表结构的入口）
-│       ├── models.py        #   表结构声明（User / UserProfile / ChatSession / ChatMessage / Interview / PromptTemplate / Resource）
+│       ├── models.py        #   表结构声明（User / UserProfile / ChatSession / ChatMessage / Interview / PromptTemplate / KnowledgeChunk / Resource）
 │       ├── session.py       #   engine + Session 工厂
 │       ├── user_repo.py     #   users 表读写仓储（上层唯一入口）
 │       ├── user_profile_repo.py # user_profiles 表读写仓储（按用户查询 / upsert）
@@ -129,6 +135,7 @@ agent-backend/
 │       ├── interview_repo.py#   interviews 表读写仓储（按 id + user_id 查询 / 按会话删除）
 │       ├── prompt_template_repo.py # prompt_templates 表读取 / 生效切换仓储
 │       ├── resource_repo.py #   resources 表读写仓储（去重预查 / 过期扫描）
+│       ├── knowledge_chunk_repo.py # knowledge_chunks 回查（历史消息重建来源）
 │       └── health_repo.py   #   数据库连通性探活（SELECT 1）
 ├── alembic/                 # Alembic 迁移（versions/ 存版本脚本）
 │   └── env.py               #   注入 MYSQL_URL、暴露 Base.metadata
@@ -146,6 +153,10 @@ agent-backend/
 │   ├── test_prompt_injection.py # 提示词变量注入：清洗 / 格式化 / 替换 / 接口集成用例
 │   ├── test_profiles.py     # 用户背景资料 CRUD / 409 冲突 / 校验用例
 │   ├── test_agent_prompt.py # 初始化模板数据校验（作用域 / 占位符 / 变量白名单）
+│   ├── test_rag_chat.py     #   RAG 对话链路：意图判断 / 资料注入 / 来源落库与历史回显
+│   ├── test_long_term_memory.py # 长期记忆：画像格式化 / 意图判断 / 抽取清洗 / 后台写入
+│   ├── test_long_term_chat.py #   流式对话接入长期记忆：跳过 RAG / 必填缺失触发抽取
+│   ├── test_working_memory.py #   Redis 工作记忆读写 / 摘要 / 降级
 │   └── test_resources.py    #   过期资源清理用例
 ├── alembic.ini              # Alembic 配置（连接串留空，由 env.py 注入）
 ├── pytest.ini               # pytest 配置（asyncio_mode=auto、pythonpath=.）
@@ -272,21 +283,27 @@ agent-backend/
 
 - **鉴权约定**：除注册 / 登录 / 刷新 / 健康检查外，接口需携带 `Authorization: Bearer <access_token>`；令牌缺失 / 过期 / 非法 / 类型不符一律返回 `401`（由 `core/security.decode_token` 与 `routers/deps.get_current_user` 抛 `BusinessException(401)`）。**刷新令牌只能用于 `/api/auth/refresh`**，不能访问受保护接口（`type` 声明区分）；访问令牌过期时由前端调 `/api/auth/refresh` 换新令牌后重试原请求。令牌为无状态 JWT，**暂不支持主动吊销 / 登出**（后续需要再引入黑名单或落库）。
 - **注册接口安全约定**（`POST /api/auth/register`）：复用 `user_service.create_user`（bcrypt 哈希，禁止明文入库）；弱密码（黑名单 / 缺字母 / 缺数字 / 含用户名）由**校验层** `schemas/auth.py` 拦截 → `422`；接口限流由 `core/rate_limit.py` 的依赖实现（固定窗口 + IP 维度，默认 5 次/min），超限抛 `BusinessException(429)`。限流为**进程内内存**实现，仅单机有效，多实例部署需换共享存储。
-- **通用文件上传约定**（`POST /api/files`）：`multipart/form-data`，字段 `file`，**需登录**；可选表单字段 `upload_purpose`（0=普通资源 / 1=用户头像，默认 0）与 `storage_scene`（0=长期 30 天 / 1=短期 2 小时 / 2=只提取内容不存原文件，默认 0）。**文档支持 PDF / DOC / DOCX / TXT，音频支持 MP3 / WAV / OGG / OPUS / M4A / AAC / FLAC / WebM**（均按扩展名白名单 + 文件头校验）；图片（JPG / PNG / WebP / GIF）仅用于头像（`upload_purpose=1`），普通上传不接受图片；其他类型或文件头不符一律 `422`，图片超 2MB（`AVATAR_MAX_BYTES`）或文档 / 音频超 10MB（`FILE_MAX_BYTES`）返回 `413`。**元数据写 `resources` 表，原文件落 MinIO**：对象 key 为 `users/{user_id}/{MD5}{ext}`，`storage_path` 格式 `minio:/{bucket}/{object_key}`；`(file_hash, user_id)` 唯一键实现用户级去重（先查库，数据库唯一键兜底）。仅 `upload_purpose=1` 且为图片时更新 `users.avatar`（库里存 `storage_path`）。对外响应中的 `avatar` 由校验层转成公开读取地址 `/api/files/avatar/{user_id}?v={md5}`（`v` 用于头像更新后失效缓存）。`storage_scene=2` 只写元数据、不上传对象（`storage_path` 为空串）。**文档必传表单字段 `doc_category`（`resume` / `study_material` / `general`），缺失或非法一律 `422`；音频 / 头像忽略该字段并存 `NULL`。** 文档落库后经 `BackgroundTasks` **异步**执行 RAG（解析 → 清洗 → 分块 → DashScope 向量化 → Qdrant），失败只记日志、不影响上传结果。PDF 解析用 PDFium 逐页取文本层，按「图片覆盖率 ≥ 0.5 且有效字符 < 200」判定扫描页，仅对这些页渲染 200 DPI 调火山引擎 `OCRNormal`，再与文本层按页序合并；方案说明见 [`docs/scanned-pdf-ocr.md`](docs/scanned-pdf-ocr.md)。同用户同内容重复上传时若分类相同则直接复用、不重复入库；分类变化则更新 `doc_category`，并以 `replace=True` 先按 `resource_id` 删除旧向量再重灌。响应返回 `{url, md5, size, kind, resource_id, storage_path, expire_time, doc_category, reused}`，`reused` 表示是否复用了已有资源。过期资源由 `resource_cleanup` 每天 03:00 先删 MinIO 对象、再删元数据。
+- **通用文件上传约定**（`POST /api/files`）：`multipart/form-data`，字段 `file`，**需登录**；可选表单字段 `upload_purpose`（0=普通资源 / 1=用户头像，默认 0）与 `storage_scene`（0=长期 30 天 / 1=短期 2 小时 / 2=只提取内容不存原文件，默认 0）。**文档支持 PDF / DOC / DOCX / TXT，音频支持 MP3 / WAV / OGG / OPUS / M4A / AAC / FLAC / WebM**（均按扩展名白名单 + 文件头校验）；图片（JPG / PNG / WebP / GIF）仅用于头像（`upload_purpose=1`），普通上传不接受图片；其他类型或文件头不符一律 `422`，图片超 2MB（`AVATAR_MAX_BYTES`）或文档 / 音频超 10MB（`FILE_MAX_BYTES`）返回 `413`。**元数据写 `resources` 表，原文件落 MinIO**：对象 key 为 `users/{user_id}/{MD5}{ext}`，`storage_path` 格式 `minio:/{bucket}/{object_key}`；`(file_hash, user_id)` 唯一键实现用户级去重（先查库，数据库唯一键兜底）。仅 `upload_purpose=1` 且为图片时更新 `users.avatar`（库里存 `storage_path`）。对外响应中的 `avatar` 由校验层转成公开读取地址 `/api/files/avatar/{user_id}?v={md5}`（`v` 用于头像更新后失效缓存）。`storage_scene=2` 只写元数据、不上传对象（`storage_path` 为空串）。**文档必传表单字段 `doc_category`（`resume` / `study_material` / `general`），缺失或非法一律 `422`；音频 / 头像忽略该字段并存 `NULL`。** 文档落库后经 `BackgroundTasks` **异步**执行 RAG（解析 → 清洗 → 分块 → DashScope 向量化 → Qdrant 存向量 + MySQL `knowledge_chunks` 存原文），失败只记日志、不影响上传结果。PDF 解析用 PDFium 逐页取文本层，按「图片覆盖率 ≥ 0.5 且有效字符 < 200」判定扫描页，仅对这些页渲染 200 DPI 调火山引擎 `OCRNormal`，再与文本层按页序合并；方案说明见 [`docs/scanned-pdf-ocr.md`](docs/scanned-pdf-ocr.md)。同用户同内容重复上传时若分类相同则直接复用、不重复入库；分类变化则更新 `doc_category`，并以 `replace=True` 先按 `resource_id` 删除旧向量再重灌。响应返回 `{url, md5, size, kind, resource_id, storage_path, expire_time, doc_category, reused}`，`reused` 表示是否复用了已有资源。过期资源由 `resource_cleanup` 每天 03:00 先删 MinIO 对象、再删元数据。
 - **会话与聊天消息约定**：
   - 会话整组接口（`/api/sessions`、`/api/sessions/{id}/messages`）需登录，所有查询按令牌中的 `user_id` 隔离；资源不存在或不属于当前用户一律 `404`（不区分「不存在」与「无权限」，避免泄露）。
   - 创建会话入参 `title` + `session_mode`（0=学习，1=面试，2=笔记），同时兼容需求文档字段名 `session_model`（`AliasChoices`）；出参不暴露 `user_id`。
   - 分页统一 `{items,total,page,page_size}`：`page ≥ 1`、`page_size` 1..100；会话按 `created_at DESC, id DESC`，消息按 `created_at ASC, id ASC`。
-  - `chat_messages` 语义：**聊天正文在 `request_text` / `response_text`**；`request_segments` / `response_segments` **只存附件段**（`{type: file|image|audio, resource_id, file_name?, url?}`），AI 回复文本始终进 `response_text`。消息出参还包含 `status`（0=生成中，1=完成，2=失败）与 `interview_id`（普通聊天为 `null`），供前端面试卡片逻辑使用。
+  - `chat_messages` 语义：**聊天正文在 `request_text` / `response_text`**；`request_segments` / `response_segments` **只存附件段**（`{type: file|image|audio, resource_id, file_name?, url?}`），AI 回复文本始终进 `response_text`。消息出参还包含 `status`（0=生成中，1=完成，2=失败）与 `interview_id`（普通聊天为 `null`），供前端面试卡片逻辑使用。历史消息的 `sources` 由 `reference_sources` 回查 `knowledge_chunks` + `resources` 重建；知识块已删除时仍返回该条目，`text` 为「该参考片段已被删除」。
   - **级联删除**（`DELETE /api/sessions/{id}`）：先解析消息附件段收集 `resource_id`，再按 `interviews → chat_messages → sessions` 的依赖顺序删库；最后仅删除当前用户自己的 `resources` 元数据与 MinIO 对象（先删对象、成功后再删元数据，失败则保留元数据交给过期清理重试）。
 - **流式对话约定**（`POST /api/sessions/{session_id}/stream-chat`）：
   - 入参 `request_text`（必填，去空白后 1..20000 字）、`select_mode`（0..5）、`request_id`（可选，缺省由后端生成）、`request_segments`（仅可引用当前用户自己的 `resource_id`，越权返回 404）。
   - **响应为 `text/event-stream`，不使用统一 JSON 信封**；这是 SSE 接口的既定例外，因此不声明 `response_model`。
   - 校验与用户消息落库在建立流之前完成，404 / 422 / 503 仍返回标准 JSON 错误信封；流开始后失败以 SSE `error` 事件返回。
-  - 事件：`meta`（`session_id` / `message_id` / `request_id`）→ `delta`（`{content}`）→ `done`；异常以 `error`（`{code, message}`）收尾。响应头含 `Cache-Control: no-cache`、`X-Accel-Buffering: no`，避免反向代理缓冲。
-  - 落库：用户消息先以 `status=0`（生成中）写入；成功回写 `response_text` + `status=1`；模型失败或客户端断开时保留已生成的部分内容并置 `status=2`。
-  - AI 分层（`app/services/ai/`）：`llm.py` 只负责 provider → 模型实例；`prompt_layer.py` 只负责系统提示词与 `prompt | model | parser` 链路；`memory.py` 只负责从数据库取多轮历史并构建 LangChain 消息上下文。`chat_service.py` 只做编排与 SSE 输出。
-  - 记忆层仅取最近 `MEMORY_MAX_TURNS` 轮 `status=1` 的消息；单条消息超过 `MEMORY_MESSAGE_MAX_CHARS` 截断；`file_extracted_text` 非空时拼入对应的用户消息。
+  - 事件：`meta`（`session_id` / `message_id` / `request_id`）→ `delta`（`{content}`）→ `done`（`{message_id, status, sources}`）；异常以 `error`（`{code, message}`）收尾。响应头含 `Cache-Control: no-cache`、`X-Accel-Buffering: no`，避免反向代理缓冲。
+  - 落库：用户消息先以 `status=0`（生成中）写入；成功回写 `response_text` + `status=1`，并写入 `reference_sources`（只存 `[{chunk_id, score}]`）；模型失败或客户端断开时保留已生成的部分内容并置 `status=2`。
+  - **RAG 按需检索**：`should_retrieve(request_text)` 先跳过空 / 极短 / 确认语 / 礼貌语 / 推进语；命中时才调用 `search_similar_chunks(query, user_id, top_k=3)`，把 `format_retrieved_chunks` 生成的参考文本拼到本轮问题前，并在系统提示词后追加 `build_rag_system_prompt` 的回答规则。检索失败降级为普通对话，不阻断流式生成。`done.sources` 为完整来源（`chunk_id` / `resource_id` / `chunk_index` / `file_name` / `score` / `text`），顺序与注入的 `[1] [2]` 编号一致。
+  - AI 分层（`app/services/ai/`）：`llm.py` 只负责 provider → 模型实例；`prompt_layer.py` 只负责系统提示词与 `prompt | model | parser` 链路。`chat_service.py` 只做编排与 SSE 输出。
+  - 记忆读取（`app/services/memory_service.py`）：`MemoryService.load_context()` 是统一入口，**Redis 工作记忆优先、MySQL 短期记忆兜底**，默认 `enable_long_term=True`。
+    - `WorkingMemory`（Redis）：key `memory:working:{user_id}:{session_id}`，value 为 `{"raw": [{role, content}], "summary": str}`，TTL 8 小时，读写后自动续期；读失败 / 无数据返回空结构，写失败只记日志，任何 Redis 异常都不向上抛。原文累计超过 8000 字时调用 `quick_summarize` 把更早内容并入摘要，只保留最近 6 条原文；摘要硬截断 500 字，总结失败则保留完整原文等待下轮重试。
+    - `InstantMemory`（MySQL）：`load()` 按 `created_at` 倒序取最近 `MEMORY_MAX_TURNS` 轮 `status=1` 的消息 → `_fit_char_budget` 先按 `MEMORY_MESSAGE_MAX_CHARS` 截断单条、再按总预算（12000 字）丢弃更旧消息 → `build_chat_history_from_rows` 转成 LangChain 消息；`file_extracted_text` 非空时拼入对应的用户消息。Redis 为空（新会话 / 过期 / 故障）时回退该路径，并把结果 `seed()` 回 Redis，保证后续轮次继续累积。
+    - `LongTermMemory`（`app/services/long_term_memory.py`）：从 `user_profiles` 读取 `target_job / years_experience / target_level / target_skills / weak_topics / learning_goal / learning_style / interview_focus / long_term_summary`，格式化成画像文本并以 `SystemMessage` 插在 history 最前；该消息在 `seed()` 之后注入，不会写入 Redis 工作记忆。`prompt_layer` 在执行链路前把 history 中所有 `SystemMessage` 取出、从 history 移除，并追加到 `system_prompt` 末尾（两个换行分隔）。
+    - 当前问题存在摘要时以 `【会话摘要】\n...` 前缀注入 `input`，不额外插入 system 消息；AI 回复成功后 `append_turn()` 把**原始问题**（不含 RAG 拼接资料）与回复写入工作记忆。
+  - 长期记忆写入：`chat_service.prepare_stream` 先调用 `LongTermMemory.should_write()`（fastembed 本地向量 + 余弦相似度，阈值 0.6，模型异常降级为 False）；命中画像写入意图时跳过 RAG 检索。**触发条件**为「意图命中」或「三项必填资料缺失（`missing_required_fields()` 非空）且本轮消息去空白后 ≥ 2 字」；后者不跳过 RAG，用于接住用户对开场白表单的简短回答（如「3 年」「后端开发」）。流成功后用最近 4 条历史消息 + 本轮回复调用 `submit_profile_update_async()`，后台线程让 LLM 抽取全部 9 个业务画像字段（`target_job / years_experience / target_level / target_skills / weak_topics` 及 `learning_goal / learning_style / interview_focus / long_term_summary`），经 `profile_service.create_or_update()` 写回 `user_profiles`；抽取为空或任一步失败只记日志。**画像以新会话开场白表单为主（前端写入）、对话抽取为补充**，AI 不在对话中反复追问缺失项。
   - 模型统一走 OpenAI 兼容协议，配置项 `LLM_PROVIDER / LLM_MODEL / LLM_API_KEY / LLM_BASE_URL / LLM_TEMPERATURE / LLM_TIMEOUT / LLM_MAX_RETRIES`；密钥只放环境变量，缺失时该接口返回 503，不影响其他接口启动。
 - **面试记录约定**：`interviews.user_id` 记录归属；`GET /api/interviews/{interview_id}` 必须按 `interview_id + user_id` 查询，返回含 `qa_object` 的详情，防止越权读取他人面试记录。
 - **用户背景资料约定**（`/api/profiles`，整组需登录）：一人一份（`user_profiles.user_id` 唯一），`user_id` 一律取自令牌，不接受客户端传入，因此只能操作自己的资料。`POST /api/profiles` 创建（已存在 → `409`）；`GET/PUT/DELETE /api/profiles/me` 查询 / 局部更新 / 删除（不存在 → `404`）。字段：`target_job`（≤64）、`years_experience`（0..60）、`target_level`（≤32）、`target_skills` / `weak_topics`（字符串数组，≤20 项、单项 ≤50 字）。出参不含 `user_id`。资料供提示词变量注入使用，删除后注入回退为默认值。
@@ -318,9 +335,10 @@ agent-backend/
 - `db` 层对外返回记录**副本**（普通 `dict`），不把会话内 ORM 对象交给调用方。
 - 更换存储实现时，**只改 `db/` 层**，上层调用签名保持不变。
 - `prompt_templates` 的 `(agent_name, scene, version)` 唯一键兜底版本号；公共通用模板固定作用域 `(common, common)`，与私有模板走同一套逻辑，「单一生效」由仓储层 `SELECT ... FOR UPDATE` 事务行锁保证。
-- `user_profiles` 一人一行（`user_id` 唯一，外键 `users.id` + `ON DELETE CASCADE`），存目标岗位 / 工作年限 / 目标等级 / 已掌握技能 / 薄弱点，供提示词变量注入读取；数组字段用 MySQL `JSON`。上层只经 `app/db/user_profile_repo.py` 读写。
-- `chat_messages` 的附件段用 MySQL `JSON` 列存储（`request_segments` / `response_segments`，可为 `NULL`），正文不入 JSON；`status` 为 `Integer`（0/1/2），`interview_id` 为可空 `BigInteger`（**不建外键**，避免与 `interviews.message_id` 形成循环依赖）。`interviews.user_id` 必填并建索引，所有详情查询必须同时带 `interview_id` 与 `user_id`。
+- `user_profiles` 一人一行（`user_id` 唯一，外键 `users.id` + `ON DELETE CASCADE`），存目标岗位 / 工作年限 / 目标等级 / 已掌握技能 / 薄弱点，供提示词变量注入读取；数组字段用 MySQL `JSON`。基础五项可由前端开场白表单（资料 CRUD 接口）写入，也可由对话后台抽取回填；长期字段 `learning_goal` / `learning_style`（`VARCHAR(255)`）、`interview_focus`（`JSON` 数组）、`long_term_summary`（`TEXT`）只由对话后台自动抽取。后台写入经 `profile_service.create_or_update()` 白名单过滤（允许全部 9 个业务字段，拒绝 `user_id` 等非业务列）。上层只经 `app/db/user_profile_repo.py` 读写。
+- `chat_messages` 的附件段用 MySQL `JSON` 列存储（`request_segments` / `response_segments`，可为 `NULL`），正文不入 JSON；`reference_sources` 同为可空 `JSON`，只存 `[{chunk_id, score}]`（知识块全文不落消息表，历史回显时按 `chunk_id` 回查）。`status` 为 `Integer`（0/1/2），`interview_id` 为可空 `BigInteger`（**不建外键**，避免与 `interviews.message_id` 形成循环依赖）。`interviews.user_id` 必填并建索引，所有详情查询必须同时带 `interview_id` 与 `user_id`。
 - `resources.doc_category` 为可空 `String(32)`，取值 `resume` / `study_material` / `general`，仅 `resource_type=0` 文档有意义，非文档为 `NULL`。同内容去重命中且分类变化时，由 `app/db/resource_repo.py` 的 `update_doc_category()` 更新，并触发该 `resource_id` 的向量重灌。
+- **RAG 双存储**：Qdrant 集合 `knowledge_chunks` 只存向量与过滤字段（`user_id` / `doc_category` / `file_name` / `chunk_index` / `resource_id`），**不存原文**；原文与统计字段落 MySQL `knowledge_chunks`（`vector_id` / `resource_id` / `chunk_index` / `text` / `char_count`），`vector_id` 即 Qdrant Point id，两边一一对应。`resource_id` 外键级联删除，重灌时按 `resource_id` 先删后插；写入顺序为「先 Qdrant、后 MySQL」，MySQL 失败会尽力回删刚写入的向量。检索走 `rag/retriever.py`：按 `user_id` 隔离、可选 `doc_category` 收窄，分数阈值 0.4，命中后按 `vector_id` 回查原文；对话来源只在 `chat_messages.reference_sources` 存 `chunk_id + score`。
 
 ---
 

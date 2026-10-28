@@ -66,18 +66,28 @@ def list_recent_completed(session_id: int, limit: int) -> list[dict]:
             .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
             .limit(limit)
         ).all()
-        # 查询用倒序取最近 N 条，返回前恢复成正序，符合对话上下文顺序
+        # 查询用倒序（最新 → 最旧）取最近 N 条，返回前反转回时间正序
+        # （最早 → 最新），与模型接收的多轮对话顺序一致
         return [_to_dict(row) for row in reversed(rows)]
 
 
-def update_result(message_id: int, response_text: str, status: int) -> bool:
-    """流式结束后回写回复正文与状态；消息不存在返回 False。"""
+def update_result(
+    message_id: int,
+    response_text: str,
+    status: int,
+    reference_sources: list[dict] | None = None,
+) -> bool:
+    """流式结束后回写回复正文、状态与来源索引；消息不存在返回 False。
+
+    reference_sources 只存 [{chunk_id, score}]，知识块原文不重复落消息表。
+    """
     with SessionLocal() as session:
         obj = session.get(ChatMessage, message_id)
         if obj is None:
             return False
         obj.response_text = response_text
         obj.status = status
+        obj.reference_sources = reference_sources
         session.commit()
         return True
 

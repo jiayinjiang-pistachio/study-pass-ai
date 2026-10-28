@@ -65,5 +65,23 @@ export const useNoteStore = defineStore('note', () => {
     }
   }
 
-  return { notes, activeNoteId, loading, load, select, create, rename, saveContent, remove }
+  /** 退出 / 切换账号时清空笔记状态，避免展示上一个账号的笔记 */
+  function reset(): void {
+    notes.value = []
+    activeNoteId.value = ''
+    loading.value = false
+  }
+
+  return {
+    notes,
+    activeNoteId,
+    loading,
+    load,
+    select,
+    create,
+    rename,
+    saveContent,
+    remove,
+    reset,
+  }
 })
