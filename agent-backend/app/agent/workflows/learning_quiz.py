@@ -9,6 +9,7 @@
 """
 
 import json
+import logging
 from functools import lru_cache
 from typing import TypedDict
 
@@ -20,9 +21,12 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from ...core.exceptions import BusinessException
+from ...services import prompt_template_service
 from ...services.ai.json_utils import parse_json_object
 from ...services.ai.llm import get_chat_model
 from .checkpoint import get_workflow_checkpointer
+
+logger = logging.getLogger(__name__)
 
 WORKFLOW_TYPE_LEARNING_QUIZ = "learning_quiz"
 
@@ -35,18 +39,25 @@ STATUS_FAILED = "failed"
 DEFAULT_QUESTION_COUNT = 5
 MAX_QUESTION_COUNT = 20
 
-QUESTION_SINGLE_CHOICE = "single_choice"
-QUESTION_MULTIPLE_CHOICE = "multiple_choice"
-QUESTION_SHORT_ANSWER = "short_answer"
-QUESTION_TYPES = frozenset(
-    {QUESTION_SINGLE_CHOICE, QUESTION_MULTIPLE_CHOICE, QUESTION_SHORT_ANSWER}
-)
+# 出题 / 评分提示词的作用域（复用现有智能体与已生效模板）
+QUIZ_PROMPT_AGENT = "quiz_generate"
+QUIZ_PROMPT_SCENE = "quiz"
+EVAL_PROMPT_AGENT = "interview_evaluator"
+EVAL_PROMPT_SCENE = "evaluation"
+
+# 前端控件类型：radio=单选，checkbox=多选，textarea=简答
+QUESTION_RADIO = "radio"
+QUESTION_CHECKBOX = "checkbox"
+QUESTION_TEXTAREA = "textarea"
+QUESTION_TYPES = frozenset({QUESTION_RADIO, QUESTION_CHECKBOX, QUESTION_TEXTAREA})
 
 STEM_MAX_CHARS = 500
 OPTION_MAX_CHARS = 200
 ANSWER_MAX_CHARS = 2000
 COMMENT_MAX_CHARS = 500
 REVIEW_MAX_CHARS = 2000
+DISPLAY_TEXT_MAX_CHARS = 2000
+DISPLAY_TEXT_MIN_CHARS = 10
 WEAKNESS_MAX_ITEMS = 10
 WEAKNESS_ITEM_MAX_CHARS = 50
 OPTION_KEYS = "ABCDEFGH"
@@ -67,16 +78,21 @@ class LearningWorkflowState(TypedDict, total=False):
     score: int
     weaknesses: list[str]
     review: str
+    display_text: str
     status: str
 
 
-QUIZ_SYSTEM_PROMPT = """你是学习测评出题助手。请根据用户的学习需求出一套测评题，供前端表单渲染。
+# 数据库模板只有角色与出题 / 评分规则，JSON 结构由下面的静态契约补齐。
+# 契约必须声明「优先于模板」，否则模板里的「参考答案 / 题量」等要求会污染输出。
+DEFAULT_QUIZ_ROLE = """你是学习测评出题助手。请根据用户的学习需求出一套测评题，供前端表单渲染。"""
+
+QUIZ_OUTPUT_RULES = """以下输出要求优先于上方模板中的冲突规则：
 
 输出严格为 JSON 对象，结构如下：
 {
   "questions": [
     {
-      "type": "single_choice 或 multiple_choice 或 short_answer",
+      "type": "radio 或 checkbox 或 textarea",
       "stem": "题干（不含题号）",
       "options": [{"key": "A", "text": "选项内容"}]
     }
@@ -84,17 +100,20 @@ QUIZ_SYSTEM_PROMPT = """你是学习测评出题助手。请根据用户的学�
 }
 
 要求：
-1. 题目数量严格等于用户要求的数量，题型在三类之间分布，优先客观题；
-2. single_choice 与 multiple_choice 各给 4 个选项；short_answer 的 options 输出 []；
+1. 题目数量严格等于用户要求的数量；type 只用 radio（单选）、checkbox（多选）、textarea（简答）；
+2. radio 与 checkbox 各给 4 个选项；textarea 的 options 输出 []；
 3. 不要输出答案、解析、题号，也不要输出 Markdown 代码块或额外说明；
 4. 题干与选项使用中文，紧扣测评需求，难度适中。"""
 
-EVAL_SYSTEM_PROMPT = """你是学习测评评分助手。请根据题目与用户作答逐题评分，并给出整体复盘。
+DEFAULT_EVAL_ROLE = """你是学习测评评分助手。请根据题目与用户作答逐题评分，并给出整体复盘。"""
+
+EVAL_OUTPUT_RULES = """以下输出要求优先于上方模板中的冲突规则：
 
 输出严格为 JSON 对象，结构如下：
 {
+  "display_text": "面向用户的中文点评：先给结论，再指出主要问题与下一步",
   "score": "0-100 的整数总分",
-  "evaluation": [
+  "items": [
     {"question_id": 1, "correct": true, "comment": "该题点评：对错原因 + 正确答案说明"}
   ],
   "weaknesses": ["薄弱点，1-5 条，每条不超过 50 字"],
@@ -102,10 +121,33 @@ EVAL_SYSTEM_PROMPT = """你是学习测评评分助手。请根据题目与用�
 }
 
 要求：
-1. evaluation 必须覆盖每一道题，question_id 与输入一致；
-2. 单选 / 多选按标准答案判定；简答按要点覆盖度判定，允许部分正确；
-3. 点评要具体指出问题与改进方向，不要空泛；
-4. 只输出 JSON，不要 Markdown 代码块或额外解释。"""
+1. display_text 必须是可直接展示的中文点评，不要为空；
+2. items 必须覆盖每一道题，question_id 与输入一致；
+3. radio / checkbox 按标准答案判定；textarea 按要点覆盖度判定，允许部分正确；
+4. 点评要具体指出问题与改进方向，不要空泛；
+5. 只输出 JSON，不要 Markdown 代码块或额外解释。"""
+
+
+def _build_system_prompt(
+    agent_name: str,
+    scene: str,
+    user_id: int | None,
+    default_role: str,
+    output_rules: str,
+) -> str:
+    """动态模板 + 静态 JSON 契约；模板不可用时降级为内置角色说明。"""
+    try:
+        base = prompt_template_service.get_rendered_prompt(agent_name, scene, user_id)
+    except Exception:
+        logger.warning(
+            "学习测评提示词读取失败，使用内置提示词 | agent=%s scene=%s",
+            agent_name,
+            scene,
+            exc_info=True,
+        )
+        base = ""
+    base = (base or "").strip() or default_role
+    return f"{base}\n\n{output_rules}"
 
 
 def _clean_text(value: object, limit: int) -> str:
@@ -157,13 +199,13 @@ def _normalize_quiz(data: dict, question_count: int) -> list[dict]:
 
         qtype = item.get("type")
         if qtype not in QUESTION_TYPES:
-            qtype = QUESTION_SHORT_ANSWER
+            qtype = QUESTION_TEXTAREA
         options = (
-            [] if qtype == QUESTION_SHORT_ANSWER else _normalize_options(item.get("options"))
+            [] if qtype == QUESTION_TEXTAREA else _normalize_options(item.get("options"))
         )
         # 选择题选项不足时降级为简答题，避免前端渲染出无法作答的题目
-        if qtype != QUESTION_SHORT_ANSWER and len(options) < 2:
-            qtype = QUESTION_SHORT_ANSWER
+        if qtype != QUESTION_TEXTAREA and len(options) < 2:
+            qtype = QUESTION_TEXTAREA
             options = []
 
         quiz.append(
@@ -213,13 +255,37 @@ def _normalize_weaknesses(raw: object) -> list[str]:
     return result
 
 
+def _normalize_display_text(
+    raw: object,
+    evaluation: list[dict],
+    score: int,
+    weaknesses: list[str],
+    review: str,
+) -> str:
+    """优先用模型点评；过短 / 缺失时拼接得分、逐题点评与建议兜底。"""
+    text = _clean_text(raw, DISPLAY_TEXT_MAX_CHARS)
+    if len(text) >= DISPLAY_TEXT_MIN_CHARS:
+        return text
+
+    parts = [f"本次测评得分：{score} 分。"]
+    parts.extend(item["comment"] for item in evaluation if item["comment"])
+    if weaknesses:
+        parts.append("薄弱点：" + "、".join(weaknesses) + "。")
+    if review:
+        parts.append("建议：" + review)
+    return "\n".join(parts)[:DISPLAY_TEXT_MAX_CHARS]
+
+
 def _normalize_evaluation(data: dict, quiz: list[dict]) -> dict:
     """把模型评分输出转成可入库结构；缺失的题目补占位点评。"""
     valid_ids = [question["question_id"] for question in quiz]
     items: list[dict] = []
     seen: set[int] = set()
 
-    raw_items = data.get("evaluation")
+    raw_items = data.get("items")
+    if not isinstance(raw_items, list):
+        # 兼容模型沿用旧字段名的输出
+        raw_items = data.get("evaluation")
     if isinstance(raw_items, list):
         for item in raw_items:
             if not isinstance(item, dict):
@@ -253,11 +319,17 @@ def _normalize_evaluation(data: dict, quiz: list[dict]) -> dict:
             )
     items.sort(key=lambda item: item["question_id"])
 
+    score = _normalize_score(data.get("score"), items)
+    weaknesses = _normalize_weaknesses(data.get("weaknesses"))
+    review = _clean_text(data.get("review"), REVIEW_MAX_CHARS) or "暂无整体建议"
     return {
-        "score": _normalize_score(data.get("score"), items),
+        "score": score,
         "evaluation": items,
-        "weaknesses": _normalize_weaknesses(data.get("weaknesses")),
-        "review": _clean_text(data.get("review"), REVIEW_MAX_CHARS) or "暂无整体建议",
+        "weaknesses": weaknesses,
+        "review": review,
+        "display_text": _normalize_display_text(
+            data.get("display_text"), items, score, weaknesses, review
+        ),
     }
 
 
@@ -270,7 +342,7 @@ def _normalize_answer_value(question: dict, value: object) -> str | list[str]:
     question_id = question["question_id"]
     qtype = question["type"]
 
-    if qtype == QUESTION_SHORT_ANSWER:
+    if qtype == QUESTION_TEXTAREA:
         text = _clean_text(value, ANSWER_MAX_CHARS)
         if not text:
             raise BusinessException(
@@ -280,7 +352,7 @@ def _normalize_answer_value(question: dict, value: object) -> str | list[str]:
             )
         return text
 
-    if qtype == QUESTION_SINGLE_CHOICE:
+    if qtype == QUESTION_RADIO:
         key = _clean_text(value, 2).upper()
         if key not in _option_keys(question):
             raise BusinessException(
@@ -365,7 +437,15 @@ def generate_quiz(state: LearningWorkflowState) -> dict:
     question_count = state.get("question_count") or DEFAULT_QUESTION_COUNT
     prompt = ChatPromptTemplate.from_messages(
         [
-            SystemMessage(content=QUIZ_SYSTEM_PROMPT),
+            SystemMessage(
+                content=_build_system_prompt(
+                    QUIZ_PROMPT_AGENT,
+                    QUIZ_PROMPT_SCENE,
+                    state.get("user_id"),
+                    DEFAULT_QUIZ_ROLE,
+                    QUIZ_OUTPUT_RULES,
+                )
+            ),
             (
                 "human",
                 "测评需求：\n{request_text}\n\n题目数量：{question_count}",
@@ -405,7 +485,15 @@ def evaluate_answer(state: LearningWorkflowState) -> dict:
     )
     prompt = ChatPromptTemplate.from_messages(
         [
-            SystemMessage(content=EVAL_SYSTEM_PROMPT),
+            SystemMessage(
+                content=_build_system_prompt(
+                    EVAL_PROMPT_AGENT,
+                    EVAL_PROMPT_SCENE,
+                    state.get("user_id"),
+                    DEFAULT_EVAL_ROLE,
+                    EVAL_OUTPUT_RULES,
+                )
+            ),
             ("human", "请评分并复盘以下测评：\n{payload}"),
         ]
     )

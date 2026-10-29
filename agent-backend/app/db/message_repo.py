@@ -28,6 +28,24 @@ def get(message_id: int) -> dict | None:
         return _to_dict(obj) if obj else None
 
 
+def get_by_request_id(request_id: str, user_id: int) -> dict | None:
+    """按 request_id + user_id 查询最新一条。
+
+    request_id 只有普通索引且客户端可传，必须叠加 user_id 防越权，取最新一条兜底重复。
+    """
+    with SessionLocal() as session:
+        obj = session.scalar(
+            select(ChatMessage)
+            .where(
+                ChatMessage.request_id == request_id,
+                ChatMessage.user_id == user_id,
+            )
+            .order_by(ChatMessage.id.desc())
+            .limit(1)
+        )
+        return _to_dict(obj) if obj else None
+
+
 def list_by_session(session_id: int, offset: int, limit: int) -> list[dict]:
     """分页返回会话内消息，按时间正序（符合聊天阅读顺序）。"""
     with SessionLocal() as session:
@@ -88,6 +106,19 @@ def update_result(
         obj.response_text = response_text
         obj.status = status
         obj.reference_sources = reference_sources
+        session.commit()
+        return True
+
+
+def update_workflow_result(message_id: int, response_text: str) -> bool:
+    """学习测评评分完成后回写展示文本，并清空出题载荷；消息不存在返回 False。"""
+    with SessionLocal() as session:
+        obj = session.get(ChatMessage, message_id)
+        if obj is None:
+            return False
+        obj.response_text = response_text
+        obj.response_payload = None
+        obj.status = 1
         session.commit()
         return True
 

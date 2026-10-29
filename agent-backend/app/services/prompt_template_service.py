@@ -309,6 +309,16 @@ def get_combined_template(
     }
 
 
+def get_rendered_prompt(
+    agent_name: str, scene: str, user_id: int | None = None
+) -> str:
+    """返回公共 + 私有模板拼接并注入用户画像后的提示词文本。
+
+    业务链路只需要最终文本；模板不存在时抛 404，由调用方决定是否降级。
+    """
+    return get_combined_template(agent_name, scene, user_id)["rendered_template"]
+
+
 def get_active_template(agent_name: str, scene: str) -> dict:
     """读取单个作用域的生效模板（不做公共 / 私有拼接）。
 

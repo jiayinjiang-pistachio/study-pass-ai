@@ -135,7 +135,15 @@ flowchart LR
   quiz，否则不 resume（LangGraph 会从 START 重新出题），记录置 `failed` 并返回
   `409 测评流程已失效，请重新发起测评`。
 - 标准答案不落库、不返回前端；评分由提交时的模型调用完成。
+- **动态提示词**：出题读 `quiz_generate/quiz`、评分读 `interview_evaluator/evaluation`
+  的生效模板（公共 + 私有拼接并注入用户画像，`prompt_template_service.get_rendered_prompt`），
+  再追加静态 JSON 契约（题型 `radio / checkbox / textarea`、评分 `display_text / score /
+  items / weaknesses / review`）；模板读取异常只记 WARNING 并降级为内置角色提示词。
 - 题目 JSON 由 `parse_json_object()` 统一解析，提示词中的 JSON 示例用静态 `SystemMessage` 传入，避免被模板引擎当成占位符。
+- **会话消息持久化**：出题成功后写一条 `chat_messages`（`request_id="{run_id}:quiz"`、
+  `response_text` 固定文案、`response_payload` 为 quiz 数组、`select_mode=2`、`status=1`），
+  前端直接渲染表单；评分完成后更新同一条消息为点评文本（`display_text`，过短时兜底拼接）
+  并清空 `response_payload`，不新增消息。消息读写失败只记 WARNING，不影响测评结果。
 
 ---
 

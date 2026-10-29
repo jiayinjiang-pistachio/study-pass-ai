@@ -69,7 +69,7 @@ uvicorn app.main:app --reload --port 8000
     "quiz": [
       {
         "question_id": 1,
-        "type": "single_choice",
+        "type": "radio",
         "stem": "以下哪个是 Python 的不可变类型？",
         "options": [
           {"key": "A", "text": "list"},
@@ -86,8 +86,10 @@ uvicorn app.main:app --reload --port 8000
 - `status == "waiting_answer"`，`quiz` 长度等于 `question_count`
 - 此时图停在 `wait_user_answer` 的 `interrupt()`，执行现场保存在 checkpoint（`run_id` 即 `thread_id`）
 - `question_id` 从 1 连续递增
-- 题型为 `single_choice` / `multiple_choice` / `short_answer`
+- 题型为前端控件类型 `radio`（单选）/ `checkbox`（多选）/ `textarea`（简答）
 - **题目中没有 `answer` 字段**（标准答案不落库、不下发）
+- 出题成功后会话中新增一条消息（`request_id="{run_id}:quiz"`），`response_payload` 即上面的 `quiz`，
+  `response_text` 固定为 `已完成出题，请完成后提交答案。`
 
 复制 `run_id`。
 
@@ -99,9 +101,9 @@ uvicorn app.main:app --reload --port 8000
 
 | 题型 | value 示例 |
 | --- | --- |
-| `single_choice` | `"B"` |
-| `multiple_choice` | `["A", "C"]` |
-| `short_answer` | `"索引用于加速查询定位"` |
+| `radio` | `"B"` |
+| `checkbox` | `["A", "C"]` |
+| `textarea` | `"索引用于加速查询定位"` |
 
 必须覆盖**全部题目**：
 
@@ -134,6 +136,22 @@ uvicorn app.main:app --reload --port 8000
 }
 ```
 
+评分阶段的模型输出必须包含 `display_text / score / items / weaknesses / review`，
+`items` 覆盖每题 `{question_id, correct, comment}`。接口响应保持上面的
+`score / evaluation / weaknesses / review` 结构；`display_text` 只用于回写会话消息，
+缺失或过短时后端用「得分 + 逐题点评 + 薄弱点 + 建议」拼接兜底。
+
+## 4.1 会话消息验证（表单 → 点评）
+
+**GET `/api/sessions/{session_id}/messages`**
+
+1. 出题后：只有一条测评消息，`request_text` 为出题请求，
+   `response_text == "已完成出题，请完成后提交答案。"`，`response_payload` 为完整 `quiz` 数组；
+2. 提交后：仍是同一条消息（不新增），`response_text` 变为评分点评文本，
+   `response_payload` 为 `null`。
+
+`response_payload` 是 `chat_messages` 新增的 JSON 列（Alembic `76b0a08b3e79`），普通聊天为 `null`。
+
 ## 5. 查询运行详情
 
 **GET `/api/learning-workflows/{run_id}`**
@@ -148,7 +166,7 @@ uvicorn app.main:app --reload --port 8000
 | 用他人会话 `session_id` 发起 | `404 会话不存在` |
 | 用他人 `run_id` 提交 / 查询 | `404 测评不存在` |
 | 少提交一道题 | `422 还有 N 道题未作答` |
-| 单选提交 `"Z"` | `422 第 1 题的选项非法` |
+| `radio` 题提交 `"Z"` | `422 第 1 题的选项非法` |
 | 同一题重复提交 | `422 同一题目不能重复作答` |
 | 对已完成的 `run_id` 再次提交 | `409 该测评已提交，请勿重复提交` |
 | 重启服务后对旧 `run_id` 提交（checkpoint 丢失） | `409 测评流程已失效，请重新发起测评`，记录置 `failed` |
@@ -221,7 +239,9 @@ LIMIT 5;
 | LangGraph 图与节点 | `app/agent/workflows/learning_quiz.py` |
 | checkpoint（MemorySaver） | `app/agent/workflows/checkpoint.py` |
 | 业务编排（恢复 / 落库） | `app/services/learning_workflow.py` |
+| 动态提示词 | `app/services/prompt_template_service.py`（`get_rendered_prompt`） |
 | 模型 JSON 解析 | `app/services/ai/json_utils.py` |
 | 状态持久化 | `app/db/workflow_run_repo.py`、`workflow_runs` 表 |
+| 会话消息（表单 / 点评） | `app/db/message_repo.py`、`chat_messages` 表 |
 | 流程总控 | `app/routers/orchestrator.py`、`app/services/orchestrator_service.py` |
 | 语义意图兜底 | `app/services/semantic_intent.py`、`app/services/embedding.py` |

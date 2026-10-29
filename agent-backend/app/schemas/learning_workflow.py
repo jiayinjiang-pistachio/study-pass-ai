@@ -59,7 +59,7 @@ class QuizOptionOut(BaseModel):
 class QuizQuestionOut(BaseModel):
     question_id: int = Field(..., description="题目 ID")
     type: str = Field(
-        ..., description="题型：single_choice / multiple_choice / short_answer"
+        ..., description="前端控件类型：radio / checkbox / textarea"
     )
     stem: str = Field(..., description="题干")
     options: list[QuizOptionOut] = Field(

@@ -17,7 +17,7 @@ from app.agent.workflows.checkpoint import (
     build_thread_config,
     get_workflow_checkpointer,
 )
-from app.db import session_repo, workflow_run_repo
+from app.db import message_repo, session_repo, workflow_run_repo
 from app.db.models import WorkflowRun
 from app.db.session import SessionLocal
 from app.services import learning_workflow
@@ -26,17 +26,17 @@ QUIZ_JSON = """```json
 {
   "questions": [
     {
-      "type": "single_choice",
+      "type": "radio",
       "stem": "HTTP 状态码 404 表示什么？",
       "options": [{"key": "A", "text": "未找到"}, {"key": "B", "text": "成功"}]
     },
     {
-      "type": "multiple_choice",
+      "type": "checkbox",
       "stem": "下列属于关系型数据库的有？",
       "options": [{"key": "A", "text": "MySQL"}, {"key": "B", "text": "Redis"}]
     },
     {
-      "type": "short_answer",
+      "type": "textarea",
       "stem": "简述索引的作用。",
       "options": []
     },
@@ -49,10 +49,13 @@ QUIZ_JSON = """```json
 }
 ```"""
 
+EVAL_DISPLAY_TEXT = "本次得分 67 分，重点巩固数据库选型与索引原理，建议按点评逐条复盘。"
+
 EVAL_JSON = json.dumps(
     {
+        "display_text": EVAL_DISPLAY_TEXT,
         "score": 67,
-        "evaluation": [
+        "items": [
             {"question_id": 1, "correct": True, "comment": "正确"},
             {"question_id": 2, "correct": False, "comment": "Redis 是 KV 存储"},
             {"question_id": 3, "correct": True, "comment": "要点基本覆盖"},
@@ -77,6 +80,28 @@ def _patch_model(monkeypatch, *responses: str) -> None:
     monkeypatch.setattr(
         learning_quiz, "get_chat_model", lambda: RunnableLambda(_invoke)
     )
+
+
+def _patch_model_capturing(monkeypatch, *responses: str) -> list[list]:
+    """与 _patch_model 相同，但记录每次模型调用收到的消息列表。"""
+    queue = list(responses)
+    received: list[list] = []
+
+    def _invoke(prompt_value: object) -> AIMessage:
+        messages = (
+            prompt_value.to_messages()
+            if hasattr(prompt_value, "to_messages")
+            else list(prompt_value)  # type: ignore[arg-type]
+        )
+        received.append(messages)
+        if not queue:
+            raise AssertionError("模型调用次数超出预期")
+        return AIMessage(content=queue.pop(0))
+
+    monkeypatch.setattr(
+        learning_quiz, "get_chat_model", lambda: RunnableLambda(_invoke)
+    )
+    return received
 
 
 def _new_session(user_id: int) -> dict:
@@ -116,9 +141,9 @@ async def test_start_generates_quiz_and_persists(
     assert [q["question_id"] for q in data["quiz"]] == [1, 2, 3]
     # 题型归一化：未知类型降级为简答；题目数量按请求截断
     assert [q["type"] for q in data["quiz"]] == [
-        "single_choice",
-        "multiple_choice",
-        "short_answer",
+        "radio",
+        "checkbox",
+        "textarea",
     ]
     # 不向前端泄漏标准答案
     assert all("answer" not in q for q in data["quiz"])
@@ -136,6 +161,17 @@ async def test_start_generates_quiz_and_persists(
     )
     assert snapshot.next == ("wait_user_answer",)
     assert snapshot.values["quiz"] == data["quiz"]
+
+    # 出题后写入会话消息：前端凭 response_payload 渲染表单
+    message = message_repo.get_by_request_id(
+        f"{data['run_id']}:quiz", auth_user["id"]
+    )
+    assert message is not None
+    assert message["request_text"] == "测一下 Python 基础"
+    assert message["response_text"] == learning_workflow.QUIZ_MESSAGE_TEXT
+    assert message["response_payload"] == data["quiz"]
+    assert message["select_mode"] == learning_workflow.QUIZ_MESSAGE_SELECT_MODE
+    assert message["status"] == 1
 
 
 async def test_start_rejects_foreign_session(
@@ -284,6 +320,15 @@ async def test_submit_scores_and_completes(
     assert row["state_json"]["answers"] == answers
     assert row["state_json"]["score"] == 67
 
+    # 评分后复用出题那条消息：正文切换为点评，载荷清空，不新增消息
+    message = message_repo.get_by_request_id(
+        f"{started['run_id']}:quiz", auth_user["id"]
+    )
+    assert message["response_text"] == EVAL_DISPLAY_TEXT
+    assert message["response_payload"] is None
+    assert message["status"] == 1
+    assert message_repo.count_by_session(session["id"]) == 1
+
     # 重复提交被拒绝，且不覆盖已完成结果
     again = await client.post(
         f"/api/learning-workflows/{started['run_id']}/submit",
@@ -406,3 +451,144 @@ async def test_get_returns_full_state(
     assert data["status"] == learning_workflow.STATUS_WAITING_ANSWER
     assert data["state"]["request_text"] == "测一下 Python 基础"
     assert data["state"]["quiz"] == started["quiz"]
+
+
+async def test_start_uses_dynamic_prompt(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """出题系统提示词 = 动态模板 + 静态 JSON 契约。"""
+    session = _new_session(auth_user["id"])
+    received = _patch_model_capturing(monkeypatch, QUIZ_JSON)
+    monkeypatch.setattr(
+        learning_quiz.prompt_template_service,
+        "get_rendered_prompt",
+        lambda agent_name, scene, user_id=None: f"动态模板：{agent_name}/{scene}",
+    )
+
+    await _start(client, auth_headers, session["id"])
+
+    system = received[0][0]
+    assert "动态模板：quiz_generate/quiz" in system.content
+    # 静态契约必须追加在模板之后，约束 JSON 结构与题型
+    assert '"questions"' in system.content
+    assert "radio" in system.content
+    assert "checkbox" in system.content
+    assert "textarea" in system.content
+
+
+async def test_start_falls_back_when_prompt_template_unavailable(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """提示词读取异常时降级为内置角色说明，出题仍成功。"""
+
+    def _boom(*_: object, **__: object) -> str:
+        raise RuntimeError("模板服务不可用")
+
+    session = _new_session(auth_user["id"])
+    received = _patch_model_capturing(monkeypatch, QUIZ_JSON)
+    monkeypatch.setattr(
+        learning_quiz.prompt_template_service, "get_rendered_prompt", _boom
+    )
+
+    data = await _start(client, auth_headers, session["id"])
+
+    assert data["status"] == learning_workflow.STATUS_WAITING_ANSWER
+    system = received[0][0]
+    assert learning_quiz.DEFAULT_QUIZ_ROLE in system.content
+    assert '"questions"' in system.content
+
+
+async def test_submit_falls_back_to_composed_display_text(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """评分输出缺少 display_text 时，用得分 + 逐题点评 + 建议拼接兜底。"""
+    eval_json = json.dumps(
+        {
+            "score": 0,
+            "items": [
+                {"question_id": 1, "correct": False, "comment": "404 表示未找到"},
+                {"question_id": 2, "correct": False, "comment": "Redis 非关系型"},
+                {"question_id": 3, "correct": False, "comment": "索引用于加速查询"},
+            ],
+            "weaknesses": ["HTTP 状态码", "索引原理"],
+            "review": "建议先复习基础概念。",
+        },
+        ensure_ascii=False,
+    )
+    session = _new_session(auth_user["id"])
+    _patch_model(monkeypatch, QUIZ_JSON, eval_json)
+    started = await _start(client, auth_headers, session["id"])
+
+    resp = await client.post(
+        f"/api/learning-workflows/{started['run_id']}/submit",
+        headers=auth_headers,
+        json={
+            "answers": [
+                {"question_id": 1, "value": "A"},
+                {"question_id": 2, "value": ["A"]},
+                {"question_id": 3, "value": "加速查询"},
+            ]
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["score"] == 0
+    message = message_repo.get_by_request_id(
+        f"{started['run_id']}:quiz", auth_user["id"]
+    )
+    assert "本次测评得分：0 分。" in message["response_text"]
+    assert "404 表示未找到" in message["response_text"]
+    assert "薄弱点：HTTP 状态码、索引原理。" in message["response_text"]
+    assert "建议：建议先复习基础概念。" in message["response_text"]
+
+
+async def test_messages_history_returns_payload(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """历史消息接口返回 quiz 载荷；评分后同一消息载荷清空。"""
+    session = _new_session(auth_user["id"])
+    _patch_model(monkeypatch, QUIZ_JSON, EVAL_JSON)
+    started = await _start(client, auth_headers, session["id"])
+
+    resp = await client.get(
+        f"/api/sessions/{session['id']}/messages", headers=auth_headers
+    )
+    assert resp.status_code == 200, resp.text
+    items = resp.json()["data"]["items"]
+    assert len(items) == 1
+    assert items[0]["request_text"] == "测一下 Python 基础"
+    assert items[0]["response_text"] == learning_workflow.QUIZ_MESSAGE_TEXT
+    assert items[0]["response_payload"] == started["quiz"]
+
+    submit = await client.post(
+        f"/api/learning-workflows/{started['run_id']}/submit",
+        headers=auth_headers,
+        json={
+            "answers": [
+                {"question_id": 1, "value": "A"},
+                {"question_id": 2, "value": ["A"]},
+                {"question_id": 3, "value": "加速查询"},
+            ]
+        },
+    )
+    assert submit.status_code == 200, submit.text
+
+    resp = await client.get(
+        f"/api/sessions/{session['id']}/messages", headers=auth_headers
+    )
+    items = resp.json()["data"]["items"]
+    assert len(items) == 1
+    assert items[0]["response_text"] == EVAL_DISPLAY_TEXT
+    assert items[0]["response_payload"] is None

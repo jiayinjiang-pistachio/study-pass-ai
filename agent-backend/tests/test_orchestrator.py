@@ -31,7 +31,7 @@ QUIZ_JSON = json.dumps(
     {
         "questions": [
             {
-                "type": "single_choice",
+                "type": "radio",
                 "stem": "HTTP 404 表示什么？",
                 "options": [{"key": "A", "text": "未找到"}, {"key": "B", "text": "成功"}],
             }

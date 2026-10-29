@@ -8,6 +8,9 @@
 
 checkpoint 保存执行现场，state_json 只保存业务快照。MemorySaver 是进程内存储，
 服务重启 / 多进程部署后旧 run_id 无法恢复，提交时返回 409 并要求重新发起。
+
+出题成功后写入会话消息（request_id=`{run_id}:quiz`，携带 quiz payload），
+评分完成后更新同一条消息为点评文本并清空 payload；消息写入失败只告警，不影响测评结果。
 """
 
 import logging
@@ -34,12 +37,16 @@ from ..agent.workflows.learning_quiz import (
 )
 from ..core.config import LLM_PROVIDER
 from ..core.exceptions import BusinessException, SystemException
-from ..db import session_repo, workflow_run_repo
+from ..db import message_repo, session_repo, workflow_run_repo
 from ..schemas.learning_workflow import LearningWorkflowSubmitIn
 
 logger = logging.getLogger(__name__)
 
 ERROR_MESSAGE_MAX_CHARS = 2000
+
+# 出题完成后写入会话的合成消息：前端凭 response_payload 渲染表单
+QUIZ_MESSAGE_TEXT = "已完成出题，请完成后提交答案。"
+QUIZ_MESSAGE_SELECT_MODE = 2  # 2=刷题
 
 __all__ = [
     "STATUS_COMPLETED",
@@ -159,6 +166,23 @@ def start_learning_workflow(user_id: int, payload) -> dict:
             "error_message": None,
         },
     )
+    # 合成一条会话消息，让前端在历史记录中直接渲染表单；失败不影响出题结果
+    try:
+        message_repo.insert(
+            {
+                "user_id": user_id,
+                "session_id": payload.session_id,
+                "select_mode": QUIZ_MESSAGE_SELECT_MODE,
+                "request_id": f"{run_id}:quiz",
+                "request_text": payload.request_text,
+                "response_text": QUIZ_MESSAGE_TEXT,
+                "response_payload": quiz,
+                "status": 1,
+            }
+        )
+    except Exception:
+        logger.warning("学习测评分题消息落库失败 | run_id=%s", run_id, exc_info=True)
+
     logger.info(
         "学习测评已出题 | run_id=%s user_id=%s question_count=%s",
         run_id,
@@ -250,6 +274,18 @@ def submit_learning_workflow(
         },
     )
     _delete_thread(run_id)
+
+    # 评分完成后更新出题时那条消息：同一轮对话从表单切换为点评文本
+    display_text = completed_state.get("display_text") or "已完成评分。"
+    try:
+        message = message_repo.get_by_request_id(f"{run_id}:quiz", user_id)
+        if message is None:
+            logger.warning("学习测评分题消息不存在，跳过回写 | run_id=%s", run_id)
+        else:
+            message_repo.update_workflow_result(message["id"], display_text)
+    except Exception:
+        logger.warning("学习测评分题消息回写失败 | run_id=%s", run_id, exc_info=True)
+
     logger.info(
         "学习测评已完成 | run_id=%s user_id=%s score=%s",
         run_id,

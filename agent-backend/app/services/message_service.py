@@ -74,6 +74,7 @@ def _to_out(message: dict, sources: list[dict]) -> dict:
         "response_text": message["response_text"],
         "request_segments": _segments(message.get("request_segments")),
         "response_segments": _segments(message.get("response_segments")),
+        "response_payload": message.get("response_payload"),
         "status": message["status"],
         "interview_id": message.get("interview_id"),
         "created_at": message["created_at"],
