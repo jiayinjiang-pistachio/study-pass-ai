@@ -1,7 +1,7 @@
 # 流程总控与学习测评工作流 · 实现思路
 
 > 入口：`POST /api/agent/tasks/start`
-> 实现位置：`app/routers/orchestrator.py`、`app/services/orchestrator_service.py`、`app/services/semantic_intent.py`、`app/services/embedding.py`、`app/services/learning_workflow.py`
+> 实现位置：`app/routers/orchestrator.py`、`app/services/orchestrator_service.py`、`app/services/semantic_intent.py`、`app/services/embedding.py`、`app/agent/workflows/learning_quiz.py`、`app/services/learning_workflow.py`
 > 接口联调步骤见 [`learning-workflow-api-guide.md`](learning-workflow-api-guide.md)。
 
 ---
@@ -26,7 +26,9 @@
 | 业务 | `app/services/orchestrator_service.py` | 规则表、路由决策、入参映射 |
 | 业务 | `app/services/semantic_intent.py` | 语义意图判断（示例向量 + 余弦阈值） |
 | 业务 | `app/services/embedding.py` | fastembed 共享实例（懒加载 + 串行化） |
-| 业务 | `app/services/learning_workflow.py` | LangGraph 出题 / 评测图 + `workflow_runs` 持久化 |
+| 编排 | `app/agent/workflows/learning_quiz.py` | 单图：出题 → `interrupt` 等待作答 → 评分 → 完成 |
+| 编排 | `app/agent/workflows/checkpoint.py` | 全局 `MemorySaver` + `thread_id` 配置 |
+| 业务 | `app/services/learning_workflow.py` | 发起 / 恢复图 + `workflow_runs` 持久化 |
 
 ---
 
@@ -74,8 +76,8 @@ sequenceDiagram
     S->>W: start_learning_workflow(LearningWorkflowStartIn)
     W->>DB: 校验会话归属
     W->>DB: workflow_runs 插入 running
-    W->>W: LangGraph 出题
-    W->>DB: 更新 quiz_ready + state_json
+    W->>W: LangGraph 出题后停在 interrupt
+    W->>DB: 更新 waiting_answer + state_json
     W-->>S: {run_id, status, quiz}
     S-->>R: {route=workflow, agent_name, workflow_type, ...}
     R-->>FE: 200 application/json
@@ -111,24 +113,27 @@ sequenceDiagram
 
 ---
 
-## 5. 学习测评工作流内部（LangGraph）
+## 5. 学习测评工作流内部（LangGraph 单图 + interrupt）
 
 ```mermaid
 flowchart LR
-    subgraph startGraph["启动图（出题）"]
-        A1["prepare_learning_context<br/>标记 running"] --> A2["generate_quiz<br/>模型生成 + JSON 归一化"]
-        A2 --> A3["END<br/>落库 quiz_ready"]
-    end
-
-    subgraph submitGraph["提交图（评分）"]
-        B1["evaluate_and_review<br/>一次模型调用：评分 / 点评 / 薄弱点 / 建议"] --> B2["END<br/>落库 completed"]
-    end
-
-    startGraph -. "返回 run_id + quiz，前端作答后提交" .-> submitGraph
+    G1["generate_quiz<br/>模型出题 + JSON 归一化<br/>status=waiting_answer"] --> G2["wait_user_answer<br/>interrupt({quiz}) 暂停"]
+    G2 -. "Command(resume=answers)<br/>前端提交作答" .-> G2
+    G2 --> G3["evaluate_answer<br/>评分 / 点评 / 薄弱点 / 建议"]
+    G3 --> G4["finalize_result<br/>status=completed"]
 ```
 
-- 状态字段固定：`run_id / user_id / session_id / request_text / provider / question_count / quiz / answers / evaluation / score / weaknesses / review / status`。
-- 完整状态存 `workflow_runs.state_json`，支持跨请求恢复。
+- 单图跨两次 HTTP 请求：`start` 执行到 `interrupt()` 暂停，`submit` 用
+  `Command(resume=answers)` 从暂停点继续；`run_id` 同时是 `workflow_runs.run_id`
+  和 LangGraph `thread_id`（`build_thread_config(run_id)`）。
+- **双存储**：`workflow_runs.state_json` 只存业务快照；执行现场在
+  `MemorySaver` checkpoint（`app/agent/workflows/checkpoint.py` 的进程级单例）。
+- 状态集合 `created / waiting_answer / grading / completed / failed`；完成后
+  尽力 `delete_thread(run_id)` 释放 checkpoint。
+- **checkpoint 失效**：`MemorySaver` 在进程内，服务重启 / 多进程后旧 `run_id`
+  无法恢复。提交前校验 `get_state(config).next == ("wait_user_answer",)` 且快照含
+  quiz，否则不 resume（LangGraph 会从 START 重新出题），记录置 `failed` 并返回
+  `409 测评流程已失效，请重新发起测评`。
 - 标准答案不落库、不返回前端；评分由提交时的模型调用完成。
 - 题目 JSON 由 `parse_json_object()` 统一解析，提示词中的 JSON 示例用静态 `SystemMessage` 传入，避免被模板引擎当成占位符。
 
@@ -200,6 +205,7 @@ flowchart TD
 | `agent_name` 未登记 | `404 智能体不存在` |
 | 语义模型不可用 / 向量化失败 | 记 WARNING，按未命中走聊天 |
 | 工作流模型失败 / 输出非法 JSON | 运行记录置 `failed`，返回 `502` |
+| 提交时 checkpoint 丢失（服务重启 / 多进程） | 运行记录置 `failed`，返回 `409 测评流程已失效` |
 | 工作流 LLM 未配置 | `503` |
 | 聊天模型未配置 | `503`（流建立前返回标准错误信封） |
 | 聊天生成中断 / 客户端断开 | 保留已生成内容，`status=2` |
@@ -218,7 +224,7 @@ pytest tests/test_orchestrator.py tests/test_semantic_intent.py \
 
 | `request_text` | 预期 |
 | --- | --- |
-| `帮我出 3 道 Python 基础题` | JSON，`route=workflow`，`status=quiz_ready` |
+| `帮我出 3 道 Python 基础题` | JSON，`route=workflow`，`status=waiting_answer` |
 | `检验一下我对数据库索引的掌握程度` | JSON（关键词未命中，语义兜底命中） |
 | `你好，介绍一下你自己` | `text/event-stream`，`meta → delta → done` |
 

@@ -207,9 +207,10 @@ class WorkflowRun(Base):
     )
     # 流程类型，如 learning_quiz；为后续接入其他工作流预留
     workflow_type: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
-    # 流程状态：running / quiz_ready / completed / failed（常量见 learning_workflow_service）
+    # 流程状态：created / waiting_answer / grading / completed / failed
+    # （常量见 app/agent/workflows/learning_quiz.py）
     status: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
-    # 完整工作流状态（LearningWorkflowState），第二次请求据此恢复题目与上下文
+    # 业务快照，执行现场存 LangGraph checkpoint（thread_id 即 run_id）
     state_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     # 失败原因，仅后端排查使用，不直接返回给前端
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

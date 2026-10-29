@@ -1,0 +1,437 @@
+"""学习测评工作流图：出题 → 等待作答 → 评分 → 完成。
+
+跨两次 HTTP 请求执行同一张图：
+- 启动时图跑到 `wait_user_answer` 的 `interrupt()` 暂停，执行现场存入 checkpoint；
+- 提交时用 `Command(resume=answers)` 从暂停点继续评分并完成。
+
+题目只返回题干与选项，标准答案不落库、不返回前端；评分由模型在提交时完成。
+提示词中的 JSON 示例含大括号，必须作为静态 `SystemMessage` 传入。
+"""
+
+import json
+from functools import lru_cache
+from typing import TypedDict
+
+from fastapi import status
+from langchain_core.messages import SystemMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
+
+from ...core.exceptions import BusinessException
+from ...services.ai.json_utils import parse_json_object
+from ...services.ai.llm import get_chat_model
+from .checkpoint import get_workflow_checkpointer
+
+WORKFLOW_TYPE_LEARNING_QUIZ = "learning_quiz"
+
+STATUS_CREATED = "created"
+STATUS_WAITING_ANSWER = "waiting_answer"
+STATUS_GRADING = "grading"
+STATUS_COMPLETED = "completed"
+STATUS_FAILED = "failed"
+
+DEFAULT_QUESTION_COUNT = 5
+MAX_QUESTION_COUNT = 20
+
+QUESTION_SINGLE_CHOICE = "single_choice"
+QUESTION_MULTIPLE_CHOICE = "multiple_choice"
+QUESTION_SHORT_ANSWER = "short_answer"
+QUESTION_TYPES = frozenset(
+    {QUESTION_SINGLE_CHOICE, QUESTION_MULTIPLE_CHOICE, QUESTION_SHORT_ANSWER}
+)
+
+STEM_MAX_CHARS = 500
+OPTION_MAX_CHARS = 200
+ANSWER_MAX_CHARS = 2000
+COMMENT_MAX_CHARS = 500
+REVIEW_MAX_CHARS = 2000
+WEAKNESS_MAX_ITEMS = 10
+WEAKNESS_ITEM_MAX_CHARS = 50
+OPTION_KEYS = "ABCDEFGH"
+
+
+class LearningWorkflowState(TypedDict, total=False):
+    """图的完整状态；checkpoint 保存执行现场，workflow_runs 只存业务快照。"""
+
+    run_id: str
+    user_id: int
+    session_id: int
+    request_text: str
+    provider: str
+    question_count: int
+    quiz: list[dict]
+    answers: list[dict]
+    evaluation: list[dict]
+    score: int
+    weaknesses: list[str]
+    review: str
+    status: str
+
+
+QUIZ_SYSTEM_PROMPT = """你是学习测评出题助手。请根据用户的学习需求出一套测评题，供前端表单渲染。
+
+输出严格为 JSON 对象，结构如下：
+{
+  "questions": [
+    {
+      "type": "single_choice 或 multiple_choice 或 short_answer",
+      "stem": "题干（不含题号）",
+      "options": [{"key": "A", "text": "选项内容"}]
+    }
+  ]
+}
+
+要求：
+1. 题目数量严格等于用户要求的数量，题型在三类之间分布，优先客观题；
+2. single_choice 与 multiple_choice 各给 4 个选项；short_answer 的 options 输出 []；
+3. 不要输出答案、解析、题号，也不要输出 Markdown 代码块或额外说明；
+4. 题干与选项使用中文，紧扣测评需求，难度适中。"""
+
+EVAL_SYSTEM_PROMPT = """你是学习测评评分助手。请根据题目与用户作答逐题评分，并给出整体复盘。
+
+输出严格为 JSON 对象，结构如下：
+{
+  "score": "0-100 的整数总分",
+  "evaluation": [
+    {"question_id": 1, "correct": true, "comment": "该题点评：对错原因 + 正确答案说明"}
+  ],
+  "weaknesses": ["薄弱点，1-5 条，每条不超过 50 字"],
+  "review": "整体学习建议（200 字以内）"
+}
+
+要求：
+1. evaluation 必须覆盖每一道题，question_id 与输入一致；
+2. 单选 / 多选按标准答案判定；简答按要点覆盖度判定，允许部分正确；
+3. 点评要具体指出问题与改进方向，不要空泛；
+4. 只输出 JSON，不要 Markdown 代码块或额外解释。"""
+
+
+def _clean_text(value: object, limit: int) -> str:
+    """去空白并截断；非字符串返回空串。"""
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:limit]
+
+
+def _normalize_options(raw: object) -> list[dict]:
+    """清洗选项：去空、截断、补齐 A/B/C 键并去重。"""
+    if not isinstance(raw, list):
+        return []
+    options: list[dict] = []
+    used_keys: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        text = _clean_text(item.get("text"), OPTION_MAX_CHARS)
+        if not text:
+            continue
+        key = _clean_text(item.get("key"), 2).upper()
+        if not key or key in used_keys:
+            key = OPTION_KEYS[len(options)]
+        if key in used_keys:
+            continue
+        used_keys.add(key)
+        options.append({"key": key, "text": text})
+        if len(options) >= len(OPTION_KEYS):
+            break
+    return options
+
+
+def _normalize_quiz(data: dict, question_count: int) -> list[dict]:
+    """把模型输出转成前端可渲染的题目列表；无有效题目时抛 ValueError。"""
+    raw_questions = data.get("questions")
+    if not isinstance(raw_questions, list) or not raw_questions:
+        raise ValueError("模型未生成题目")
+
+    quiz: list[dict] = []
+    for item in raw_questions:
+        if len(quiz) >= question_count:
+            break
+        if not isinstance(item, dict):
+            continue
+        stem = _clean_text(item.get("stem"), STEM_MAX_CHARS)
+        if not stem:
+            continue
+
+        qtype = item.get("type")
+        if qtype not in QUESTION_TYPES:
+            qtype = QUESTION_SHORT_ANSWER
+        options = (
+            [] if qtype == QUESTION_SHORT_ANSWER else _normalize_options(item.get("options"))
+        )
+        # 选择题选项不足时降级为简答题，避免前端渲染出无法作答的题目
+        if qtype != QUESTION_SHORT_ANSWER and len(options) < 2:
+            qtype = QUESTION_SHORT_ANSWER
+            options = []
+
+        quiz.append(
+            {
+                "question_id": len(quiz) + 1,
+                "type": qtype,
+                "stem": stem,
+                "options": options,
+            }
+        )
+
+    if not quiz:
+        raise ValueError("模型生成的题目格式非法")
+    return quiz
+
+
+def _normalize_score(value: object, evaluation: list[dict]) -> int:
+    """总分优先取模型输出，非法时按正确率回退到 0..100。"""
+    score: int | None = None
+    if isinstance(value, bool):
+        score = None
+    elif isinstance(value, int):
+        score = value
+    elif isinstance(value, float) and value.is_integer():
+        score = int(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            score = int(text)
+    if score is None:
+        correct = sum(1 for item in evaluation if item["correct"])
+        return round(correct / len(evaluation) * 100) if evaluation else 0
+    return max(0, min(100, score))
+
+
+def _normalize_weaknesses(raw: object) -> list[str]:
+    """薄弱点：字符串数组，去重、限长、限项数。"""
+    if not isinstance(raw, list):
+        return []
+    result: list[str] = []
+    for item in raw:
+        text = _clean_text(item, WEAKNESS_ITEM_MAX_CHARS)
+        if text and text not in result:
+            result.append(text)
+        if len(result) >= WEAKNESS_MAX_ITEMS:
+            break
+    return result
+
+
+def _normalize_evaluation(data: dict, quiz: list[dict]) -> dict:
+    """把模型评分输出转成可入库结构；缺失的题目补占位点评。"""
+    valid_ids = [question["question_id"] for question in quiz]
+    items: list[dict] = []
+    seen: set[int] = set()
+
+    raw_items = data.get("evaluation")
+    if isinstance(raw_items, list):
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            question_id = item.get("question_id")
+            if (
+                isinstance(question_id, bool)
+                or not isinstance(question_id, int)
+                or question_id not in valid_ids
+                or question_id in seen
+            ):
+                continue
+            seen.add(question_id)
+            items.append(
+                {
+                    "question_id": question_id,
+                    "correct": bool(item.get("correct")),
+                    "comment": _clean_text(item.get("comment"), COMMENT_MAX_CHARS)
+                    or "（未提供点评）",
+                }
+            )
+
+    for question_id in valid_ids:
+        if question_id not in seen:
+            items.append(
+                {
+                    "question_id": question_id,
+                    "correct": False,
+                    "comment": "（模型未给出该题点评）",
+                }
+            )
+    items.sort(key=lambda item: item["question_id"])
+
+    return {
+        "score": _normalize_score(data.get("score"), items),
+        "evaluation": items,
+        "weaknesses": _normalize_weaknesses(data.get("weaknesses")),
+        "review": _clean_text(data.get("review"), REVIEW_MAX_CHARS) or "暂无整体建议",
+    }
+
+
+def _option_keys(question: dict) -> set[str]:
+    return {option["key"] for option in question.get("options") or []}
+
+
+def _normalize_answer_value(question: dict, value: object) -> str | list[str]:
+    """按题型校验并归一化答案；非法时抛 422。"""
+    question_id = question["question_id"]
+    qtype = question["type"]
+
+    if qtype == QUESTION_SHORT_ANSWER:
+        text = _clean_text(value, ANSWER_MAX_CHARS)
+        if not text:
+            raise BusinessException(
+                f"第 {question_id} 题未作答",
+                http_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"question_id={question_id}",
+            )
+        return text
+
+    if qtype == QUESTION_SINGLE_CHOICE:
+        key = _clean_text(value, 2).upper()
+        if key not in _option_keys(question):
+            raise BusinessException(
+                f"第 {question_id} 题的选项非法",
+                http_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"question_id={question_id} value={value!r}",
+            )
+        return key
+
+    if not isinstance(value, list):
+        raise BusinessException(
+            f"第 {question_id} 题需要提交多个选项",
+            http_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"question_id={question_id}",
+        )
+    keys: list[str] = []
+    for raw in value:
+        key = _clean_text(raw, 2).upper()
+        if key not in _option_keys(question):
+            raise BusinessException(
+                f"第 {question_id} 题的选项非法",
+                http_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"question_id={question_id} value={raw!r}",
+            )
+        if key not in keys:
+            keys.append(key)
+    if not keys:
+        raise BusinessException(
+            f"第 {question_id} 题未作答",
+            http_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"question_id={question_id}",
+        )
+    return sorted(keys)
+
+
+def normalize_answers(quiz: list[dict], answers: list) -> list[dict]:
+    """校验作答完整性并按题目顺序归一化；保证评分的输入稳定。
+
+    在恢复图之前执行：非法作答只返回 422，不改运行状态。
+    """
+    by_id = {question["question_id"]: question for question in quiz}
+    seen: set[int] = set()
+    normalized: list[dict] = []
+
+    for answer in answers:
+        question_id = answer.question_id
+        if question_id in seen:
+            raise BusinessException(
+                "同一题目不能重复作答",
+                http_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"question_id={question_id}",
+            )
+        question = by_id.get(question_id)
+        if question is None:
+            raise BusinessException(
+                f"题目 {question_id} 不存在",
+                http_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"question_id={question_id}",
+            )
+        seen.add(question_id)
+        normalized.append(
+            {
+                "question_id": question_id,
+                "value": _normalize_answer_value(question, answer.value),
+            }
+        )
+
+    missing = [qid for qid in by_id if qid not in seen]
+    if missing:
+        raise BusinessException(
+            f"还有 {len(missing)} 道题未作答",
+            http_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"missing={sorted(missing)}",
+        )
+
+    normalized.sort(key=lambda item: item["question_id"])
+    return normalized
+
+
+def generate_quiz(state: LearningWorkflowState) -> dict:
+    """调用模型生成结构化题目，并归一化成前端可渲染的 JSON。"""
+    question_count = state.get("question_count") or DEFAULT_QUESTION_COUNT
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            SystemMessage(content=QUIZ_SYSTEM_PROMPT),
+            (
+                "human",
+                "测评需求：\n{request_text}\n\n题目数量：{question_count}",
+            ),
+        ]
+    )
+    raw = (
+        (prompt | get_chat_model() | StrOutputParser())
+        .invoke(
+            {
+                "request_text": state.get("request_text", ""),
+                "question_count": question_count,
+            }
+        )
+        or ""
+    )
+    return {
+        "quiz": _normalize_quiz(parse_json_object(raw), question_count),
+        "status": STATUS_WAITING_ANSWER,
+    }
+
+
+def wait_user_answer(state: LearningWorkflowState) -> dict:
+    """暂停图等待作答；恢复时 interrupt() 返回 Command(resume=...) 携带的答案。"""
+    answers = interrupt({"quiz": state.get("quiz") or []})
+    return {"answers": answers, "status": STATUS_GRADING}
+
+
+def evaluate_answer(state: LearningWorkflowState) -> dict:
+    """一次模型调用完成评分、逐题点评、薄弱点与整体建议。"""
+    payload = json.dumps(
+        {
+            "quiz": state.get("quiz") or [],
+            "answers": state.get("answers") or [],
+        },
+        ensure_ascii=False,
+    )
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            SystemMessage(content=EVAL_SYSTEM_PROMPT),
+            ("human", "请评分并复盘以下测评：\n{payload}"),
+        ]
+    )
+    raw = (
+        (prompt | get_chat_model() | StrOutputParser()).invoke({"payload": payload})
+        or ""
+    )
+    return _normalize_evaluation(parse_json_object(raw), state.get("quiz") or [])
+
+
+def finalize_result(state: LearningWorkflowState) -> dict:
+    """收尾节点：只标记完成，业务层据此落库与释放 checkpoint。"""
+    return {"status": STATUS_COMPLETED}
+
+
+@lru_cache(maxsize=1)
+def build_learning_quiz_graph():
+    """出题 → 等待作答 → 评分 → 完成的单图，挂载全局 checkpoint。"""
+    graph = StateGraph(LearningWorkflowState)
+    graph.add_node("generate_quiz", generate_quiz)
+    graph.add_node("wait_user_answer", wait_user_answer)
+    graph.add_node("evaluate_answer", evaluate_answer)
+    graph.add_node("finalize_result", finalize_result)
+    graph.add_edge(START, "generate_quiz")
+    graph.add_edge("generate_quiz", "wait_user_answer")
+    graph.add_edge("wait_user_answer", "evaluate_answer")
+    graph.add_edge("evaluate_answer", "finalize_result")
+    graph.add_edge("finalize_result", END)
+    return graph.compile(checkpointer=get_workflow_checkpointer())

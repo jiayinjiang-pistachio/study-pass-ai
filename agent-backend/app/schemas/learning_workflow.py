@@ -8,7 +8,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, StringConstraints
 
-# 与 services/learning_workflow.py 的题目数量上限保持一致
+# 与 app/agent/workflows/learning_quiz.py 的题目数量上限保持一致
 DEFAULT_QUESTION_COUNT = 5
 MAX_QUESTION_COUNT = 20
 
@@ -69,7 +69,7 @@ class QuizQuestionOut(BaseModel):
 
 class LearningWorkflowStartOut(BaseModel):
     run_id: str = Field(..., description="工作流运行 ID")
-    status: str = Field(..., description="流程状态，出题成功为 quiz_ready")
+    status: str = Field(..., description="流程状态，出题成功为 waiting_answer")
     quiz: list[QuizQuestionOut] = Field(..., description="结构化题目")
 
 

@@ -1,8 +1,9 @@
 # 学习测评工作流 · Swagger 验证指南
 
 面向本地联调：通过 `http://127.0.0.1:8000/docs` 依次调用鉴权、会话与学习测评接口，
-验证「出题 → 作答 → 评分」闭环及各项约束。接口实现见
-[`app/services/learning_workflow.py`](../app/services/learning_workflow.py)。
+验证「出题 → 作答 → 评分」闭环及各项约束。图为
+[`app/agent/workflows/learning_quiz.py`](../app/agent/workflows/learning_quiz.py)，
+接口编排见 [`app/services/learning_workflow.py`](../app/services/learning_workflow.py)。
 
 ## 0. 前置条件
 
@@ -64,7 +65,7 @@ uvicorn app.main:app --reload --port 8000
   "message": "ok",
   "data": {
     "run_id": "6f1c9e3a-2b4d-4c8e-9a10-123456789abc",
-    "status": "quiz_ready",
+    "status": "waiting_answer",
     "quiz": [
       {
         "question_id": 1,
@@ -82,7 +83,8 @@ uvicorn app.main:app --reload --port 8000
 
 检查点：
 
-- `status == "quiz_ready"`，`quiz` 长度等于 `question_count`
+- `status == "waiting_answer"`，`quiz` 长度等于 `question_count`
+- 此时图停在 `wait_user_answer` 的 `interrupt()`，执行现场保存在 checkpoint（`run_id` 即 `thread_id`）
 - `question_id` 从 1 连续递增
 - 题型为 `single_choice` / `multiple_choice` / `short_answer`
 - **题目中没有 `answer` 字段**（标准答案不落库、不下发）
@@ -149,6 +151,7 @@ uvicorn app.main:app --reload --port 8000
 | 单选提交 `"Z"` | `422 第 1 题的选项非法` |
 | 同一题重复提交 | `422 同一题目不能重复作答` |
 | 对已完成的 `run_id` 再次提交 | `409 该测评已提交，请勿重复提交` |
+| 重启服务后对旧 `run_id` 提交（checkpoint 丢失） | `409 测评流程已失效，请重新发起测评`，记录置 `failed` |
 | 未配置 LLM 密钥时发起 | `503 学习测评服务暂不可用` |
 | 模型输出非法 JSON | `502 学习测评生成失败，请稍后重试` |
 
@@ -165,8 +168,8 @@ LIMIT 5;
 
 预期：
 
-- 出题成功后 `status=quiz_ready`
-- 提交成功后 `status=completed` 且 `completed_at` 非空
+- 出题成功后 `status=waiting_answer`
+- 提交过程 `waiting_answer → grading → completed`，完成后 `completed_at` 非空
 - 失败时 `status=failed` 且 `error_message` 记录原因
 - 删除会话后对应 `workflow_runs` 记录随外键级联清理
 
@@ -215,7 +218,9 @@ LIMIT 5;
 | --- | --- |
 | 路由 | `app/routers/learning_workflow.py` |
 | 入参 / 出参校验 | `app/schemas/learning_workflow.py` |
-| LangGraph 图与业务逻辑 | `app/services/learning_workflow.py` |
+| LangGraph 图与节点 | `app/agent/workflows/learning_quiz.py` |
+| checkpoint（MemorySaver） | `app/agent/workflows/checkpoint.py` |
+| 业务编排（恢复 / 落库） | `app/services/learning_workflow.py` |
 | 模型 JSON 解析 | `app/services/ai/json_utils.py` |
 | 状态持久化 | `app/db/workflow_run_repo.py`、`workflow_runs` 表 |
 | 流程总控 | `app/routers/orchestrator.py`、`app/services/orchestrator_service.py` |

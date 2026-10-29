@@ -1,7 +1,8 @@
 """学习测评工作流测试。
 
 模型调用替换为假的 Runnable，不依赖真实大模型与 API Key；
-覆盖：出题归一化、状态落库、评分闭环、作答校验、越权隔离与失败落库。
+覆盖：出题归一化、interrupt 暂停点、状态落库、评分闭环、作答校验、
+checkpoint 失效、越权隔离与失败落库。
 """
 
 import json
@@ -11,6 +12,11 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 from sqlalchemy import select
 
+from app.agent.workflows import learning_quiz
+from app.agent.workflows.checkpoint import (
+    build_thread_config,
+    get_workflow_checkpointer,
+)
 from app.db import session_repo, workflow_run_repo
 from app.db.models import WorkflowRun
 from app.db.session import SessionLocal
@@ -69,7 +75,7 @@ def _patch_model(monkeypatch, *responses: str) -> None:
         return AIMessage(content=queue.pop(0))
 
     monkeypatch.setattr(
-        learning_workflow, "get_chat_model", lambda: RunnableLambda(_invoke)
+        learning_quiz, "get_chat_model", lambda: RunnableLambda(_invoke)
     )
 
 
@@ -105,7 +111,7 @@ async def test_start_generates_quiz_and_persists(
 
     data = await _start(client, auth_headers, session["id"])
 
-    assert data["status"] == learning_workflow.STATUS_QUIZ_READY
+    assert data["status"] == learning_workflow.STATUS_WAITING_ANSWER
     assert data["run_id"]
     assert [q["question_id"] for q in data["quiz"]] == [1, 2, 3]
     # 题型归一化：未知类型降级为简答；题目数量按请求截断
@@ -119,10 +125,17 @@ async def test_start_generates_quiz_and_persists(
 
     row = workflow_run_repo.get_for_user(data["run_id"], auth_user["id"])
     assert row is not None
-    assert row["status"] == learning_workflow.STATUS_QUIZ_READY
+    assert row["status"] == learning_workflow.STATUS_WAITING_ANSWER
     assert row["workflow_type"] == learning_workflow.WORKFLOW_TYPE_LEARNING_QUIZ
     assert row["state_json"]["quiz"] == data["quiz"]
     assert row["state_json"]["provider"] == learning_workflow.LLM_PROVIDER
+
+    # 图停在 interrupt：checkpoint 仍在等待作答，具备恢复条件
+    snapshot = learning_quiz.build_learning_quiz_graph().get_state(
+        build_thread_config(data["run_id"])
+    )
+    assert snapshot.next == ("wait_user_answer",)
+    assert snapshot.values["quiz"] == data["quiz"]
 
 
 async def test_start_rejects_foreign_session(
@@ -171,6 +184,68 @@ async def test_start_marks_failed_on_invalid_model_output(
         ).one()
     assert row.status == learning_workflow.STATUS_FAILED
     assert "JSON" in (row.error_message or "")
+
+
+async def test_submit_rejects_expired_checkpoint(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """checkpoint 丢失（模拟服务重启）→ 409，行置 failed，且不会重新调用模型。"""
+    session = _new_session(auth_user["id"])
+    _patch_model(monkeypatch, QUIZ_JSON)  # 仅出题一次，评分阶段不应有模型调用
+    started = await _start(client, auth_headers, session["id"])
+
+    get_workflow_checkpointer().delete_thread(started["run_id"])
+
+    resp = await client.post(
+        f"/api/learning-workflows/{started['run_id']}/submit",
+        headers=auth_headers,
+        json={
+            "answers": [
+                {"question_id": 1, "value": "A"},
+                {"question_id": 2, "value": ["A"]},
+                {"question_id": 3, "value": "加速查询"},
+            ]
+        },
+    )
+
+    assert resp.status_code == 409
+    assert "已失效" in resp.json()["message"]
+
+    row = workflow_run_repo.get_for_user(started["run_id"], auth_user["id"])
+    assert row["status"] == learning_workflow.STATUS_FAILED
+    assert "checkpoint" in row["error_message"]
+
+
+async def test_submit_marks_failed_on_invalid_evaluation(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """评分阶段模型输出非 JSON → 502，运行记录置为 failed。"""
+    session = _new_session(auth_user["id"])
+    _patch_model(monkeypatch, QUIZ_JSON, "评分失败")
+    started = await _start(client, auth_headers, session["id"])
+
+    resp = await client.post(
+        f"/api/learning-workflows/{started['run_id']}/submit",
+        headers=auth_headers,
+        json={
+            "answers": [
+                {"question_id": 1, "value": "A"},
+                {"question_id": 2, "value": ["A"]},
+                {"question_id": 3, "value": "加速查询"},
+            ]
+        },
+    )
+
+    assert resp.status_code == 502
+    row = workflow_run_repo.get_for_user(started["run_id"], auth_user["id"])
+    assert row["status"] == learning_workflow.STATUS_FAILED
+    assert "JSON" in (row["error_message"] or "")
 
 
 async def test_submit_scores_and_completes(
@@ -289,8 +364,11 @@ async def test_submit_rejects_foreign_run(
             "user_id": other_user["id"],
             "session_id": other_session["id"],
             "workflow_type": learning_workflow.WORKFLOW_TYPE_LEARNING_QUIZ,
-            "status": learning_workflow.STATUS_QUIZ_READY,
-            "state_json": {"quiz": [], "status": learning_workflow.STATUS_QUIZ_READY},
+            "status": learning_workflow.STATUS_WAITING_ANSWER,
+            "state_json": {
+                "quiz": [],
+                "status": learning_workflow.STATUS_WAITING_ANSWER,
+            },
         }
     )
 
@@ -325,6 +403,6 @@ async def test_get_returns_full_state(
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
     assert data["run_id"] == started["run_id"]
-    assert data["status"] == learning_workflow.STATUS_QUIZ_READY
+    assert data["status"] == learning_workflow.STATUS_WAITING_ANSWER
     assert data["state"]["request_text"] == "测一下 Python 基础"
     assert data["state"]["quiz"] == started["quiz"]

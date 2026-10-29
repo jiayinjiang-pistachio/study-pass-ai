@@ -34,7 +34,7 @@
 | 配置读取 | `python-dotenv` | 分层加载：真实环境变量 > `.env.{APP_ENV}` > `.env`，入口 `app/core/config.py`（唯一读取入口） |
 | 日志 | Loguru `0.7.x` | 开发控制台 + 文件，生产只落文件；按大小滚动（10MB × 5），入口 `app/core/logging.py` |
 | AI 编排 | LangChain `langchain-core 1.7` + `langchain-openai 1.7` | OpenAI 兼容协议；模型 / 提示词封装在 `app/services/ai/`，记忆读取在 `app/services/memory_service.py`，长期记忆在 `app/services/long_term_memory.py` |
-| 工作流编排 | LangGraph `1.2.x` | 学习测评等跨请求状态机，完整状态落 `workflow_runs.state_json`；入口 `app/services/learning_workflow.py` |
+| 工作流编排 | LangGraph `1.2.x` | 学习测评等跨请求状态机：单图 + `interrupt()` + `MemorySaver` checkpoint；图定义入口 `app/agent/workflows/learning_quiz.py`，业务编排 `app/services/learning_workflow.py` |
 | 语义判断 | fastembed `0.9.x` | 长期记忆写入意图 + 流程总控语义兜底（`BAAI/bge-small-zh-v1.5`，首次使用时下载模型并缓存）；模型共享于 `app/services/embedding.py`，分类入口 `app/services/semantic_intent.py` |
 | 语言 | Python `3.13` | 使用 `X | None` 现代联合类型写法 |
 | 包管理 | **venv + pip** | 运行期依赖以 `requirements.txt` 为准；测试依赖另见 `requirements-dev.txt` |
@@ -117,7 +117,7 @@ agent-backend/
 │   │   ├── prompt_template_service.py # 提示词版本管理：智能体配置 / 拼接 / 回滚 / Redis 缓存
 │   │   ├── prompt_injection_service.py # 提示词变量注入：验证（清洗 / 限长）→ 转换（格式化 / 默认值）→ 填充（占位符替换）
 │   │   ├── interview_service.py # 面试详情查询（interview_id + user_id 防越权）
-│   │   ├── learning_workflow.py # 学习测评：LangGraph 出题 / 评测图 + 状态持久化
+│   │   ├── learning_workflow.py # 学习测评：checkpoint 校验 + interrupt 恢复 + 状态持久化
 │   │   ├── orchestrator_service.py # 流程总控：规则表 + 关键词 / 语义路由 + 入参映射
 │   │   ├── semantic_intent.py # 语义意图判断：示例向量 + 余弦阈值 + 失败降级
 │   │   ├── embedding.py     #   本地向量模型共享实例（长期记忆 / 语义意图）
@@ -127,6 +127,10 @@ agent-backend/
 │   │   ├── avatar_service.py #   用户头像读取：resources/用户头像路径 → MinIO 字节流
 │   │   ├── resource_cleanup.py # 每天 03:00 清理过期资源（先删对象再删元数据）
 │   │   └── health_service.py#   健康检查：数据库探活，异常转 SystemException(503)
+│   ├── agent/               # Agent 编排层：LangGraph 工作流图 + 跨请求执行现场
+│   │   └── workflows/
+│   │       ├── checkpoint.py #   全局 MemorySaver 单例 + thread 配置（thread_id = run_id）
+│   │       └── learning_quiz.py # 学习测评单图：出题 → interrupt 等待作答 → 评分 → 完成
 │   ├── rag/                 # RAG 知识库（向量化入库，独立于四层调用链）
 │   │   ├── core.py          #   解析 → 清洗 → 分类 → 分块 → 向量化 → 写 Qdrant + 原文入 MySQL（对外仅 ingest_file）
 │   │   ├── retriever.py     #   问题向量化 → Qdrant 近邻检索（user_id 隔离 + 可选 doc_category）→ 回表取原文（对外仅 search_similar_chunks）
@@ -167,7 +171,7 @@ agent-backend/
 │   ├── test_long_term_memory.py # 长期记忆：画像格式化 / 意图判断 / 抽取清洗 / 后台写入
 │   ├── test_long_term_chat.py #   流式对话接入长期记忆：跳过 RAG / 必填缺失触发抽取
 │   ├── test_working_memory.py #   Redis 工作记忆读写 / 摘要 / 降级
-│   ├── test_learning_workflow.py # 学习测评：出题 / 评分 / 作答校验 / 越权隔离
+│   ├── test_learning_workflow.py # 学习测评：interrupt 暂停 / 恢复评分 / checkpoint 失效 / 作答校验
 │   ├── test_orchestrator.py #   流程总控：路由策略 / 混合响应 / 越权隔离
 │   ├── test_semantic_intent.py # 语义意图：阈值 / 多示例 / 缓存 / 失败降级
 │   └── test_resources.py    #   过期资源清理用例
@@ -324,10 +328,12 @@ agent-backend/
   - 模型统一走 OpenAI 兼容协议，配置项 `LLM_PROVIDER / LLM_MODEL / LLM_API_KEY / LLM_BASE_URL / LLM_TEMPERATURE / LLM_TIMEOUT / LLM_MAX_RETRIES`；密钥只放环境变量，缺失时该接口返回 503，不影响其他接口启动。
 - **面试记录约定**：`interviews.user_id` 记录归属；`GET /api/interviews/{interview_id}` 必须按 `interview_id + user_id` 查询，返回含 `qa_object` 的详情，防止越权读取他人面试记录。
 - **学习测评工作流约定**（`/api/learning-workflows`，整组需登录）：
-  - 两次请求闭环：`POST /start` 出题（`quiz_ready`）→ `POST /{run_id}/submit` 评分（`completed`）；`GET /{run_id}` 返回状态与完整 `state`。`run_id` 为 UUID，按 `user_id` 隔离，越权 / 不存在统一 `404`。
-  - LangGraph 编排（`app/services/learning_workflow.py`）：启动图 `prepare_learning_context → generate_quiz → END`，提交图 `evaluate_and_review → END`；状态字段固定为 `run_id / user_id / session_id / request_text / provider / question_count / quiz / answers / evaluation / score / weaknesses / review / status`，完整落 `workflow_runs.state_json`。
+  - 两次请求闭环：`POST /start` 出题（`waiting_answer`）→ `POST /{run_id}/submit` 评分（`completed`）；`GET /{run_id}` 返回状态与完整 `state`。`run_id` 为 UUID，同时也是 LangGraph `thread_id`，按 `user_id` 隔离，越权 / 不存在统一 `404`。
+  - LangGraph 编排（图 `app/agent/workflows/learning_quiz.py`，编排 `app/services/learning_workflow.py`）：单图 `generate_quiz → wait_user_answer → evaluate_answer → finalize_result → END`，`wait_user_answer` 调用 `interrupt({"quiz": quiz})` 暂停，提交时用 `Command(resume=answers)` 恢复同一线程。状态字段固定为 `run_id / user_id / session_id / request_text / provider / question_count / quiz / answers / evaluation / score / weaknesses / review / status`。
+  - **双存储**：`workflow_runs.state_json` 只存业务快照（题目、作答、评分等）；LangGraph 执行现场存在 `MemorySaver` checkpoint（`app/agent/workflows/checkpoint.py` 的进程级单例，`build_thread_config(run_id)` 定位线程）。状态集合 `created / waiting_answer / grading / completed / failed`，完成后尽力 `delete_thread(run_id)` 释放 checkpoint。
+  - **checkpoint 限制**：`MemorySaver` 是进程内存储，服务重启 / 多进程部署后旧 `run_id` 无法恢复。提交前必须校验 `graph.get_state(config).next == ("wait_user_answer",)` 且快照含 quiz，否则不得 resume（LangGraph 会从 START 重新出题并再调用一次模型），应把记录置 `failed` 并返回 `409 测评流程已失效，请重新发起测评`。
   - 题目结构 `{question_id, type, stem, options: [{key, text}]}`，题型 `single_choice / multiple_choice / short_answer`；**标准答案不落库、不返回前端**，评分由提交时的模型调用完成。前端只提交 `answers: [{question_id, value}]`（单选字符串、多选数组、简答字符串）。
-  - 作答校验：必须覆盖全部题目、不允许重复 / 未知题目 / 非法选项 / 空作答，违规返回 `422`；仅 `quiz_ready` 可提交，已完成重复提交返回 `409`。模型失败时运行记录置 `failed` 并写 `error_message`，配置缺失返回 `503`、模型 / 解析失败返回 `502`。
+  - 作答校验：必须覆盖全部题目、不允许重复 / 未知题目 / 非法选项 / 空作答，违规返回 `422`（此时运行状态保持 `waiting_answer`）；仅 `waiting_answer` 可提交，已完成重复提交返回 `409`。模型失败时运行记录置 `failed` 并写 `error_message`，配置缺失返回 `503`、模型 / 解析失败返回 `502`。
   - 模型输出的 JSON 由 `app/services/ai/json_utils.py` 的 `parse_json_object()` 统一解析（截取首个 `{` 到末个 `}`），提示词中的 JSON 示例必须作为静态 `SystemMessage` 传入。
   - Swagger 联调步骤、反向用例与落库核对见 [`docs/learning-workflow-api-guide.md`](docs/learning-workflow-api-guide.md)。
 - **流程总控约定**（`POST /api/agent/tasks/start`，需登录）：
@@ -369,7 +375,7 @@ agent-backend/
 - 更换存储实现时，**只改 `db/` 层**，上层调用签名保持不变。
 - `prompt_templates` 的 `(agent_name, scene, version)` 唯一键兜底版本号；公共通用模板固定作用域 `(common, common)`，与私有模板走同一套逻辑，「单一生效」由仓储层 `SELECT ... FOR UPDATE` 事务行锁保证。
 - `user_profiles` 一人一行（`user_id` 唯一，外键 `users.id` + `ON DELETE CASCADE`），存目标岗位 / 工作年限 / 目标等级 / 已掌握技能 / 薄弱点，供提示词变量注入读取；数组字段用 MySQL `JSON`。基础五项可由前端开场白表单（资料 CRUD 接口）写入，也可由对话后台抽取回填；长期字段 `learning_goal` / `learning_style`（`VARCHAR(255)`）、`interview_focus`（`JSON` 数组）、`long_term_summary`（`TEXT`）只由对话后台自动抽取。后台写入经 `profile_service.create_or_update()` 白名单过滤（允许全部 9 个业务字段，拒绝 `user_id` 等非业务列）。上层只经 `app/db/user_profile_repo.py` 读写。
-- `workflow_runs` 是跨请求工作流实例表：`run_id`（UUID）对外唯一标识，`user_id` / `session_id` 外键 `ON DELETE CASCADE`（会话删除即清理流程），`workflow_type` 标识流程类型（当前为 `learning_quiz`），`status` 取 `running / quiz_ready / completed / failed`，完整状态存 `state_json`（`JSON`），失败原因存 `error_message`，完成后写 `completed_at`。上层只经 `app/db/workflow_run_repo.py` 读写，所有查询必须同时带 `run_id + user_id`。
+- `workflow_runs` 是跨请求工作流实例表：`run_id`（UUID）对外唯一标识，`user_id` / `session_id` 外键 `ON DELETE CASCADE`（会话删除即清理流程），`workflow_type` 标识流程类型（当前为 `learning_quiz`），`status` 取 `created / waiting_answer / grading / completed / failed`，业务快照存 `state_json`（`JSON`，执行现场在 LangGraph checkpoint），失败原因存 `error_message`，完成后写 `completed_at`。上层只经 `app/db/workflow_run_repo.py` 读写，所有查询必须同时带 `run_id + user_id`。
 - `chat_messages` 的附件段用 MySQL `JSON` 列存储（`request_segments` / `response_segments`，可为 `NULL`），正文不入 JSON；`reference_sources` 同为可空 `JSON`，只存 `[{chunk_id, score}]`（知识块全文不落消息表，历史回显时按 `chunk_id` 回查）。`status` 为 `Integer`（0/1/2），`interview_id` 为可空 `BigInteger`（**不建外键**，避免与 `interviews.message_id` 形成循环依赖）。`interviews.user_id` 必填并建索引，所有详情查询必须同时带 `interview_id` 与 `user_id`。
 - `resources.doc_category` 为可空 `String(32)`，取值 `resume` / `study_material` / `general`，仅 `resource_type=0` 文档有意义，非文档为 `NULL`。同内容去重命中且分类变化时，由 `app/db/resource_repo.py` 的 `update_doc_category()` 更新，并触发该 `resource_id` 的向量重灌。
 - **RAG 双存储**：Qdrant 集合 `knowledge_chunks` 只存向量与过滤字段（`user_id` / `doc_category` / `file_name` / `chunk_index` / `resource_id`），**不存原文**；原文与统计字段落 MySQL `knowledge_chunks`（`vector_id` / `resource_id` / `chunk_index` / `text` / `char_count`），`vector_id` 即 Qdrant Point id，两边一一对应。`resource_id` 外键级联删除，重灌时按 `resource_id` 先删后插；写入顺序为「先 Qdrant、后 MySQL」，MySQL 失败会尽力回删刚写入的向量。检索走 `rag/retriever.py`：按 `user_id` 隔离、可选 `doc_category` 收窄，分数阈值 0.4，命中后按 `vector_id` 回查原文；对话来源只在 `chat_messages.reference_sources` 存 `chunk_id + score`。

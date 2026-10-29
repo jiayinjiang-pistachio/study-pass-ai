@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 from sqlalchemy import select
 
+from app.agent.workflows import learning_quiz
 from app.core.exceptions import BusinessException, SystemException
 from app.db import message_repo, session_repo, workflow_run_repo
 from app.db.models import WorkflowRun
@@ -80,7 +81,7 @@ def _new_session(user_id: int) -> dict:
 
 def _patch_model(monkeypatch, text: str) -> None:
     monkeypatch.setattr(
-        learning_workflow,
+        learning_quiz,
         "get_chat_model",
         lambda: RunnableLambda(lambda _: AIMessage(content=text)),
     )
@@ -154,7 +155,7 @@ def test_start_task_maps_workflow_payload(monkeypatch) -> None:
     def _fake_start(user_id: int, payload) -> dict:
         captured["user_id"] = user_id
         captured["payload"] = payload
-        return {"run_id": "run-1", "status": "quiz_ready", "quiz": []}
+        return {"run_id": "run-1", "status": "waiting_answer", "quiz": []}
 
     monkeypatch.setattr(
         orchestrator_service.learning_workflow,
@@ -185,7 +186,7 @@ def test_start_task_maps_workflow_payload(monkeypatch) -> None:
         "agent_name": QUIZ_AGENT_NAME,
         "workflow_type": learning_workflow.WORKFLOW_TYPE_LEARNING_QUIZ,
         "run_id": "run-1",
-        "status": "quiz_ready",
+        "status": "waiting_answer",
         "quiz": [],
     }
 
@@ -260,12 +261,12 @@ async def test_start_agent_task_routes_to_workflow(
     assert data["route"] == "workflow"
     assert data["agent_name"] == QUIZ_AGENT_NAME
     assert data["workflow_type"] == learning_workflow.WORKFLOW_TYPE_LEARNING_QUIZ
-    assert data["status"] == learning_workflow.STATUS_QUIZ_READY
+    assert data["status"] == learning_workflow.STATUS_WAITING_ANSWER
     assert data["quiz"][0]["question_id"] == 1
 
     row = workflow_run_repo.get_for_user(data["run_id"], auth_user["id"])
     assert row is not None
-    assert row["status"] == learning_workflow.STATUS_QUIZ_READY
+    assert row["status"] == learning_workflow.STATUS_WAITING_ANSWER
 
 
 async def test_start_agent_task_falls_back_to_chat(
