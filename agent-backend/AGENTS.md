@@ -309,7 +309,7 @@ agent-backend/
   - 会话整组接口（`/api/sessions`、`/api/sessions/{id}/messages`）需登录，所有查询按令牌中的 `user_id` 隔离；资源不存在或不属于当前用户一律 `404`（不区分「不存在」与「无权限」，避免泄露）。
   - 创建会话入参 `title` + `session_mode`（0=学习，1=面试，2=笔记），同时兼容需求文档字段名 `session_model`（`AliasChoices`）；出参不暴露 `user_id`。
   - 分页统一 `{items,total,page,page_size}`：`page ≥ 1`、`page_size` 1..100；会话按 `created_at DESC, id DESC`，消息按 `created_at ASC, id ASC`。
-  - `chat_messages` 语义：**聊天正文在 `request_text` / `response_text`**；`request_segments` / `response_segments` **只存附件段**（`{type: file|image|audio, resource_id, file_name?, url?}`），AI 回复文本始终进 `response_text`。消息出参还包含 `status`（0=生成中，1=完成，2=失败）与 `interview_id`（普通聊天为 `null`），供前端面试卡片逻辑使用。历史消息的 `sources` 由 `reference_sources` 回查 `knowledge_chunks` + `resources` 重建；知识块已删除时仍返回该条目，`text` 为「该参考片段已被删除」。
+  - `chat_messages` 语义：**聊天正文在 `request_text` / `response_text`**；`request_segments` / `response_segments` **只存附件段**（`{type: file|image|audio, resource_id, file_name?, url?}`），AI 回复文本始终进 `response_text`。消息出参还包含 `status`（0=生成中，1=完成，2=失败）、`request_id` 与 `interview_id`（普通聊天为 `null`）；学习测评题目消息的 `request_id` 为 `{run_id}:quiz`，前端据此识别测评入口。`interview_id` 供前端面试卡片逻辑使用。历史消息的 `sources` 由 `reference_sources` 回查 `knowledge_chunks` + `resources` 重建；知识块已删除时仍返回该条目，`text` 为「该参考片段已被删除」。
   - **级联删除**（`DELETE /api/sessions/{id}`）：先解析消息附件段收集 `resource_id`，再按 `interviews → chat_messages → sessions` 的依赖顺序删库；最后仅删除当前用户自己的 `resources` 元数据与 MinIO 对象（先删对象、成功后再删元数据，失败则保留元数据交给过期清理重试）。
 - **流式对话约定**（`POST /api/sessions/{session_id}/stream-chat`）：
   - 入参 `request_text`（必填，去空白后 1..20000 字）、`select_mode`（0..5）、`request_id`（可选，缺省由后端生成）、`request_segments`（仅可引用当前用户自己的 `resource_id`，越权返回 404）。
@@ -329,6 +329,7 @@ agent-backend/
 - **面试记录约定**：`interviews.user_id` 记录归属；`GET /api/interviews/{interview_id}` 必须按 `interview_id + user_id` 查询，返回含 `qa_object` 的详情，防止越权读取他人面试记录。
 - **学习测评工作流约定**（`/api/learning-workflows`，整组需登录）：
   - 两次请求闭环：`POST /start` 出题（`waiting_answer`）→ `POST /{run_id}/submit` 评分（`completed`）；`GET /{run_id}` 返回状态与完整 `state`。`run_id` 为 UUID，同时也是 LangGraph `thread_id`，按 `user_id` 隔离，越权 / 不存在统一 `404`。
+  - 题量：`question_count` 可省略，缺省时从 `request_text` 提取「N 道 / N 题」（支持「三道」等中文数字），仍无则默认 5，上限 20。
   - LangGraph 编排（图 `app/agent/workflows/learning_quiz.py`，编排 `app/services/learning_workflow.py`）：单图 `generate_quiz → wait_user_answer → evaluate_answer → finalize_result → END`，`wait_user_answer` 调用 `interrupt({"quiz": quiz})` 暂停，提交时用 `Command(resume=answers)` 恢复同一线程。状态字段固定为 `run_id / user_id / session_id / request_text / provider / question_count / quiz / answers / evaluation / score / weaknesses / review / display_text / status`。
   - **双存储**：`workflow_runs.state_json` 只存业务快照（题目、作答、评分等）；LangGraph 执行现场存在 `MemorySaver` checkpoint（`app/agent/workflows/checkpoint.py` 的进程级单例，`build_thread_config(run_id)` 定位线程）。状态集合 `created / waiting_answer / grading / completed / failed`，完成后尽力 `delete_thread(run_id)` 释放 checkpoint。
   - **checkpoint 限制**：`MemorySaver` 是进程内存储，服务重启 / 多进程部署后旧 `run_id` 无法恢复。提交前必须校验 `graph.get_state(config).next == ("wait_user_answer",)` 且快照含 quiz，否则不得 resume（LangGraph 会从 START 重新出题并再调用一次模型），应把记录置 `failed` 并返回 `409 测评流程已失效，请重新发起测评`。
@@ -341,6 +342,7 @@ agent-backend/
 - **流程总控约定**（`POST /api/agent/tasks/start`，需登录）：
   - 前端统一入口：传 `agent_name` + `session_id` + `request_text`，由后端决定走工作流还是通用聊天。入参还包含 `select_mode` / `question_count` / `provider` / `request_id` / `request_segments`，按分支各取所需。
   - 路由策略（`app/services/orchestrator_service.py`）：未登记的 `agent_name` → `404`；`required_keywords` 任一命中 → 直接启动工作流；否则用 fastembed 语义相似度对比规则的 `intent_examples`，最大相似度 `>= intent_threshold` 也启动；仍未命中 → 通用聊天。关键词为双字词，避免「问题 / 话题 / 标题」误命中。
+  - 已登记聊天智能体（`CHAT_AGENT_NAMES`：`difficulty_learner / note_archiver / interview_host / interview_evaluator`）没有工作流规则时**直接走通用聊天**，不触发关键词 / 语义判断，仍使用统一聊天提示词；只有既无规则又不在名单内的 `agent_name` 才返回 `404`。
   - 当前规则 `quiz_generate_workflow -> learning_quiz`：命中后显式构造 `LearningWorkflowStartIn` 调用 `learning_workflow.start_learning_workflow()`，返回 `{route, agent_name, workflow_type, run_id, status, quiz}`。规则指向未实现的 `workflow_type` → `500`（配置错误）。
   - **混合响应例外**：工作流分支返回统一 JSON 信封；聊天分支复用 `chat_service.prepare_stream()` + `stream_reply()`，返回 `text/event-stream`（事件与 `/stream-chat` 一致）。因此该路由**不设置 `response_class`**（否则 JSON 分支跳过 `response_model` 校验），`response_model` 只描述工作流分支，SSE 契约通过 `responses` 在 OpenAPI 中声明。
   - 双契约限制：工作流分支忽略 `select_mode` / `request_segments`，`request_id` 暂未做幂等（重试会新建 `workflow_runs`）；聊天分支忽略 `question_count` / `provider`（聊天模型走全局配置）。

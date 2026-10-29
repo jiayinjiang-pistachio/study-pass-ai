@@ -70,6 +70,7 @@ def _to_out(message: dict, sources: list[dict]) -> dict:
     """正文、附件段、状态与参考来源一起返回，供前端渲染消息与来源卡片。"""
     return {
         "id": message["id"],
+        "request_id": message.get("request_id"),
         "request_text": message["request_text"],
         "response_text": message["response_text"],
         "request_segments": _segments(message.get("request_segments")),

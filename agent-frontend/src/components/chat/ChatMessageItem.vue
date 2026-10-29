@@ -4,11 +4,13 @@ import { Service, User } from '@element-plus/icons-vue'
 import ChatSourceList from './ChatSourceList.vue'
 import InterviewCard from './InterviewCard.vue'
 import MsgFile from './MsgFile.vue'
+import QuizEntryCard from './QuizEntryCard.vue'
 import type { ChatMessage } from '@/types/chat'
 
 import { renderMarkdown } from '@/utils/markdownUtil'
 
-const props = defineProps<{ message: ChatMessage }>()
+const props = defineProps<{ message: ChatMessage; sessionId?: number | null }>()
+const emit = defineEmits<{ 'quiz-submitted': [] }>()
 
 const hasRequest = computed(
   () =>
@@ -19,6 +21,14 @@ const hasRequest = computed(
 const showInterviewCard = computed(
   () => props.message.status === 1 && props.message.interviewId !== null,
 )
+
+/** 测评消息的 request_id 为 {run_id}:quiz，且只有未评分的题目载荷才展示入口 */
+const quizRequestId = computed(() => {
+  const requestId = props.message.requestId
+  if (!requestId || !requestId.includes('quiz')) return null
+  return (props.message.responsePayload?.length ?? 0) > 0 ? requestId : null
+})
+const showQuizEntry = computed(() => quizRequestId.value !== null)
 
 /** 生成中 / 失败的状态提示，正文为空时展示 */
 const responsePlaceholder = computed(() => {
@@ -37,6 +47,7 @@ const hasResponse = computed(
     props.message.responseSegments.length > 0 ||
     props.message.sources.length > 0 ||
     showInterviewCard.value ||
+    showQuizEntry.value ||
     responsePlaceholder.value.length > 0,
 )
 
@@ -99,6 +110,13 @@ const timeLabel = computed(() => {
         <InterviewCard
           v-if="showInterviewCard && message.interviewId !== null"
           :interview-id="message.interviewId"
+        />
+        <QuizEntryCard
+          v-if="showQuizEntry && sessionId !== null && sessionId !== undefined"
+          :session-id="sessionId"
+          :request-id="quizRequestId ?? ''"
+          :questions="message.responsePayload ?? []"
+          @quiz-submitted="emit('quiz-submitted')"
         />
         <ChatSourceList
           v-if="message.sources.length"

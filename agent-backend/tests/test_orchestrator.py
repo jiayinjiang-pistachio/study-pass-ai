@@ -21,6 +21,7 @@ from app.schemas.learning_workflow import LearningWorkflowStartIn
 from app.schemas.orchestrator import AgentTaskStartIn
 from app.services import chat_service, learning_workflow, orchestrator_service
 from app.services.orchestrator_service import (
+    CHAT_AGENT_NAMES,
     QUIZ_AGENT_NAME,
     WORKFLOW_ROUTE_RULES,
     OrchestratorService,
@@ -137,6 +138,16 @@ def test_route_returns_none_when_no_match(monkeypatch) -> None:
     assert OrchestratorService().route(QUIZ_AGENT_NAME, "你好，介绍一下你自己") is None
 
 
+@pytest.mark.parametrize("agent_name", sorted(CHAT_AGENT_NAMES))
+def test_route_chat_agents_go_straight_to_chat(monkeypatch, agent_name: str) -> None:
+    """已登记聊天智能体 → None，且不触发关键词 / 语义判断。"""
+    classifier = _FakeClassifier(True)
+    _use_classifier(monkeypatch, classifier)
+
+    assert OrchestratorService().route(agent_name, "帮我出几道练习题") is None
+    assert classifier.calls == []
+
+
 def test_route_rules_use_precise_keywords() -> None:
     """规则不变量：双字关键词、不含单字「题」、阈值合法。"""
     for rule in WORKFLOW_ROUTE_RULES.values():
@@ -146,6 +157,14 @@ def test_route_rules_use_precise_keywords() -> None:
         assert all(len(keyword) >= 2 for keyword in rule.required_keywords)
         assert "题" not in rule.required_keywords
         assert 0 < rule.intent_threshold <= 1
+
+
+def test_quiz_rule_threshold_avoids_greeting_false_positive() -> None:
+    """回归：问候语与出题示例的相似度实测约 0.61，阈值必须高于它并保留「考考」。"""
+    rule = WORKFLOW_ROUTE_RULES[QUIZ_AGENT_NAME]
+
+    assert rule.intent_threshold >= 0.65
+    assert "考考" in rule.required_keywords
 
 
 def test_start_task_maps_workflow_payload(monkeypatch) -> None:
@@ -303,6 +322,43 @@ async def test_start_agent_task_falls_back_to_chat(
     messages = message_repo.list_all_by_session(session["id"])
     assert [item["request_text"] for item in messages] == ["你好，介绍一下你自己"]
     assert messages[0]["status"] == 1
+
+
+async def test_start_agent_task_chat_agent_returns_sse(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """已登记聊天智能体即使带出题关键词也走 SSE，不启动工作流。"""
+    session = _new_session(auth_user["id"])
+    classifier = _FakeClassifier(True)
+    _use_classifier(monkeypatch, classifier)
+    monkeypatch.setattr(
+        chat_service.prompt_layer,
+        "build_chat_chain",
+        lambda *args, **kwargs: _FakeChain(),
+    )
+
+    resp = await client.post(
+        "/api/agent/tasks/start",
+        headers=auth_headers,
+        json={
+            "agent_name": "difficulty_learner",
+            "session_id": session["id"],
+            "request_text": "帮我出几道练习题",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert "event: meta" in resp.text
+    assert classifier.calls == []
+    with SessionLocal() as db:
+        runs = db.scalars(
+            select(WorkflowRun).where(WorkflowRun.session_id == session["id"])
+        ).all()
+    assert runs == []
 
 
 async def test_start_agent_task_rejects_unknown_agent(

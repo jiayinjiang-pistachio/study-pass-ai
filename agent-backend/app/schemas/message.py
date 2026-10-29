@@ -33,6 +33,9 @@ class MessageOut(BaseModel):
     """单条聊天记录：一问一答 + 附件 + 状态/面试关联 + 参考来源。"""
 
     id: int = Field(..., description="消息 ID")
+    request_id: str | None = Field(
+        None, description="请求标识；学习测评题目消息为 {run_id}:quiz，普通聊天可为 null"
+    )
     request_text: str = Field(..., description="用户提问正文")
     response_text: str = Field(..., description="AI 回复正文")
     request_segments: list[SegmentOut] = Field(

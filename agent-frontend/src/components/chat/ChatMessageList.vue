@@ -68,6 +68,12 @@ function handleSkip(): void {
   if (id !== null) skippedSessions.value[id] = true
 }
 
+/** 测评提交后消息内容更新，兜底滚动到底部（会话刷新由测评卡片触发） */
+async function handleQuizSubmitted(): Promise<void> {
+  await nextTick()
+  scrollToBottom()
+}
+
 /** 距离顶部 10px 内触发上拉分页，并保持当前视口位置不跳动 */
 async function handleScroll(): Promise<void> {
   const el = scroller.value
@@ -98,7 +104,13 @@ async function handleScroll(): Promise<void> {
       <p v-if="loadingOlder" class="chat-list__older">加载更早消息…</p>
 
       <template v-if="messages.length">
-        <ChatMessageItem v-for="item in messages" :key="item.id" :message="item" />
+        <ChatMessageItem
+          v-for="item in messages"
+          :key="item.id"
+          :message="item"
+          :session-id="activeSessionId"
+          @quiz-submitted="handleQuizSubmitted"
+        />
       </template>
 
       <ProfileWelcomeCard

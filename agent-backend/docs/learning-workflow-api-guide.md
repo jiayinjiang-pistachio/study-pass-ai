@@ -83,7 +83,7 @@ uvicorn app.main:app --reload --port 8000
 
 检查点：
 
-- `status == "waiting_answer"`，`quiz` 长度等于 `question_count`
+- `status == "waiting_answer"`，`quiz` 长度等于题量。`question_count` 可省略：未传时从 `request_text` 提取「N 道 / N 题」（支持中文数字，如「出三道题」），仍无则默认 5，上限 20
 - 此时图停在 `wait_user_answer` 的 `interrupt()`，执行现场保存在 checkpoint（`run_id` 即 `thread_id`）
 - `question_id` 从 1 连续递增
 - 题型为前端控件类型 `radio`（单选）/ `checkbox`（多选）/ `textarea`（简答）

@@ -25,11 +25,14 @@ class LearningWorkflowStartIn(BaseModel):
 
     session_id: int = Field(..., ge=1, description="所属会话 ID")
     request_text: RequestText = Field(..., description="测评需求（学什么、测什么）")
-    question_count: int = Field(
-        DEFAULT_QUESTION_COUNT,
+    question_count: int | None = Field(
+        None,
         ge=1,
         le=MAX_QUESTION_COUNT,
-        description=f"题目数量，1..{MAX_QUESTION_COUNT}",
+        description=(
+            f"题目数量，1..{MAX_QUESTION_COUNT}；缺省时从 request_text 提取"
+            f"（如「出 3 道题」），仍无则 {DEFAULT_QUESTION_COUNT}"
+        ),
     )
     provider: ProviderName | None = Field(
         None, description="模型服务商标识（仅记录，缺省取全局 LLM_PROVIDER）"

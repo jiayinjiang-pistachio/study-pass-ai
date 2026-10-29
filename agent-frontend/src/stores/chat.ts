@@ -1,7 +1,10 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import type { ChatMessage } from '@/types/chat'
+import type { QuizAnswer } from '@/types/quiz'
 import * as conversationApi from '@/api/conversation'
+import { submitLearningQuiz } from '@/api/learningWorkflow'
+import { buildEvaluationText, quizRunId } from '@/utils/quiz'
 
 const PAGE_SIZE = 20
 
@@ -38,6 +41,16 @@ function mergeById(
   const merged = new Map<number, ChatMessage>()
   // 同 ID 以本地为准：正在流式生成的消息正文比服务端快照新
   for (const item of [...incoming, ...current]) merged.set(item.id, item)
+  return [...merged.values()]
+}
+
+function mergeServerWins(
+  current: ChatMessage[],
+  incoming: ChatMessage[],
+): ChatMessage[] {
+  const merged = new Map<number, ChatMessage>()
+  // 服务端快照是落库后的最终结果（测评题目 / 评分），同 ID 覆盖本地副本
+  for (const item of [...current, ...incoming]) merged.set(item.id, item)
   return [...merged.values()]
 }
 
@@ -103,6 +116,29 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /**
+   * 用服务端最新一页覆盖本地同 ID 消息（服务端优先）。
+   *
+   * 用于工作流启动 / 评分后的对账：临时行（负数 ID）由落库消息替代，
+   * 已加载的更早页保持不动，避免重复插入。
+   */
+  async function refresh(sessionId: number): Promise<void> {
+    const state = stateOf(sessionId)
+    const first = await conversationApi.fetchMessages(sessionId, 1, PAGE_SIZE)
+    const lastPage = Math.max(1, Math.ceil(first.total / PAGE_SIZE))
+    const latest =
+      lastPage === 1
+        ? first
+        : await conversationApi.fetchMessages(sessionId, lastPage, PAGE_SIZE)
+
+    const local = state.items.filter((item) => item.id > 0)
+    state.items = sortMessages(mergeServerWins(local, latest.items))
+    // 已加载更早页时保持页码不动，避免 loadOlder 跳过中间页
+    if (!state.initialized) state.page = latest.page
+    state.total = first.total
+    state.initialized = true
+  }
+
   function clear(sessionId: number): void {
     delete states.value[sessionId]
   }
@@ -118,12 +154,17 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 发送一条消息并流式接收 AI 回复。
+   * 发送一条消息：统一走总控接口。
    *
-   * 本地先插入一条「生成中」消息，收到 meta 后替换为服务端真实 ID，
-   * delta 持续追加正文；失败时标记 status=2 并把错误抛给调用方提示。
+   * 本地先插入一条「生成中」消息；聊天分支由 meta/delta/done 增量更新，
+   * 工作流分支由 JSON 响应触发会话刷新，用落库消息替换临时行。
+   * 失败时标记 status=2 并把错误抛给调用方提示。
    */
-  async function sendMessage(sessionId: number, text: string): Promise<void> {
+  async function sendMessage(
+    sessionId: number,
+    text: string,
+    agentName: string,
+  ): Promise<void> {
     const content = text.trim()
     if (!content || sendingBySession.value[sessionId]) return
 
@@ -131,12 +172,14 @@ export const useChatStore = defineStore('chat', () => {
     const createdAt = Date.now()
     state.items.push({
       id: -createdAt,
+      requestId: null,
       requestText: content,
       responseText: '',
       requestSegments: [],
       responseSegments: [],
       sources: [],
       status: 0,
+      responsePayload: null,
       interviewId: null,
       createdAt,
     })
@@ -147,11 +190,12 @@ export const useChatStore = defineStore('chat', () => {
     sendingBySession.value[sessionId] = true
     let received = ''
     try {
-      await conversationApi.streamChat(
+      const result = await conversationApi.startAgentTask(
         sessionId,
-        { request_text: content },
+        { text: content, agentName },
         {
           onMeta: (meta) => {
+            if (meta.requestId) item.requestId = meta.requestId
             if (meta.messageId <= 0) return
             // 首屏加载可能已拉到同一条消息，移除服务端副本，保留正在流式的本地副本
             const duplicate = state.items.find(
@@ -171,6 +215,17 @@ export const useChatStore = defineStore('chat', () => {
         },
       )
       item.status = 1
+
+      if (result.kind === 'workflow') {
+        try {
+          await refresh(sessionId)
+        } catch {
+          // 刷新失败保留临时行：测评入口仍可用，下次刷新 / 重进会话自动对账
+          item.requestId = `${result.data.runId}:quiz`
+          item.responsePayload = result.data.quiz
+          item.responseText = '已完成出题，请完成后提交答案。'
+        }
+      }
     } catch (error) {
       item.status = 2
       throw error
@@ -179,14 +234,47 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /**
+   * 提交测评作答。
+   *
+   * 先本地更新目标消息（入口立即消失），再刷新用后端点评文本覆盖；
+   * 刷新失败保留本地兜底点评，不向用户抛错。
+   */
+  async function submitQuiz(
+    sessionId: number,
+    requestId: string,
+    answers: QuizAnswer[],
+  ): Promise<void> {
+    const runId = quizRunId(requestId)
+    if (!runId) throw new Error('测评标识无效，请刷新会话后重试')
+
+    const result = await submitLearningQuiz(runId, answers)
+
+    const state = stateOf(sessionId)
+    const target = state.items.find((item) => item.requestId === requestId)
+    if (target) {
+      target.responseText = buildEvaluationText(result)
+      target.responsePayload = null
+      target.status = 1
+    }
+
+    try {
+      await refresh(sessionId)
+    } catch {
+      // 刷新失败保留本地结果
+    }
+  }
+
   return {
     states,
     stateOf,
     loadLatest,
     loadOlder,
+    refresh,
     clear,
     reset,
     isSending,
     sendMessage,
+    submitQuiz,
   }
 })

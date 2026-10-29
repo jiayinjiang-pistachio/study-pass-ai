@@ -27,6 +27,17 @@ logger = logging.getLogger(__name__)
 
 QUIZ_AGENT_NAME = "quiz_generate_workflow"
 
+# 已登记但暂未接入工作流的智能体：合法，直接走通用聊天（仍用统一聊天提示词）。
+# 不在此集合且没有工作流规则的 agent_name 仍然 404，避免前端拼错被静默降级。
+CHAT_AGENT_NAMES = frozenset(
+    {
+        "difficulty_learner",
+        "note_archiver",
+        "interview_host",
+        "interview_evaluator",
+    }
+)
+
 
 @dataclass(frozen=True)
 class WorkflowRouteRule:
@@ -56,6 +67,7 @@ WORKFLOW_ROUTE_RULES: dict[str, WorkflowRouteRule] = {
             "测评",
             "小测",
             "面试题",
+            "考考",
         ),
         intent_examples=(
             "帮我出几道练习题",
@@ -64,7 +76,9 @@ WORKFLOW_ROUTE_RULES: dict[str, WorkflowRouteRule] = {
             "测测我对这个知识点的掌握程度",
             "来几道面试题",
         ),
-        intent_threshold=0.6,
+        # 0.6 会把「你好，简单介绍一下你自己」这类问候判成出题（实测 0.61），
+        # 真实出题改写句普遍 ≥ 0.68，故取 0.65 留出余量；短句「考考我…」走关键词。
+        intent_threshold=0.65,
     ),
 }
 
@@ -78,6 +92,8 @@ class OrchestratorService:
         """返回命中的规则；None 表示走通用聊天。未知 agent_name 抛 404。"""
         rule = WORKFLOW_ROUTE_RULES.get(agent_name)
         if rule is None:
+            if agent_name in CHAT_AGENT_NAMES:
+                return None
             raise BusinessException(
                 "智能体不存在",
                 http_status=status.HTTP_404_NOT_FOUND,

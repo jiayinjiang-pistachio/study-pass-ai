@@ -34,11 +34,14 @@ class AgentTaskStartIn(BaseModel):
         le=5,
         description="聊天子模式；工作流分支忽略，聊天分支透传",
     )
-    question_count: int = Field(
-        DEFAULT_QUESTION_COUNT,
+    question_count: int | None = Field(
+        None,
         ge=1,
         le=MAX_QUESTION_COUNT,
-        description=f"题目数量，1..{MAX_QUESTION_COUNT}；仅工作流分支使用",
+        description=(
+            f"题目数量，1..{MAX_QUESTION_COUNT}；仅工作流分支使用。"
+            f"缺省时从 request_text 提取，仍无则 {DEFAULT_QUESTION_COUNT}"
+        ),
     )
     provider: ProviderName | None = Field(
         None, description="模型服务商标识；仅工作流分支使用"

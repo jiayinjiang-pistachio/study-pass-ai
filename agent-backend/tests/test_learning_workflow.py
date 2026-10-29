@@ -8,6 +8,7 @@ checkpoint 失效、越权隔离与失败落库。
 import json
 
 import httpx
+import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 from sqlalchemy import select
@@ -172,6 +173,50 @@ async def test_start_generates_quiz_and_persists(
     assert message["response_payload"] == data["quiz"]
     assert message["select_mode"] == learning_workflow.QUIZ_MESSAGE_SELECT_MODE
     assert message["status"] == 1
+
+
+@pytest.mark.parametrize(
+    ("request_text", "expected"),
+    [
+        ("帮我出 3 道 Python 基础题", 3),
+        ("来两道 Python 题", 2),
+        ("出十道题", 10),
+        ("出 12 道题", 12),
+        ("出几道题", None),
+        ("你好，介绍一下你自己", None),
+        ("出 30 道题", 20),
+    ],
+)
+def test_infer_question_count(request_text: str, expected: int | None) -> None:
+    """从口语化需求中提取题量；未提及 / 非数量词返回 None，超上限收敛到 20。"""
+    assert learning_workflow.infer_question_count(request_text) == expected
+
+
+async def test_start_infers_question_count_from_request_text(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """未传 question_count 时按原话提取，避免「出 3 道」被默认成 5 道。"""
+    session = _new_session(auth_user["id"])
+    _patch_model(monkeypatch, QUIZ_JSON)
+
+    resp = await client.post(
+        "/api/learning-workflows/start",
+        headers=auth_headers,
+        json={
+            "session_id": session["id"],
+            "request_text": "帮我出 3 道 Python 基础题",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert len(data["quiz"]) == 3
+    row = workflow_run_repo.get_for_user(data["run_id"], auth_user["id"])
+    assert row is not None
+    assert row["state_json"]["question_count"] == 3
 
 
 async def test_start_rejects_foreign_session(
@@ -569,6 +614,7 @@ async def test_messages_history_returns_payload(
     items = resp.json()["data"]["items"]
     assert len(items) == 1
     assert items[0]["request_text"] == "测一下 Python 基础"
+    assert items[0]["request_id"] == f"{started['run_id']}:quiz"
     assert items[0]["response_text"] == learning_workflow.QUIZ_MESSAGE_TEXT
     assert items[0]["response_payload"] == started["quiz"]
 
@@ -590,5 +636,6 @@ async def test_messages_history_returns_payload(
     )
     items = resp.json()["data"]["items"]
     assert len(items) == 1
+    assert items[0]["request_id"] == f"{started['run_id']}:quiz"
     assert items[0]["response_text"] == EVAL_DISPLAY_TEXT
     assert items[0]["response_payload"] is None

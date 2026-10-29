@@ -243,6 +243,8 @@ async def test_list_messages_fields_and_pagination(
 
     first = data["items"][0]
     assert first["request_text"] == "第一问"
+    # request_id 供前端识别测评消息，普通聊天原样透传
+    assert first["request_id"] == f"req-{auth_user['id']}-{session['id']}-第一问"
     assert first["response_text"] == "第一答"
     assert first["request_segments"] == [segment]
     assert first["response_segments"] == []

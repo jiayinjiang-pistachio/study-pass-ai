@@ -159,7 +159,7 @@ flowchart TD
     D -- 是 --> G["取缓存"]
     E --> G
     G --> H["逐一算余弦相似度，取最大值"]
-    H --> I{">= intent_threshold（默认 0.6）"}
+    H --> I{">= intent_threshold（出题规则 0.65）"}
     I -- 是 --> J["True：走工作流"]
     I -- 否 --> F
     C -. 模型异常 .-> K["WARNING 日志 → False"]
@@ -176,11 +176,11 @@ flowchart TD
 
 | 参数 | 值 | 位置 |
 | --- | --- | --- |
-| 关键词 | 出题 / 刷题 / 题目 / 试题 / 练习题 / 练习 / 测验 / 测评 / 小测 / 面试题 | `WORKFLOW_ROUTE_RULES` |
-| 语义阈值 | 0.6 | `WorkflowRouteRule.intent_threshold` |
+| 关键词 | 出题 / 刷题 / 题目 / 试题 / 练习题 / 练习 / 测验 / 测评 / 小测 / 面试题 / 考考 | `WORKFLOW_ROUTE_RULES` |
+| 语义阈值 | 0.65（字段默认 0.6，出题规则显式覆盖） | `WorkflowRouteRule.intent_threshold` |
 | 语义最短长度 | 2 字 | `semantic_intent.INTENT_MIN_CHARS` |
 | 向量模型 | `BAAI/bge-small-zh-v1.5` | `embedding.EMBED_MODEL` |
-| 默认题量 / 上限 | 5 / 20 | `schemas/learning_workflow.py` |
+| 题量 / 上限 | 未传时从需求提取（如「出 3 道题」），仍无则 5；上限 20 | `services/learning_workflow.py` `infer_question_count` |
 | 预热线程 | 守护线程，失败只告警 | `main.py` `lifespan` |
 
 ---

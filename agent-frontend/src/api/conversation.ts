@@ -8,6 +8,8 @@ import type {
 } from '@/types/chat'
 import type { ChatModule, Conversation } from '@/types/conversation'
 import { MODULE_ICONS, ModuleKey, SESSION_MODE_BY_MODULE } from '@/types/conversation'
+import type { QuizQuestion } from '@/types/quiz'
+import { normalizeQuizPayload } from '@/utils/quiz'
 import { readSse } from '@/utils/sse'
 import { getAccessToken } from '@/utils/token'
 
@@ -29,10 +31,12 @@ interface RawPage<T> {
 
 interface RawMessage {
   id?: number
+  request_id?: string | null
   request_text?: string | null
   response_text?: string | null
   request_segments?: unknown
   response_segments?: unknown
+  response_payload?: unknown
   sources?: unknown
   status?: number | null
   interview_id?: number | string | null
@@ -129,14 +133,22 @@ function toSources(value: unknown): MessageSource[] {
 function toMessage(raw: RawMessage): ChatMessage {
   const status = raw.status === 0 || raw.status === 2 ? raw.status : 1
   const createdSeconds = toNumber(raw.created_at)
+  const requestId =
+    typeof raw.request_id === 'string' && raw.request_id.trim()
+      ? raw.request_id
+      : null
+  // 只有测评题目载荷会渲染答题入口；普通聊天 / 评分后归一为空
+  const quiz = normalizeQuizPayload(raw.response_payload)
   return {
     id: toNumber(raw.id),
+    requestId,
     requestText: raw.request_text ?? '',
     responseText: raw.response_text ?? '',
     requestSegments: toSegments(raw.request_segments),
     responseSegments: toSegments(raw.response_segments),
     sources: toSources(raw.sources),
     status,
+    responsePayload: quiz.length ? quiz : null,
     interviewId: toNumber(raw.interview_id) || null,
     createdAt: createdSeconds > 0 ? createdSeconds * 1000 : Date.now(),
   }
@@ -274,23 +286,11 @@ async function toStreamError(response: Response): Promise<ApiError> {
   return new ApiError(message, response.status)
 }
 
-/**
- * 发起流式对话：POST /sessions/{id}/stream-chat。
- *
- * EventSource 不支持 POST + Authorization，因此用 fetch 读取 SSE 响应体。
- * 正常流程为 meta → delta* → done；服务端 error 事件或连接中断会抛 ApiError。
- */
-export async function streamChat(
-  sessionId: number,
-  payload: StreamChatPayload,
-  handlers: StreamChatHandlers = {},
+/** 消费 SSE 响应体：meta → delta* → done，服务端 error 或连接中断抛 ApiError */
+async function consumeChatStream(
+  response: Response,
+  handlers: StreamChatHandlers,
 ): Promise<void> {
-  const response = await postStream(
-    `${API_PREFIX}/sessions/${sessionId}/stream-chat`,
-    payload,
-  )
-  if (!response.ok) throw await toStreamError(response)
-
   let errorMessage = ''
   let finished = false
 
@@ -330,4 +330,89 @@ export async function streamChat(
 
   if (errorMessage) throw new ApiError(errorMessage, 502)
   if (!finished) throw new ApiError('连接中断，请稍后重试', -1)
+}
+
+/**
+ * 发起流式对话：POST /sessions/{id}/stream-chat。
+ *
+ * @deprecated 聊天已统一走总控接口 startAgentTask；保留此函数便于回滚。
+ */
+export async function streamChat(
+  sessionId: number,
+  payload: StreamChatPayload,
+  handlers: StreamChatHandlers = {},
+): Promise<void> {
+  const response = await postStream(
+    `${API_PREFIX}/sessions/${sessionId}/stream-chat`,
+    payload,
+  )
+  if (!response.ok) throw await toStreamError(response)
+  await consumeChatStream(response, handlers)
+}
+
+export interface AgentTaskInput {
+  text: string
+  agentName: string
+}
+
+export interface AgentWorkflowData {
+  runId: string
+  status: string
+  quiz: QuizQuestion[]
+}
+
+/** 总控响应：SSE 表示通用聊天，JSON 表示已启动工作流 */
+export type AgentTaskResult =
+  | { kind: 'chat' }
+  | { kind: 'workflow'; data: AgentWorkflowData }
+
+/** 解析工作流分支的统一信封，出参做防御性校验 */
+function toWorkflowResult(payload: unknown): AgentTaskResult {
+  if (!isRecord(payload) || payload.code !== 200 || !isRecord(payload.data)) {
+    throw new ApiError('工作流响应格式异常', 502)
+  }
+  const data = payload.data
+  if (data.route !== 'workflow') {
+    throw new ApiError('工作流响应格式异常', 502)
+  }
+  const runId = typeof data.run_id === 'string' ? data.run_id : ''
+  if (!runId) throw new ApiError('工作流响应缺少 run_id', 502)
+
+  return {
+    kind: 'workflow',
+    data: {
+      runId,
+      status: typeof data.status === 'string' ? data.status : '',
+      quiz: normalizeQuizPayload(data.quiz),
+    },
+  }
+}
+
+/**
+ * 智能体任务总控：POST /agent/tasks/start。
+ *
+ * content-type 为 text/event-stream 时按聊天消费（事件与旧接口一致）；
+ * 为 JSON 时表示工作流已启动，返回 run_id 与题目，由调用方刷新会话。
+ */
+export async function startAgentTask(
+  sessionId: number,
+  input: AgentTaskInput,
+  handlers: StreamChatHandlers = {},
+): Promise<AgentTaskResult> {
+  const response = await postStream(`${API_PREFIX}/agent/tasks/start`, {
+    agent_name: input.agentName,
+    session_id: sessionId,
+    request_text: input.text,
+  })
+  if (!response.ok) throw await toStreamError(response)
+
+  const contentType = response.headers.get('content-type') ?? ''
+  if (contentType.includes('text/event-stream')) {
+    await consumeChatStream(response, handlers)
+    return { kind: 'chat' }
+  }
+  if (!contentType.includes('application/json')) {
+    throw new ApiError('服务响应格式异常，请稍后重试', 502)
+  }
+  return toWorkflowResult(await response.json())
 }

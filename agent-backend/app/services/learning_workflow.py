@@ -14,6 +14,7 @@ checkpoint 保存执行现场，state_json 只保存业务快照。MemorySaver �
 """
 
 import logging
+import re
 import time
 import uuid
 
@@ -38,7 +39,11 @@ from ..agent.workflows.learning_quiz import (
 from ..core.config import LLM_PROVIDER
 from ..core.exceptions import BusinessException, SystemException
 from ..db import message_repo, session_repo, workflow_run_repo
-from ..schemas.learning_workflow import LearningWorkflowSubmitIn
+from ..schemas.learning_workflow import (
+    DEFAULT_QUESTION_COUNT,
+    MAX_QUESTION_COUNT,
+    LearningWorkflowSubmitIn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,28 @@ ERROR_MESSAGE_MAX_CHARS = 2000
 QUIZ_MESSAGE_TEXT = "已完成出题，请完成后提交答案。"
 QUIZ_MESSAGE_SELECT_MODE = 2  # 2=刷题
 
+_CN_DIGITS = {
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+# 「3 道 Python 基础题」里题量与「题」不相邻，因此按「数词 + 道」与「数词 + 题」两种量词分别匹配
+_ARABIC_COUNT_PATTERNS = (
+    re.compile(r"(?<!第)(?<!\d)(\d{1,2})\s*道"),
+    re.compile(r"(?<!第)(?<!\d)(\d{1,2})\s*(?:个|小)?题"),
+)
+_CHINESE_COUNT_PATTERNS = (
+    re.compile(r"(?<!第)([一二两三四五六七八九十]{1,3})\s*道"),
+    re.compile(r"(?<!第)([一二两三四五六七八九十]{1,3})\s*(?:个|小)?题"),
+)
+
 __all__ = [
     "STATUS_COMPLETED",
     "STATUS_CREATED",
@@ -56,9 +83,42 @@ __all__ = [
     "STATUS_WAITING_ANSWER",
     "WORKFLOW_TYPE_LEARNING_QUIZ",
     "get_learning_workflow",
+    "infer_question_count",
     "start_learning_workflow",
     "submit_learning_workflow",
 ]
+
+
+def _parse_chinese_number(text: str) -> int | None:
+    """解析「三 / 十二 / 二十」这类 1..99 的中文数词；非法返回 None。"""
+    if "十" in text:
+        tens_text, _, ones_text = text.partition("十")
+        if tens_text and tens_text not in _CN_DIGITS:
+            return None
+        if ones_text and ones_text not in _CN_DIGITS:
+            return None
+        tens = _CN_DIGITS[tens_text] if tens_text else 1
+        ones = _CN_DIGITS[ones_text] if ones_text else 0
+        return tens * 10 + ones
+    if len(text) == 1:
+        return _CN_DIGITS.get(text)
+    return None
+
+
+def infer_question_count(request_text: str) -> int | None:
+    """从「出 3 道题 / 来三道题」提取题量；未提及或超过上限返回 None。"""
+    for patterns, parser in (
+        (_ARABIC_COUNT_PATTERNS, int),
+        (_CHINESE_COUNT_PATTERNS, _parse_chinese_number),
+    ):
+        for pattern in patterns:
+            match = pattern.search(request_text)
+            if match is None:
+                continue
+            count = parser(match.group(1))
+            if count is not None and count >= 1:
+                return min(count, MAX_QUESTION_COUNT)
+    return None
 
 
 def _delete_thread(run_id: str) -> None:
@@ -117,13 +177,19 @@ def start_learning_workflow(user_id: int, payload) -> dict:
 
     run_id = str(uuid.uuid4())
     config = build_thread_config(run_id)
+    # 显式题量优先；未传时按用户原话提取（「出 3 道题」），再回退默认值
+    question_count = (
+        payload.question_count
+        or infer_question_count(payload.request_text)
+        or DEFAULT_QUESTION_COUNT
+    )
     state: LearningWorkflowState = {
         "run_id": run_id,
         "user_id": user_id,
         "session_id": payload.session_id,
         "request_text": payload.request_text,
         "provider": payload.provider or LLM_PROVIDER,
-        "question_count": payload.question_count,
+        "question_count": question_count,
         "quiz": [],
         "answers": [],
         "evaluation": [],

@@ -1,3 +1,5 @@
+import type { QuizQuestion } from '@/types/quiz'
+
 export const SegmentType = {
   File: 'file',
   Image: 'image',
@@ -26,6 +28,8 @@ export interface MessageSource {
 
 export interface ChatMessage {
   id: number
+  /** 后端 request_id：测评题目为 "{run_id}:quiz"，普通聊天可为 null */
+  requestId: string | null
   requestText: string
   responseText: string
   requestSegments: MessageSegment[]
@@ -34,6 +38,8 @@ export interface ChatMessage {
   sources: MessageSource[]
   /** 0=生成中，1=完成，2=失败 */
   status: 0 | 1 | 2
+  /** 测评题目数组（后端已归一化）；非测评消息或评分后为 null */
+  responsePayload: QuizQuestion[] | null
   interviewId: number | null
   /** 创建时间（毫秒） */
   createdAt: number

@@ -5,8 +5,11 @@ import { ElMessage } from 'element-plus'
 import type { UploadFile, UploadInstance } from 'element-plus'
 import { DocCategory, uploadFile } from '@/api/file'
 import { useCurrentChatModule } from '@/composables/useCurrentModule'
+import { useAgentStore } from '@/stores/agent'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
+import { AGENTS_BY_MODULE } from '@/types/agent'
+import type { AgentName } from '@/types/agent'
 
 const MAX_HEIGHT = 120
 const MAX_DOC_SIZE = 10 * 1024 * 1024
@@ -19,6 +22,7 @@ const DOC_CATEGORY_OPTIONS: Array<{ label: string; value: DocCategory }> = [
 
 const chatStore = useChatStore()
 const conversationStore = useConversationStore()
+const agentStore = useAgentStore()
 const module = useCurrentChatModule()
 
 const draft = ref('')
@@ -35,6 +39,12 @@ const sessionId = computed(() =>
 )
 const sending = computed(
   () => sessionId.value !== null && chatStore.isSending(sessionId.value),
+)
+const agentOptions = computed(() =>
+  module.value ? AGENTS_BY_MODULE[module.value] : [],
+)
+const selectedAgent = computed(() =>
+  module.value ? agentStore.selectedByModule[module.value] : null,
 )
 const canSend = computed(
   () => draft.value.trim().length > 0 && !sending.value,
@@ -113,10 +123,16 @@ async function handleSubmit(): Promise<void> {
   }
 }
 
+function handleToggleAgent(name: AgentName): void {
+  if (!module.value) return
+  agentStore.toggle(module.value, name)
+}
+
 async function handleSend(): Promise<void> {
   if (!canSend.value || !module.value) return
 
-  const id = conversationStore.activeByModule[module.value]
+  const currentModule = module.value
+  const id = conversationStore.activeByModule[currentModule]
   if (id === null) {
     ElMessage.warning('请先在左侧新建会话')
     return
@@ -127,7 +143,7 @@ async function handleSend(): Promise<void> {
   resize()
 
   try {
-    await chatStore.sendMessage(id, text)
+    await chatStore.sendMessage(id, text, agentStore.effective(currentModule))
   } catch (error) {
     ElMessage.error(
       error instanceof Error ? error.message : '发送失败，请稍后重试',
@@ -144,10 +160,25 @@ async function handleSend(): Promise<void> {
         v-model="draft"
         class="chat-input__field"
         rows="1"
-        :placeholder="sending ? 'AI 正在回复…' : '输入你的回答...'"
+        :placeholder="sending ? '正在处理，请稍候…' : '输入你的回答...'"
         @input="resize"
         @keydown.enter.exact.prevent="handleSend"
       ></textarea>
+
+      <div v-if="agentOptions.length" class="chat-input__agents">
+        <button
+          v-for="option in agentOptions"
+          :key="option.name"
+          type="button"
+          class="chat-input__agent"
+          :class="{ 'is-active': selectedAgent === option.name }"
+          :aria-pressed="selectedAgent === option.name"
+          :disabled="sending"
+          @click="handleToggleAgent(option.name)"
+        >
+          {{ option.label }}
+        </button>
+      </div>
 
       <div class="chat-input__actions">
         <el-icon class="chat-input__attach" title="上传附件" @click="handleAttach">
@@ -267,6 +298,44 @@ async function handleSend(): Promise<void> {
 
     &::placeholder {
       color: var(--color-text-muted);
+    }
+  }
+
+  &__agents {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  &__agent {
+    padding: 4px 12px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-pill);
+    background: var(--color-surface);
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    transition:
+      color 0.2s,
+      border-color 0.2s,
+      background-color 0.2s;
+
+    &:hover:not(:disabled) {
+      border-color: var(--color-brand);
+      color: var(--color-text);
+    }
+
+    &.is-active {
+      border-color: var(--color-brand);
+      background: var(--color-brand-soft);
+      color: var(--color-text);
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
     }
   }
 

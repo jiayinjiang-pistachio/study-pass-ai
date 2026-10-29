@@ -74,6 +74,13 @@ button {
 
   /* Element Plus 主题对齐品牌色 */
   --el-color-primary: #{$color-brand};
+  /* 只覆盖 primary 本体时 hover / active / disabled 仍取默认蓝色派生色，需一并覆盖 */
+  --el-color-primary-light-3: #{mix(#fff, $color-brand, 30%)};
+  --el-color-primary-light-5: #{mix(#fff, $color-brand, 50%)};
+  --el-color-primary-light-7: #{mix(#fff, $color-brand, 70%)};
+  --el-color-primary-light-8: #{mix(#fff, $color-brand, 80%)};
+  --el-color-primary-light-9: #{mix(#fff, $color-brand, 90%)};
+  --el-color-primary-dark-2: #{mix(#000, $color-brand, 20%)};
   --el-border-radius-base: #{$radius-control};
   --el-font-family: inherit;
 }
