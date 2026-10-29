@@ -35,7 +35,7 @@
 | 日志 | Loguru `0.7.x` | 开发控制台 + 文件，生产只落文件；按大小滚动（10MB × 5），入口 `app/core/logging.py` |
 | AI 编排 | LangChain `langchain-core 1.7` + `langchain-openai 1.7` | OpenAI 兼容协议；模型 / 提示词封装在 `app/services/ai/`，记忆读取在 `app/services/memory_service.py`，长期记忆在 `app/services/long_term_memory.py` |
 | 工作流编排 | LangGraph `1.2.x` | 学习测评等跨请求状态机，完整状态落 `workflow_runs.state_json`；入口 `app/services/learning_workflow.py` |
-| 语义判断 | fastembed `0.9.x` | 长期记忆写入意图判断（`BAAI/bge-small-zh-v1.5`，首次使用时下载模型并缓存）；入口 `app/services/long_term_memory.py` |
+| 语义判断 | fastembed `0.9.x` | 长期记忆写入意图 + 流程总控语义兜底（`BAAI/bge-small-zh-v1.5`，首次使用时下载模型并缓存）；模型共享于 `app/services/embedding.py`，分类入口 `app/services/semantic_intent.py` |
 | 语言 | Python `3.13` | 使用 `X | None` 现代联合类型写法 |
 | 包管理 | **venv + pip** | 运行期依赖以 `requirements.txt` 为准；测试依赖另见 `requirements-dev.txt` |
 
@@ -85,6 +85,7 @@ agent-backend/
 │   │   ├── session.py       #   会话管理 + 会话内聊天消息（整组需登录）
 │   │   ├── interview.py     #   面试详情（按 interview_id + user_id）
 │   │   ├── learning_workflow.py # 学习测评工作流：发起 / 提交 / 详情（整组需登录）
+│   │   ├── orchestrator.py  #   流程总控：工作流 / 通用聊天统一入口（整组需登录）
 │   │   ├── file.py          #   通用文件上传 / 头像读取（上传需登录，头像公开）
 │   │   ├── profile.py       #   用户背景资料 CRUD（仅当前用户，整组需登录）
 │   │   ├── prompt.py        #   提示词版本管理（读取 / 回滚 / 智能体配置）
@@ -97,6 +98,7 @@ agent-backend/
 │   │   ├── chat.py          #   流式对话入参（StreamChatIn / SegmentIn）
 │   │   ├── interview.py     #   面试详情出参（InterviewOut，含 qa_object）
 │   │   ├── learning_workflow.py # 测评入参 / 出参（Start / Submit / Detail）
+│   │   ├── orchestrator.py  #   总控入参 / 工作流分支出参
 │   │   ├── profile.py       #   背景资料入参 / 出参（ProfileCreate / ProfileUpdate / ProfileOut）
 │   │   ├── prompt.py        #   提示词出参（PromptTemplateOut / ActivePromptOut / AgentConfigOut）
 │   │   ├── file.py          #   文件上传出参（FileOut：url / md5 / size / kind / resource_id 等）
@@ -116,6 +118,9 @@ agent-backend/
 │   │   ├── prompt_injection_service.py # 提示词变量注入：验证（清洗 / 限长）→ 转换（格式化 / 默认值）→ 填充（占位符替换）
 │   │   ├── interview_service.py # 面试详情查询（interview_id + user_id 防越权）
 │   │   ├── learning_workflow.py # 学习测评：LangGraph 出题 / 评测图 + 状态持久化
+│   │   ├── orchestrator_service.py # 流程总控：规则表 + 关键词 / 语义路由 + 入参映射
+│   │   ├── semantic_intent.py # 语义意图判断：示例向量 + 余弦阈值 + 失败降级
+│   │   ├── embedding.py     #   本地向量模型共享实例（长期记忆 / 语义意图）
 │   │   ├── file_type.py     #   上传文件类型识别（文件头 / 扩展名）与大小上限
 │   │   ├── upload_service.py#   旧本地磁盘上传逻辑（教学保留，运行时不使用）
 │   │   ├── upload_service_minio.py # 运行逻辑：MinIO 落对象 + resources 元数据 + 用户级去重
@@ -163,6 +168,8 @@ agent-backend/
 │   ├── test_long_term_chat.py #   流式对话接入长期记忆：跳过 RAG / 必填缺失触发抽取
 │   ├── test_working_memory.py #   Redis 工作记忆读写 / 摘要 / 降级
 │   ├── test_learning_workflow.py # 学习测评：出题 / 评分 / 作答校验 / 越权隔离
+│   ├── test_orchestrator.py #   流程总控：路由策略 / 混合响应 / 越权隔离
+│   ├── test_semantic_intent.py # 语义意图：阈值 / 多示例 / 缓存 / 失败降级
 │   └── test_resources.py    #   过期资源清理用例
 ├── alembic.ini              # Alembic 配置（连接串留空，由 env.py 注入）
 ├── pytest.ini               # pytest 配置（asyncio_mode=auto、pythonpath=.）
@@ -279,6 +286,7 @@ agent-backend/
   | 发起学习测评 | `POST /api/learning-workflows/start` | `200` |
   | 提交测评作答 | `POST /api/learning-workflows/{run_id}/submit` | `200` |
   | 测评运行详情 | `GET /api/learning-workflows/{run_id}` | `200` |
+  | 智能体任务总控 | `POST /api/agent/tasks/start` | `200` |
   | 创建背景资料 | `POST /api/profiles` | `200` |
   | 查询背景资料 | `GET /api/profiles/me` | `200` |
   | 更新背景资料 | `PUT /api/profiles/me` | `200` |
@@ -322,6 +330,15 @@ agent-backend/
   - 作答校验：必须覆盖全部题目、不允许重复 / 未知题目 / 非法选项 / 空作答，违规返回 `422`；仅 `quiz_ready` 可提交，已完成重复提交返回 `409`。模型失败时运行记录置 `failed` 并写 `error_message`，配置缺失返回 `503`、模型 / 解析失败返回 `502`。
   - 模型输出的 JSON 由 `app/services/ai/json_utils.py` 的 `parse_json_object()` 统一解析（截取首个 `{` 到末个 `}`），提示词中的 JSON 示例必须作为静态 `SystemMessage` 传入。
   - Swagger 联调步骤、反向用例与落库核对见 [`docs/learning-workflow-api-guide.md`](docs/learning-workflow-api-guide.md)。
+- **流程总控约定**（`POST /api/agent/tasks/start`，需登录）：
+  - 前端统一入口：传 `agent_name` + `session_id` + `request_text`，由后端决定走工作流还是通用聊天。入参还包含 `select_mode` / `question_count` / `provider` / `request_id` / `request_segments`，按分支各取所需。
+  - 路由策略（`app/services/orchestrator_service.py`）：未登记的 `agent_name` → `404`；`required_keywords` 任一命中 → 直接启动工作流；否则用 fastembed 语义相似度对比规则的 `intent_examples`，最大相似度 `>= intent_threshold` 也启动；仍未命中 → 通用聊天。关键词为双字词，避免「问题 / 话题 / 标题」误命中。
+  - 当前规则 `quiz_generate_workflow -> learning_quiz`：命中后显式构造 `LearningWorkflowStartIn` 调用 `learning_workflow.start_learning_workflow()`，返回 `{route, agent_name, workflow_type, run_id, status, quiz}`。规则指向未实现的 `workflow_type` → `500`（配置错误）。
+  - **混合响应例外**：工作流分支返回统一 JSON 信封；聊天分支复用 `chat_service.prepare_stream()` + `stream_reply()`，返回 `text/event-stream`（事件与 `/stream-chat` 一致）。因此该路由**不设置 `response_class`**（否则 JSON 分支跳过 `response_model` 校验），`response_model` 只描述工作流分支，SSE 契约通过 `responses` 在 OpenAPI 中声明。
+  - 双契约限制：工作流分支忽略 `select_mode` / `request_segments`，`request_id` 暂未做幂等（重试会新建 `workflow_runs`）；聊天分支忽略 `question_count` / `provider`（聊天模型走全局配置）。
+  - 语义模型在 `main.py` 的 `lifespan` 中用守护线程预热，失败只告警、首次判断时重试，不阻塞启动；关键词命中时不会调用向量模型。
+  - 扩展方式：在 `WORKFLOW_ROUTE_RULES` 增加一条 `WorkflowRouteRule`（`workflow_type` / `required_keywords` / `intent_examples` / `intent_threshold`），并在 `start_task` 中补对应 `workflow_type` 分支。
+  - 路由决策、双分支时序、LangGraph 内部结构与语义兜底细节见 [`docs/orchestrator-workflow-design.md`](docs/orchestrator-workflow-design.md)。
 - **用户背景资料约定**（`/api/profiles`，整组需登录）：一人一份（`user_profiles.user_id` 唯一），`user_id` 一律取自令牌，不接受客户端传入，因此只能操作自己的资料。`POST /api/profiles` 创建（已存在 → `409`）；`GET/PUT/DELETE /api/profiles/me` 查询 / 局部更新 / 删除（不存在 → `404`）。字段：`target_job`（≤64）、`years_experience`（0..60）、`target_level`（≤32）、`target_skills` / `weak_topics`（字符串数组，≤20 项、单项 ≤50 字）。出参不含 `user_id`。资料供提示词变量注入使用，删除后注入回退为默认值。
 - **提示词版本管理约定**（`/api/prompt`，整组需登录）：
   - 数据表 `prompt_templates`：`agent_name`、`scene`、`template_type`（1=私有，2=公共）、`template_content`、`variables`（JSON 数组字符串）、`version`、`is_active`、`description`、`created_at`。

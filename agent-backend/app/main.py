@@ -6,6 +6,7 @@
 """
 
 import logging
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -21,11 +22,13 @@ from .routers import file as file_router
 from .routers import health as health_router
 from .routers import interview as interview_router
 from .routers import learning_workflow as learning_workflow_router
+from .routers import orchestrator as orchestrator_router
 from .routers import profile as profile_router
 from .routers import prompt as prompt_router
 from .routers import session as session_router
 from .routers import user as user_router
 from .services import prompt_template_service, resource_cleanup
+from .services.semantic_intent import SemanticIntentClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,15 @@ setup_logging()
 
 # 启动即校验 JWT 密钥已配置：缺失属于致命配置问题，宁可启动失败也不带病运行
 get_jwt_secret()
+
+
+def _warm_semantic_intent() -> None:
+    """后台预热语义意图模型：首次下载 / 加载较慢，不阻塞应用启动。"""
+    try:
+        SemanticIntentClassifier.get().warmup()
+    except Exception:
+        # 预热失败不阻断启动：首次路由判断时会重试
+        logger.warning("语义意图模型预热失败，首次路由时将重试", exc_info=True)
 
 
 @asynccontextmanager
@@ -53,6 +65,14 @@ async def lifespan(_: FastAPI):
         logger.warning("MinIO 初始化失败，上传接口暂不可用", exc_info=True)
 
     resource_cleanup.start_cleanup_thread()
+
+    # 语义意图模型只在关键词未命中时使用；放到守护线程预热，服务立即可用
+    threading.Thread(
+        target=_warm_semantic_intent,
+        name="semantic-intent-warmup",
+        daemon=True,
+    ).start()
+
     yield
     resource_cleanup.stop_cleanup_thread()
 
@@ -81,4 +101,5 @@ app.include_router(file_router.public_router)
 app.include_router(profile_router.router)
 app.include_router(prompt_router.router)
 app.include_router(learning_workflow_router.router)
+app.include_router(orchestrator_router.router)
 app.include_router(health_router.router)

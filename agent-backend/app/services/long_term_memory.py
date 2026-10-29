@@ -10,7 +10,6 @@
 
 import json
 import logging
-import math
 import re
 import threading
 from collections.abc import Sequence
@@ -20,13 +19,11 @@ from langchain_core.messages import SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
-from . import profile_service
+from . import embedding, profile_service
 from .ai.llm import get_chat_model
 
 logger = logging.getLogger(__name__)
 
-# 本地小模型：中文语义相似度，首次使用时由 fastembed 下载并缓存
-EMBED_MODEL = "BAAI/bge-small-zh-v1.5"
 # 与任一意图示例的余弦相似度达到该值即视为画像写入意图
 INTENT_THRESHOLD = 0.6
 # 过短的消息（「好的」「继续」）直接跳过，避免无意义模型调用
@@ -236,26 +233,18 @@ def _format_context(context: Context) -> str:
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    """纯 Python 余弦相似度，避免为一次比较引入额外数值依赖。"""
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(y * y for y in b))
-    if not norm_a or not norm_b:
-        return 0.0
-    return dot / (norm_a * norm_b)
+    """余弦相似度；实现放在 embedding 模块，与流程总控共用一份。"""
+    return embedding.cosine(a, b)
 
 
-@lru_cache(maxsize=1)
 def _get_embedder():
-    """懒加载 fastembed 模型：不在应用启动时下载 / 初始化。"""
-    from fastembed import TextEmbedding
-
-    return TextEmbedding(model_name=EMBED_MODEL)
+    """模型实例；与流程总控共用同一个 fastembed 实例，避免重复加载。"""
+    return embedding.get_embedder()
 
 
 def _embed_texts(texts: Sequence[str]) -> list[list[float]]:
-    """批量向量化；模型返回 numpy 数组，这里转成普通 list 便于比较。"""
-    return [list(map(float, vector)) for vector in _get_embedder().embed(list(texts))]
+    """批量向量化；实现放在 embedding 模块，保留本函数名作为测试接缝。"""
+    return embedding.embed_texts(texts)
 
 
 @lru_cache(maxsize=1)

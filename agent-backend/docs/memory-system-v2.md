@@ -154,7 +154,7 @@ sequenceDiagram
 
 | 参数 | 值 | 位置 |
 | --- | --- | --- |
-| 向量模型 | `BAAI/bge-small-zh-v1.5` | `long_term_memory.py` `EMBED_MODEL` |
+| 向量模型 | `BAAI/bge-small-zh-v1.5` | `app/services/embedding.py` `EMBED_MODEL`（长期记忆与流程总控共用） |
 | 意图相似度阈值 | 0.6 | `INTENT_THRESHOLD` |
 | 意图判断最短长度 | 4 字 | `INTENT_MIN_CHARS` |
 | 意图示例数量 | 12 条 | `PROFILE_INTENT_EXAMPLES` |
