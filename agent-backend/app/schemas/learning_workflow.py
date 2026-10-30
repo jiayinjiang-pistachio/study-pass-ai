@@ -89,9 +89,15 @@ class LearningWorkflowSubmitOut(BaseModel):
     evaluation: list[EvaluationItemOut] = Field(..., description="逐题评分与点评")
     weaknesses: list[str] = Field(..., description="薄弱点")
     review: str = Field(..., description="整体学习建议")
+    next_agent: str | None = Field(
+        default=None, description="校验通过的接力目标；None 表示流程结束"
+    )
 
 
 class LearningWorkflowDetailOut(BaseModel):
     run_id: str = Field(..., description="工作流运行 ID")
     status: str = Field(..., description="流程状态")
     state: dict[str, Any] = Field(..., description="完整工作流状态")
+    next_agent: str | None = Field(
+        default=None, description="校验通过的接力目标；None 表示流程结束"
+    )

@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 from sqlalchemy import select
 
+from app.agent.a2a import A2AEnvelope, decide_next_agent
 from app.agent.workflows import learning_quiz
 from app.agent.workflows.checkpoint import (
     build_thread_config,
@@ -329,6 +330,59 @@ async def test_submit_marks_failed_on_invalid_evaluation(
     assert "JSON" in (row["error_message"] or "")
 
 
+@pytest.mark.parametrize(
+    ("weaknesses", "next_agent", "confidence"),
+    [
+        (["数据库选型"], "difficulty_learner", 0.9),
+        ([], None, 0.4),
+    ],
+)
+def test_finalize_result_builds_a2a_envelope(
+    weaknesses: list[str], next_agent: str | None, confidence: float
+) -> None:
+    """有薄弱点才建议转难点学习；无薄弱点时置信度降低且流程结束。"""
+    result = learning_quiz.finalize_result(
+        {"score": 67, "weaknesses": weaknesses}
+    )
+
+    assert result["status"] == learning_workflow.STATUS_COMPLETED
+    assert result["a2a_envelope"] == {
+        "from_agent": "learning_evaluator",
+        "payload_type": "weak_points",
+        "payload": {"score": 67, "weaknesses": weaknesses},
+        "next_agent": next_agent,
+        "confidence": confidence,
+    }
+
+
+@pytest.mark.parametrize(
+    ("from_agent", "target", "confidence", "expected"),
+    [
+        ("learning_evaluator", "difficulty_learner", 0.9, "difficulty_learner"),
+        ("learning_evaluator", "note_archiver", 0.6, "note_archiver"),
+        ("learning_evaluator", "difficulty_learner", 0.59, None),
+        ("learning_evaluator", "interview_host", 0.9, None),
+        ("unknown_agent", "difficulty_learner", 0.9, None),
+        ("learning_evaluator", None, 0.9, None),
+    ],
+)
+def test_decide_next_agent_whitelist(
+    from_agent: str,
+    target: str | None,
+    confidence: float,
+    expected: str | None,
+) -> None:
+    """只有置信度达标且命中白名单的下一跳才放行，其余一律结束流程。"""
+    envelope = A2AEnvelope(
+        from_agent=from_agent,
+        payload_type="weak_points",
+        confidence=confidence,
+        next_agent=target,
+    )
+
+    assert decide_next_agent(envelope) == expected
+
+
 async def test_submit_scores_and_completes(
     client: httpx.AsyncClient,
     auth_user: dict,
@@ -358,12 +412,20 @@ async def test_submit_scores_and_completes(
     assert [item["question_id"] for item in data["evaluation"]] == [1, 2, 3]
     assert data["weaknesses"] == ["数据库选型", "索引原理"]
     assert data["review"] == "建议补充索引与存储选型知识。"
+    assert data["next_agent"] == "difficulty_learner"
 
     row = workflow_run_repo.get_for_user(started["run_id"], auth_user["id"])
     assert row["status"] == learning_workflow.STATUS_COMPLETED
     assert isinstance(row["completed_at"], int)
     assert row["state_json"]["answers"] == answers
     assert row["state_json"]["score"] == 67
+    assert row["state_json"]["next_agent"] == "difficulty_learner"
+    envelope = row["state_json"]["a2a_envelope"]
+    assert envelope["from_agent"] == "learning_evaluator"
+    assert envelope["payload_type"] == "weak_points"
+    assert envelope["next_agent"] == "difficulty_learner"
+    assert envelope["confidence"] == 0.9
+    assert envelope["payload"]["score"] == 67
 
     # 评分后复用出题那条消息：正文切换为点评，载荷清空，不新增消息
     message = message_repo.get_by_request_id(
@@ -496,6 +558,7 @@ async def test_get_returns_full_state(
     assert data["status"] == learning_workflow.STATUS_WAITING_ANSWER
     assert data["state"]["request_text"] == "测一下 Python 基础"
     assert data["state"]["quiz"] == started["quiz"]
+    assert data["next_agent"] is None
 
 
 async def test_start_uses_dynamic_prompt(

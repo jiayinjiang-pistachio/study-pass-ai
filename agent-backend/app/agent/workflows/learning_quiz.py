@@ -11,7 +11,7 @@
 import json
 import logging
 from functools import lru_cache
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from fastapi import status
 from langchain_core.messages import SystemMessage
@@ -80,6 +80,8 @@ class LearningWorkflowState(TypedDict, total=False):
     review: str
     display_text: str
     status: str
+    a2a_envelope: dict[str, Any]
+    next_agent: str | None
 
 
 # 数据库模板只有角色与出题 / 评分规则，JSON 结构由下面的静态契约补齐。
@@ -505,8 +507,22 @@ def evaluate_answer(state: LearningWorkflowState) -> dict:
 
 
 def finalize_result(state: LearningWorkflowState) -> dict:
-    """收尾节点：只标记完成，业务层据此落库与释放 checkpoint。"""
-    return {"status": STATUS_COMPLETED}
+    """收尾节点：标记完成，并产出 A2A 信封供后续智能体消费。"""
+    from app.agent.a2a import A2AEnvelope
+
+    weaknesses = state.get("weaknesses") or []
+    has_weakness = bool(weaknesses)
+    envelope = A2AEnvelope(
+        from_agent="learning_evaluator",
+        payload_type="weak_points",
+        payload={
+            "score": state.get("score", 0),
+            "weaknesses": weaknesses,
+        },
+        next_agent="difficulty_learner" if has_weakness else None,
+        confidence=0.9 if has_weakness else 0.4,
+    )
+    return {"status": STATUS_COMPLETED, "a2a_envelope": envelope.model_dump()}
 
 
 @lru_cache(maxsize=1)
