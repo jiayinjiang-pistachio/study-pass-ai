@@ -2,6 +2,8 @@ import { ApiError, handleAuthExpired, refreshAccessToken, request } from './requ
 import type { PageResult } from '@/types/api'
 import type {
   ChatMessage,
+  InterviewBackground,
+  InterviewPrepareData,
   MessageSegment,
   MessageSource,
   SegmentType,
@@ -365,6 +367,45 @@ export interface AgentWorkflowData {
 export type AgentTaskResult =
   | { kind: 'chat' }
   | { kind: 'workflow'; data: AgentWorkflowData }
+  | { kind: 'interview_prepare'; data: InterviewPrepareData }
+
+function toText(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+/** 面试背景：后端字段为 snake_case，统一归一为前端 camelCase */
+function toInterviewBackground(raw: unknown): InterviewBackground {
+  const source = isRecord(raw) ? raw : {}
+  return {
+    targetJob: toText(source.target_job),
+    targetLevel: toText(source.target_level),
+    yearsExperience: toText(source.years_experience),
+    targetSkills: toText(source.target_skills),
+    projectExperience: toText(source.project_experience),
+    weakTopics: toText(source.weak_topics),
+    openingQuestion: toText(source.opening_question),
+  }
+}
+
+/** 第一阶段面试准备：只返回待确认背景，由页面弹窗承接 */
+function toInterviewPrepare(
+  runId: string,
+  data: Record<string, unknown>,
+): AgentTaskResult {
+  if (data.status !== 'pending_confirmation') {
+    throw new ApiError('面试准备状态异常，请重新发起', 502)
+  }
+  const resume = isRecord(data.resume) ? data.resume : {}
+  return {
+    kind: 'interview_prepare',
+    data: {
+      runId,
+      sessionId: toNumber(data.session_id),
+      resumeFileName: toText(resume.file_name),
+      background: toInterviewBackground(data.background),
+    },
+  }
+}
 
 /** 解析工作流分支的统一信封，出参做防御性校验 */
 function toWorkflowResult(payload: unknown): AgentTaskResult {
@@ -377,6 +418,10 @@ function toWorkflowResult(payload: unknown): AgentTaskResult {
   }
   const runId = typeof data.run_id === 'string' ? data.run_id : ''
   if (!runId) throw new ApiError('工作流响应缺少 run_id', 502)
+
+  if (data.workflow_type === 'interview_prepare') {
+    return toInterviewPrepare(runId, data)
+  }
 
   return {
     kind: 'workflow',

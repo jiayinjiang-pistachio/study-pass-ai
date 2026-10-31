@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { Paperclip, Promotion, UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { UploadFile, UploadInstance } from 'element-plus'
+import type { AgentTaskResult } from '@/api/conversation'
 import { DocCategory, uploadFile } from '@/api/file'
 import { useCurrentChatModule } from '@/composables/useCurrentModule'
 import { useAgentStore } from '@/stores/agent'
@@ -10,6 +11,11 @@ import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
 import { AGENTS_BY_MODULE } from '@/types/agent'
 import type { AgentName } from '@/types/agent'
+
+const props = defineProps<{
+  /** 工作流 JSON 结果回调；返回 true 表示页面已接管，跳过默认会话刷新 */
+  onTaskResult?: (result: AgentTaskResult) => boolean
+}>()
 
 const MAX_HEIGHT = 120
 const MAX_DOC_SIZE = 10 * 1024 * 1024
@@ -143,7 +149,9 @@ async function handleSend(): Promise<void> {
   resize()
 
   try {
-    await chatStore.sendMessage(id, text, agentStore.effective(currentModule))
+    await chatStore.sendMessage(id, text, agentStore.effective(currentModule), {
+      onTaskResult: props.onTaskResult,
+    })
   } catch (error) {
     ElMessage.error(
       error instanceof Error ? error.message : '发送失败，请稍后重试',

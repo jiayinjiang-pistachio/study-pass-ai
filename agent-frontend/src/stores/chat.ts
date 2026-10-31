@@ -2,11 +2,20 @@ import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import type { ChatMessage } from '@/types/chat'
 import type { QuizAnswer } from '@/types/quiz'
+import type { AgentTaskResult } from '@/api/conversation'
 import * as conversationApi from '@/api/conversation'
 import { submitLearningQuiz } from '@/api/learningWorkflow'
 import { buildEvaluationText, quizRunId } from '@/utils/quiz'
 
 const PAGE_SIZE = 20
+
+export interface SendMessageOptions {
+  /**
+   * 工作流 JSON 结果回调：页面可在此接管特殊任务（如面试背景确认弹窗）。
+   * 返回 true 表示已接管，跳过默认的会话刷新逻辑。
+   */
+  onTaskResult?: (result: AgentTaskResult) => boolean
+}
 
 interface MessageState {
   items: ChatMessage[]
@@ -164,6 +173,7 @@ export const useChatStore = defineStore('chat', () => {
     sessionId: number,
     text: string,
     agentName: string,
+    options: SendMessageOptions = {},
   ): Promise<void> {
     const content = text.trim()
     if (!content || sendingBySession.value[sessionId]) return
@@ -216,7 +226,9 @@ export const useChatStore = defineStore('chat', () => {
       )
       item.status = 1
 
-      if (result.kind === 'workflow') {
+      // 页面接管特殊任务（面试背景确认）时跳过默认刷新，保留本轮临时行
+      const handled = options.onTaskResult?.(result) ?? false
+      if (!handled && result.kind === 'workflow') {
         try {
           await refresh(sessionId)
         } catch {
