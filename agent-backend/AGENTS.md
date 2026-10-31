@@ -85,6 +85,7 @@ agent-backend/
 │   │   ├── session.py       #   会话管理 + 会话内聊天消息（整组需登录）
 │   │   ├── interview.py     #   面试详情（按 interview_id + user_id）
 │   │   ├── learning_workflow.py # 学习测评工作流：发起 / 提交 / 详情（整组需登录）
+│   │   ├── note.py          #   笔记管理：列表 / 创建 / 详情 / 更新 / 删除（整组需登录）
 │   │   ├── orchestrator.py  #   流程总控：工作流 / 通用聊天统一入口（整组需登录）
 │   │   ├── file.py          #   通用文件上传 / 头像读取（上传需登录，头像公开）
 │   │   ├── profile.py       #   用户背景资料 CRUD（仅当前用户，整组需登录）
@@ -98,6 +99,7 @@ agent-backend/
 │   │   ├── chat.py          #   流式对话入参（StreamChatIn / SegmentIn）
 │   │   ├── interview.py     #   面试详情出参（InterviewOut，含 qa_object）
 │   │   ├── learning_workflow.py # 测评入参 / 出参（Start / Submit / Detail）
+│   │   ├── note.py          #   笔记 CRUD 入参 / 分页出参（NoteCreate / NoteUpdate / NoteOut / NoteListOut）
 │   │   ├── orchestrator.py  #   总控入参 / 工作流分支出参
 │   │   ├── profile.py       #   背景资料入参 / 出参（ProfileCreate / ProfileUpdate / ProfileOut）
 │   │   ├── prompt.py        #   提示词出参（PromptTemplateOut / ActivePromptOut / AgentConfigOut）
@@ -118,6 +120,8 @@ agent-backend/
 │   │   ├── prompt_injection_service.py # 提示词变量注入：验证（清洗 / 限长）→ 转换（格式化 / 默认值）→ 填充（占位符替换）
 │   │   ├── interview_service.py # 面试详情查询（interview_id + user_id 防越权）
 │   │   ├── learning_workflow.py # 学习测评：checkpoint 校验 + interrupt 恢复 + 状态持久化
+│   │   ├── note_archive_service.py # 笔记归档：Markdown 生成 + 占位符校验 + A2A handler
+│   │   ├── note_service.py  #   笔记：学习测评幂等保存 + CRUD（按 user_id 隔离）
 │   │   ├── orchestrator_service.py # 流程总控：规则表 + 关键词 / 语义路由 + 入参映射
 │   │   ├── semantic_intent.py # 语义意图判断：示例向量 + 余弦阈值 + 失败降级
 │   │   ├── embedding.py     #   本地向量模型共享实例（长期记忆 / 语义意图）
@@ -147,6 +151,7 @@ agent-backend/
 │       ├── message_repo.py  #   chat_messages 表读写仓储（分页 / 记忆历史 / 回写 / 级联清理）
 │       ├── interview_repo.py#   interviews 表读写仓储（按 id + user_id 查询 / 按会话删除）
 │       ├── workflow_run_repo.py # workflow_runs 表读写仓储（按 run_id + user_id 查询）
+│       ├── note_repo.py     #   notes 表读写仓储（幂等保存 / 分页查询 / 更新删除）
 │       ├── prompt_template_repo.py # prompt_templates 表读取 / 生效切换仓储
 │       ├── resource_repo.py #   resources 表读写仓储（去重预查 / 过期扫描）
 │       ├── knowledge_chunk_repo.py # knowledge_chunks 回查（历史消息重建来源）
@@ -172,6 +177,8 @@ agent-backend/
 │   ├── test_long_term_chat.py #   流式对话接入长期记忆：跳过 RAG / 必填缺失触发抽取
 │   ├── test_working_memory.py #   Redis 工作记忆读写 / 摘要 / 降级
 │   ├── test_learning_workflow.py # 学习测评：interrupt 暂停 / 恢复评分 / checkpoint 失效 / 作答校验
+│   ├── test_notes.py        # 笔记 CRUD：分页 / 过滤 / 检索 / 用户隔离 / 校验
+│   ├── test_note_archive.py # 笔记归档：Markdown 生成 / 占位符 / 落库 / A2A 集成
 │   ├── test_orchestrator.py #   流程总控：路由策略 / 混合响应 / 越权隔离
 │   ├── test_semantic_intent.py # 语义意图：阈值 / 多示例 / 缓存 / 失败降级
 │   └── test_resources.py    #   过期资源清理用例
@@ -290,6 +297,11 @@ agent-backend/
   | 发起学习测评 | `POST /api/learning-workflows/start` | `200` |
   | 提交测评作答 | `POST /api/learning-workflows/{run_id}/submit` | `200` |
   | 测评运行详情 | `GET /api/learning-workflows/{run_id}` | `200` |
+  | 笔记列表（分页 / 过滤 / 检索） | `GET /api/notes?page=&page_size=&note_type=&keyword=` | `200` |
+  | 创建笔记 | `POST /api/notes` | `200` |
+  | 笔记详情 | `GET /api/notes/{note_id}` | `200` |
+  | 更新笔记 | `PUT /api/notes/{note_id}` | `200` |
+  | 删除笔记 | `DELETE /api/notes/{note_id}` | `200` |
   | 智能体任务总控 | `POST /api/agent/tasks/start` | `200` |
   | 创建背景资料 | `POST /api/profiles` | `200` |
   | 查询背景资料 | `GET /api/profiles/me` | `200` |
@@ -339,6 +351,7 @@ agent-backend/
   - 作答校验：必须覆盖全部题目、不允许重复 / 未知题目 / 非法选项 / 空作答，违规返回 `422`（此时运行状态保持 `waiting_answer`）；仅 `waiting_answer` 可提交，已完成重复提交返回 `409`。模型失败时运行记录置 `failed` 并写 `error_message`，配置缺失返回 `503`、模型 / 解析失败返回 `502`。
   - 模型输出的 JSON 由 `app/services/ai/json_utils.py` 的 `parse_json_object()` 统一解析（截取首个 `{` 到末个 `}`），提示词中的 JSON 示例必须作为静态 `SystemMessage` 传入。
   - Swagger 联调步骤、反向用例与落库核对见 [`docs/learning-workflow-api-guide.md`](docs/learning-workflow-api-guide.md)。
+- **笔记管理约定**（`/api/notes`，整组需登录）：列表按创建时间倒序分页，支持 `note_type` 精确过滤与 `keyword` 在标题 / 正文模糊检索（`%` / `_` 自动转义）；详情 / 更新 / 删除按 `note_id + user_id` 查询，越权统一 `404`。手动创建需指定当前用户的 `session_id`（别人的会话 → `404`），`source_run_id` 由后端生成 UUID 满足唯一约束；更新为局部更新（`exclude_unset`），列表不返回正文 `content`。出参不暴露 `user_id`。
 - **流程总控约定**（`POST /api/agent/tasks/start`，需登录）：
   - 前端统一入口：传 `agent_name` + `session_id` + `request_text`，由后端决定走工作流还是通用聊天。入参还包含 `select_mode` / `question_count` / `provider` / `request_id` / `request_segments`，按分支各取所需。
   - 路由策略（`app/services/orchestrator_service.py`）：未登记的 `agent_name` → `404`；`required_keywords` 任一命中 → 直接启动工作流；否则用 fastembed 语义相似度对比规则的 `intent_examples`，最大相似度 `>= intent_threshold` 也启动；仍未命中 → 通用聊天。关键词为双字词，避免「问题 / 话题 / 标题」误命中。
@@ -380,6 +393,7 @@ agent-backend/
 - `prompt_templates` 的 `(agent_name, scene, version)` 唯一键兜底版本号；公共通用模板固定作用域 `(common, common)`，与私有模板走同一套逻辑，「单一生效」由仓储层 `SELECT ... FOR UPDATE` 事务行锁保证。
 - `user_profiles` 一人一行（`user_id` 唯一，外键 `users.id` + `ON DELETE CASCADE`），存目标岗位 / 工作年限 / 目标等级 / 已掌握技能 / 薄弱点，供提示词变量注入读取；数组字段用 MySQL `JSON`。基础五项可由前端开场白表单（资料 CRUD 接口）写入，也可由对话后台抽取回填；长期字段 `learning_goal` / `learning_style`（`VARCHAR(255)`）、`interview_focus`（`JSON` 数组）、`long_term_summary`（`TEXT`）只由对话后台自动抽取。后台写入经 `profile_service.create_or_update()` 白名单过滤（允许全部 9 个业务字段，拒绝 `user_id` 等非业务列）。上层只经 `app/db/user_profile_repo.py` 读写。
 - `workflow_runs` 是跨请求工作流实例表：`run_id`（UUID）对外唯一标识，`user_id` / `session_id` 外键 `ON DELETE CASCADE`（会话删除即清理流程），`workflow_type` 标识流程类型（当前为 `learning_quiz`），`status` 取 `created / waiting_answer / grading / completed / failed`，业务快照存 `state_json`（`JSON`，执行现场在 LangGraph checkpoint），失败原因存 `error_message`，完成后写 `completed_at`。上层只经 `app/db/workflow_run_repo.py` 读写，所有查询必须同时带 `run_id + user_id`。
+- `notes` 存学习测评产出的可复习笔记：`user_id` / `session_id` 外键 `ON DELETE CASCADE`，`source_run_id` 记录来源运行（手动创建时由后端生成 UUID），`(user_id, source_run_id)` 唯一保证 A2A 重复派发不重复落库；`content` 为 `MEDIUMTEXT` Markdown 正文，`tags` / `metadata` 为 JSON；ORM 属性用 `metadata_json` 映射数据库列 `metadata`，避开 SQLAlchemy 内部的 `metadata`。上层只经 `app/db/note_repo.py` 读写，所有查询与修改必须带 `user_id`。
 - `chat_messages` 的附件段用 MySQL `JSON` 列存储（`request_segments` / `response_segments`，可为 `NULL`），正文不入 JSON；`reference_sources` 同为可空 `JSON`，只存 `[{chunk_id, score}]`（知识块全文不落消息表，历史回显时按 `chunk_id` 回查）；`response_payload` 同为可空 `JSON`：学习测评出题时存 quiz 数组、评分后清空，普通聊天为 `NULL`，历史消息接口原样返回。`status` 为 `Integer`（0/1/2），`interview_id` 为可空 `BigInteger`（**不建外键**，避免与 `interviews.message_id` 形成循环依赖）。`interviews.user_id` 必填并建索引，所有详情查询必须同时带 `interview_id` 与 `user_id`。
 - `resources.doc_category` 为可空 `String(32)`，取值 `resume` / `study_material` / `general`，仅 `resource_type=0` 文档有意义，非文档为 `NULL`。同内容去重命中且分类变化时，由 `app/db/resource_repo.py` 的 `update_doc_category()` 更新，并触发该 `resource_id` 的向量重灌。
 - **RAG 双存储**：Qdrant 集合 `knowledge_chunks` 只存向量与过滤字段（`user_id` / `doc_category` / `file_name` / `chunk_index` / `resource_id`），**不存原文**；原文与统计字段落 MySQL `knowledge_chunks`（`vector_id` / `resource_id` / `chunk_index` / `text` / `char_count`），`vector_id` 即 Qdrant Point id，两边一一对应。`resource_id` 外键级联删除，重灌时按 `resource_id` 先删后插；写入顺序为「先 Qdrant、后 MySQL」，MySQL 失败会尽力回删刚写入的向量。检索走 `rag/retriever.py`：按 `user_id` 隔离、可选 `doc_category` 收窄，分数阈值 0.4，命中后按 `vector_id` 回查原文；对话来源只在 `chat_messages.reference_sources` 存 `chunk_id + score`。

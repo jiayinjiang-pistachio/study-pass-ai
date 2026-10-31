@@ -22,6 +22,7 @@ from .routers import file as file_router
 from .routers import health as health_router
 from .routers import interview as interview_router
 from .routers import learning_workflow as learning_workflow_router
+from .routers import note as note_router
 from .routers import orchestrator as orchestrator_router
 from .routers import profile as profile_router
 from .routers import prompt as prompt_router
@@ -102,5 +103,6 @@ app.include_router(file_router.public_router)
 app.include_router(profile_router.router)
 app.include_router(prompt_router.router)
 app.include_router(learning_workflow_router.router)
+app.include_router(note_router.router)
 app.include_router(orchestrator_router.router)
 app.include_router(health_router.router)
