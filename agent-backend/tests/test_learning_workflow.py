@@ -20,10 +20,10 @@ from app.agent.workflows.checkpoint import (
     build_thread_config,
     get_workflow_checkpointer,
 )
-from app.db import message_repo, session_repo, workflow_run_repo
+from app.db import message_repo, note_repo, session_repo, workflow_run_repo
 from app.db.models import WorkflowRun
 from app.db.session import SessionLocal
-from app.services import learning_workflow
+from app.services import learning_workflow, note_archive_service
 
 QUIZ_JSON = """```json
 {
@@ -69,6 +69,29 @@ EVAL_JSON = json.dumps(
     },
     ensure_ascii=False,
 )
+
+
+NOTE_MARKDOWN = """# 学习测评笔记：Python 基础
+## 测评概览
+得分 67 分。
+## 薄弱点总结
+- 数据库选型
+- 索引原理
+## 错题复盘
+### 第 2 题：下列属于关系型数据库的有？
+- 你的作答：A. MySQL
+- 点评：Redis 是 KV 存储
+## 复习建议
+建议补充索引与存储选型知识。"""
+
+
+def _patch_note_model(monkeypatch) -> None:
+    """笔记归档同样走模型；后台任务中替换为固定 Markdown。"""
+    monkeypatch.setattr(
+        note_archive_service,
+        "get_chat_model",
+        lambda: RunnableLambda(lambda _: AIMessage(content=NOTE_MARKDOWN)),
+    )
 
 
 def _patch_model(monkeypatch, *responses: str) -> None:
@@ -446,6 +469,7 @@ async def test_submit_scores_and_completes(
     """提交作答：评分、逐题点评、薄弱点落库，重复提交返回 409。"""
     session = _new_session(auth_user["id"])
     _patch_model(monkeypatch, QUIZ_JSON, EVAL_JSON)
+    _patch_note_model(monkeypatch)
     started = await _start(client, auth_headers, session["id"])
 
     answers = [
@@ -467,21 +491,26 @@ async def test_submit_scores_and_completes(
     assert data["weaknesses"] == ["数据库选型", "索引原理"]
     assert data["review"] == "建议补充索引与存储选型知识。"
     assert data["next_agent"] == "note_archiver"
-    # 存在薄弱点 → 接力给笔记智能体，派发结果内联笔记 JSON
+    # 存在薄弱点 → 接力转入后台，提交接口立即返回 scheduled
     handoff = data["handoff_result"]
-    assert handoff["status"] == "completed"
-    assert handoff["from_agent"] == "learning_evaluator"
-    assert handoff["next_agent"] == "note_archiver"
-    assert handoff["reason"] is None
-    note = handoff["result"]
-    assert note["title"] == "学习测评笔记：测一下 Python 基础"
-    assert note["weaknesses"] == ["数据库选型", "索引原理"]
+    assert handoff == {
+        "status": "scheduled",
+        "from_agent": "learning_evaluator",
+        "next_agent": "note_archiver",
+        "result": None,
+        "reason": "A2A 接力已转入后台执行",
+    }
+
+    # 后台任务完成后笔记落库，运行记录只补 note_id / note_status
+    note = note_repo.get_by_user_and_run(auth_user["id"], started["run_id"])
+    assert note is not None
+    assert note["title"] == "学习测评笔记：Python 基础"
     assert note["tags"] == ["学习测评", "数据库选型", "索引原理"]
     for section in ("测评概览", "薄弱点总结", "错题复盘", "复习建议"):
         assert f"## {section}" in note["content"]
-    assert note["metadata"]["run_id"] == started["run_id"]
-    assert note["metadata"]["correct_count"] == 2
-    assert note["metadata"]["wrong_count"] == 1
+    assert note["metadata_json"]["run_id"] == started["run_id"]
+    assert note["metadata_json"]["correct_count"] == 2
+    assert note["metadata_json"]["wrong_count"] == 1
 
     row = workflow_run_repo.get_for_user(started["run_id"], auth_user["id"])
     assert row["status"] == learning_workflow.STATUS_COMPLETED
@@ -489,10 +518,9 @@ async def test_submit_scores_and_completes(
     assert row["state_json"]["answers"] == answers
     assert row["state_json"]["score"] == 67
     assert row["state_json"]["next_agent"] == "note_archiver"
-    assert row["state_json"]["handoff_result"]["status"] == "completed"
-    assert row["state_json"]["handoff_result"]["result"]["title"].startswith(
-        "学习测评笔记："
-    )
+    assert row["state_json"]["handoff_result"]["status"] == "scheduled"
+    assert row["state_json"]["note_id"] == note["id"]
+    assert row["state_json"]["note_status"] == "saved"
     envelope = row["state_json"]["a2a_envelope"]
     assert envelope["from_agent"] == "learning_evaluator"
     assert envelope["payload_type"] == "weak_points"

@@ -14,7 +14,7 @@
 import logging
 from dataclasses import dataclass
 
-from fastapi import status
+from fastapi import BackgroundTasks, status
 
 from ..core.exceptions import BusinessException, SystemException
 from ..schemas.chat import StreamChatIn
@@ -27,6 +27,17 @@ from .semantic_intent import SemanticIntentClassifier
 logger = logging.getLogger(__name__)
 
 QUIZ_AGENT_NAME = "quiz_generate_workflow"
+STATUS_SCHEDULED = "scheduled"
+
+
+def _run_a2a_handoff(envelope: dict, context: dict) -> None:
+    """后台执行一次完整派发；异常只记日志，不影响已返回的提交结果。"""
+    try:
+        A2AHandoffService().dispatch(envelope, context=context)
+    except Exception:
+        logger.error(
+            "后台 A2A 接力执行失败 | from=%s", envelope.get("from_agent"), exc_info=True
+        )
 
 # 已登记但暂未接入工作流的智能体：合法，直接走通用聊天（仍用统一聊天提示词）。
 # 不在此集合且没有工作流规则的 agent_name 仍然 404，避免前端拼错被静默降级。
@@ -142,7 +153,7 @@ class OrchestratorService:
             detail=f"unsupported workflow_type={rule.workflow_type}",
         )
 
-    def dispatch_handoff(
+    def dispatch_a2a_handoff(
         self,
         envelope: dict | None,
         *,
@@ -150,8 +161,13 @@ class OrchestratorService:
         run_id: str,
         session_id: int | None,
         state: dict | None = None,
+        background_tasks: BackgroundTasks | None = None,
     ) -> dict:
-        """统一 A2A 派发入口：只委托派发服务，不写具体下游业务。"""
+        """统一 A2A 派发入口：只委托派发服务，不写具体下游业务。
+
+        传入 background_tasks 时把有下一跳的接力转入后台，避免下游模型调用
+        拖慢提交接口；未传时保持同步派发。
+        """
         context = {
             "user_id": user_id,
             "run_id": run_id,
@@ -160,6 +176,21 @@ class OrchestratorService:
         # 上游已有完整快照时直接下传，下游无需再回源数据库
         if state is not None:
             context["state"] = state
+
+        if (
+            background_tasks is not None
+            and isinstance(envelope, dict)
+            and envelope.get("next_agent")
+        ):
+            background_tasks.add_task(_run_a2a_handoff, envelope, context)
+            return {
+                "status": STATUS_SCHEDULED,
+                "from_agent": envelope.get("from_agent"),
+                "next_agent": envelope.get("next_agent"),
+                "result": None,
+                "reason": "A2A 接力已转入后台执行",
+            }
+
         return A2AHandoffService().dispatch(envelope, context=context)
 
     def build_chat_payload(self, payload: AgentTaskStartIn) -> StreamChatIn:

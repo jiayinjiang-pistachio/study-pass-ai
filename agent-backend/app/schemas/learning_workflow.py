@@ -83,7 +83,7 @@ class EvaluationItemOut(BaseModel):
 
 
 class HandoffResultOut(BaseModel):
-    """A2A 统一派发结果：completed / pending / rejected / failed。"""
+    """A2A 统一派发结果：scheduled / completed / pending / rejected / failed。"""
 
     status: str = Field(..., description="派发状态")
     from_agent: str | None = Field(default=None, description="信封产出方")
@@ -103,7 +103,8 @@ class LearningWorkflowSubmitOut(BaseModel):
         default=None, description="校验通过的接力目标；None 表示流程结束"
     )
     handoff_result: HandoffResultOut | None = Field(
-        default=None, description="A2A 派发结果；handler 未实现时为 pending"
+        default=None,
+        description="A2A 派发结果；后台执行时为 scheduled，handler 未实现时为 pending",
     )
 
 

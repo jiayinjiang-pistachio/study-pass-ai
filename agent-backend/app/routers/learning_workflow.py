@@ -3,7 +3,7 @@
 统一前缀 /api/learning-workflows，整组需登录；run_id 归属按令牌中的 user_id 校验。
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 
 from ..schemas.learning_workflow import (
     LearningWorkflowDetailOut,
@@ -44,12 +44,19 @@ def start_learning_workflow(
 def submit_learning_workflow(
     run_id: str,
     payload: LearningWorkflowSubmitIn,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """按 run_id 恢复题目，执行评测图：评分、逐题点评、薄弱点与建议。"""
+    """按 run_id 恢复题目，执行评测图：评分、逐题点评、薄弱点与建议。
+
+    笔记归档交由后台任务执行，避免下游模型调用拖慢提交接口。
+    """
     return ok(
         learning_workflow.submit_learning_workflow(
-            current_user["id"], run_id, payload
+            current_user["id"],
+            run_id,
+            payload,
+            background_tasks=background_tasks,
         )
     )
 

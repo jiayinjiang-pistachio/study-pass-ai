@@ -233,6 +233,50 @@ class WorkflowRun(Base):
     )
 
 
+class Note(Base):
+    """笔记表：保存工作流产出的可复习笔记，按用户 + 来源运行唯一。"""
+
+    __tablename__ = "notes"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    session_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    # 来源工作流运行；同一用户同一运行只允许一份笔记
+    source_run_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    # 笔记类型，当前为 learning_quiz；为后续其他工作流预留
+    note_type: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    content: Mapped[str] = mapped_column(MEDIUMTEXT, nullable=False)
+    tags: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    # 列名保持业务语义 metadata，ORM 属性避开 SQLAlchemy 保留的 metadata
+    metadata_json: Mapped[dict] = mapped_column("metadata", JSON, nullable=False)
+    created_at: Mapped[int] = mapped_column(
+        BigInteger, server_default=text("(UNIX_TIMESTAMP())"), nullable=False
+    )
+    updated_at: Mapped[int] = mapped_column(
+        BigInteger,
+        server_default=text("(UNIX_TIMESTAMP())"),
+        onupdate=text("UNIX_TIMESTAMP()"),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "source_run_id", name="uq_notes_user_id_source_run_id"
+        ),
+        Index("ix_notes_user_id_created_at", "user_id", "created_at"),
+    )
+
+
 class PromptTemplate(Base):
     """提示词模板表：按 (agent_name, scene) 维护独立版本链。
 

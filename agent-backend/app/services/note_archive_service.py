@@ -1,24 +1,56 @@
 """业务层：note_archiver 笔记归档智能体。
 
-学习测评完成后由 A2A 派发触发：把完整工作流 state 转成可保存、可渲染、可检索的
-笔记 JSON。笔记生成沿用纯函数式转换，不调用模型；失败只体现在派发结果里，
+学习测评完成后由 A2A 派发触发：
+1. 注入模板变量后调用模型，只生成 Markdown 正文（不要求 JSON）；
+2. 从 Markdown 提取标题，补齐 tags 与 metadata；
+3. 正文残留未替换占位符时拒绝归档，避免把残缺笔记落库。
+
+本服务只负责生成与整理；落库由 NoteService 完成，失败只影响派发结果，
 不会回滚测评已完成的业务状态。
 """
 
+import json
+import logging
+import re
 import time
 from typing import Any
 
 from fastapi import status
+from langchain_core.messages import SystemMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
 
 from ..agent.a2a import A2AEnvelope
-from ..core.exceptions import BusinessException
-from ..db import workflow_run_repo
+from ..core.exceptions import BusinessException, SystemException
+from ..core.retry import run_with_retry
+from ..db import user_profile_repo, workflow_run_repo
+from . import prompt_injection_service, prompt_template_service
 from .a2a_handoff_service import register_handler
+from .ai.llm import get_chat_model
+from .note_service import NoteService
+
+logger = logging.getLogger(__name__)
 
 AGENT_NAME = "note_archiver"
+PROMPT_AGENT = "note_archiver"
+PROMPT_SCENE = "note"
 NOTE_TAG = "学习测评"
 TITLE_MAX_CHARS = 60
 WORKFLOW_TYPE = "learning_quiz"
+
+SECTION_TITLES = frozenset({"测评概览", "薄弱点总结", "错题复盘", "复习建议"})
+# 与 prompt_injection_service 的占位符语法保持一致，仅用于检测正文残留
+_LEFTOVER_PLACEHOLDER = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
+_HEADING_PATTERN = re.compile(r"^#{1,6}\s+(.+)$")
+_TITLE_LABEL_PATTERN = re.compile(r"^标题\s*[:：]\s*(.+)$")
+
+DEFAULT_NOTE_ROLE = """你是笔记归档助手。请根据本次学习测评结果，整理一份可直接复习的 Markdown 笔记。"""
+
+NOTE_OUTPUT_RULES = """输出要求（优先于上方模板中的冲突规则）：
+1. 只输出 Markdown 正文，不要 JSON、代码块包裹或额外解释；
+2. 第一行用一级标题给出笔记标题；
+3. 正文必须包含四个二级标题：## 测评概览、## 薄弱点总结、## 错题复盘、## 复习建议；
+4. 不要编造测评中没有的信息；不确定的内容标记「待确认」。"""
 
 
 def _clean_text(value: Any, limit: int | None = None) -> str:
@@ -36,27 +68,8 @@ def _string_list(value: Any) -> list[str]:
     return [text for item in value if (text := _clean_text(item))]
 
 
-def _format_answer(question: dict, value: Any) -> str:
-    """把作答值渲染成「选项标识. 选项内容」；简答题原样返回。"""
-    options = {
-        option.get("key"): _clean_text(option.get("text"))
-        for option in question.get("options") or []
-        if isinstance(option, dict) and option.get("key")
-    }
-
-    def _one(key: str) -> str:
-        text = options.get(key)
-        return f"{key}. {text}" if text else key
-
-    if isinstance(value, list):
-        rendered = [_one(_clean_text(item)) for item in value if _clean_text(item)]
-        return "、".join(rendered) or "未作答"
-    text = _clean_text(value)
-    return _one(text) if text else "未作答"
-
-
 def _sorted_unique(items: list[str]) -> list[str]:
-    """去重并保持首次出现顺序，保证同一份 state 生成稳定笔记。"""
+    """去重并保持首次出现顺序，保证同一份 state 生成稳定标签。"""
     seen: set[str] = set()
     result: list[str] = []
     for item in items:
@@ -66,79 +79,118 @@ def _sorted_unique(items: list[str]) -> list[str]:
     return result
 
 
-def _build_content(state: dict[str, Any]) -> tuple[str, int, int]:
-    """生成 Markdown 正文，返回 (content, 答对题数, 错题数)。"""
-    quiz = [item for item in state.get("quiz") or [] if isinstance(item, dict)]
-    evaluations = {
-        item.get("question_id"): item
-        for item in state.get("evaluation") or []
-        if isinstance(item, dict)
-    }
-    answers = {
-        item.get("question_id"): item.get("value")
-        for item in state.get("answers") or []
-        if isinstance(item, dict)
-    }
-    weaknesses = _string_list(state.get("weaknesses"))
-    raw_review = state.get("review")
-    # 整体建议保留原始换行，直接作为 Markdown 段落渲染
-    review = (raw_review.strip() if isinstance(raw_review, str) else "") or "暂无整体建议。"
+def _strip_code_fence(text: str) -> str:
+    """模型偶尔会把 Markdown 包进代码块，去掉外层围栏后只保留正文。"""
+    text = text.strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
 
-    correct_count = sum(
-        1 for item in evaluations.values() if item.get("correct") is True
+
+def _extract_title(content: str, fallback: str) -> str:
+    """从 Markdown 标题提取笔记标题；跳过四个固定章节标题。"""
+    for line in content.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        heading = _HEADING_PATTERN.match(text)
+        if heading:
+            title = _clean_text(heading.group(1), TITLE_MAX_CHARS)
+            if title and title not in SECTION_TITLES:
+                return title
+            continue
+        label = _TITLE_LABEL_PATTERN.match(text)
+        if label:
+            return _clean_text(label.group(1), TITLE_MAX_CHARS) or fallback
+    return fallback
+
+
+def _prompt_variables(
+    state: dict[str, Any],
+    weaknesses: list[str],
+    question_count: int,
+    correct_count: int,
+    wrong_count: int,
+) -> dict[str, str]:
+    """业务变量：覆盖模板未声明的测评上下文；值已清洗，不会二次解析。"""
+    return {
+        "weak_topics": "、".join(prompt_injection_service.sanitize_items(weaknesses))
+        or "暂无",
+        "question_count": str(question_count),
+        "score": str(state.get("score", 0)),
+        "correct_count": str(correct_count),
+        "wrong_count": str(wrong_count),
+    }
+
+
+def _build_system_prompt(user_id: int, variables: dict[str, str]) -> str:
+    """公共 + 私有模板 + 用户画像 + 本次测评变量；模板不可用时降级为内置角色。"""
+    try:
+        combined = prompt_template_service.get_combined_template(
+            PROMPT_AGENT, PROMPT_SCENE, user_id
+        )
+        profile = (
+            user_profile_repo.get_by_user_id(user_id)
+            if user_id is not None
+            else None
+        )
+        injected = prompt_injection_service.build_variables(
+            profile, combined["variables"]
+        )
+        injected.update(variables)
+        rendered = prompt_injection_service.render_template(
+            combined["final_template"], injected
+        )
+    except Exception:
+        logger.warning(
+            "笔记提示词读取失败，使用内置提示词 | agent=%s scene=%s",
+            PROMPT_AGENT,
+            PROMPT_SCENE,
+            exc_info=True,
+        )
+        rendered = DEFAULT_NOTE_ROLE
+    return f"{rendered}\n\n{NOTE_OUTPUT_RULES}"
+
+
+def _generate_markdown(
+    user_id: int, state: dict[str, Any], variables: dict[str, str]
+) -> str:
+    """调用模型生成 Markdown 正文；瞬时故障走统一重试。"""
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            SystemMessage(content=_build_system_prompt(user_id, variables)),
+            ("human", "以下是本次学习测评的完整结果，请生成 Markdown 笔记：\n{payload}"),
+        ]
     )
-    wrong_questions = [
-        question
-        for question in quiz
-        if evaluations.get(question.get("question_id"), {}).get("correct") is not True
-    ]
-
-    score = state.get("score", 0)
-    request_text = _clean_text(state.get("request_text"), TITLE_MAX_CHARS) or "学习测评"
-
-    lines = [
-        "## 测评概览",
-        "",
-        f"- 测评需求：{request_text}",
-        f"- 得分：{score} 分",
-        f"- 题目：{len(quiz)} 题，答对 {correct_count} 题，答错 {len(wrong_questions)} 题",
-        "",
-        "## 薄弱点总结",
-        "",
-    ]
-    if weaknesses:
-        lines.extend(f"- {item}" for item in weaknesses)
-    else:
-        lines.append("本次测评未发现明显薄弱点。")
-
-    lines.extend(["", "## 错题复盘", ""])
-    if wrong_questions:
-        for question in wrong_questions:
-            question_id = question.get("question_id")
-            stem = _clean_text(question.get("stem")) or f"第 {question_id} 题"
-            comment = (
-                _clean_text(evaluations.get(question_id, {}).get("comment"))
-                or "暂无点评。"
-            )
-            answer = _format_answer(question, answers.get(question_id))
-            lines.extend(
-                [
-                    f"### 第 {question_id} 题：{stem}",
-                    "",
-                    f"- 你的作答：{answer}",
-                    f"- 点评：{comment}",
-                    "",
-                ]
-            )
-    else:
-        lines.extend(["本次测评没有错题，继续保持。", ""])
-
-    lines.extend(["## 复习建议", "", review])
-    return "\n".join(lines).strip(), correct_count, len(wrong_questions)
+    payload = json.dumps(
+        {
+            "request_text": _clean_text(state.get("request_text")),
+            "score": state.get("score", 0),
+            "weaknesses": _string_list(state.get("weaknesses")),
+            "review": state.get("review"),
+            "quiz": state.get("quiz") or [],
+            "answers": state.get("answers") or [],
+            "evaluation": state.get("evaluation") or [],
+        },
+        ensure_ascii=False,
+    )
+    raw = run_with_retry(
+        lambda: (prompt | get_chat_model() | StrOutputParser()).invoke(
+            {"payload": payload}
+        )
+        or "",
+        node=AGENT_NAME,
+    )
+    return _strip_code_fence(raw)
 
 
 class NoteArchiveService:
-    """把测评结果转换成笔记 JSON；不负责持久化，调用方可直接保存或渲染。"""
+    """把测评结果转换成笔记结构；模型只产出 Markdown，结构由本服务补齐。"""
 
     def archive_from_state(
         self, user_id: int, state: dict[str, Any] | None
@@ -151,19 +203,45 @@ class NoteArchiveService:
                 detail=f"user_id={user_id}",
             )
 
+        quiz = [item for item in state.get("quiz") or [] if isinstance(item, dict)]
+        evaluations = [
+            item for item in state.get("evaluation") or [] if isinstance(item, dict)
+        ]
         weaknesses = _string_list(state.get("weaknesses"))
-        content, correct_count, wrong_count = _build_content(state)
-        question_count = len(
-            [item for item in state.get("quiz") or [] if isinstance(item, dict)]
+        correct_count = sum(
+            1 for item in evaluations if item.get("correct") is True
         )
+        wrong_count = max(0, len(quiz) - correct_count)
+
+        content = _generate_markdown(
+            user_id,
+            state,
+            _prompt_variables(
+                state, weaknesses, len(quiz), correct_count, wrong_count
+            ),
+        )
+        if not content:
+            raise SystemException(
+                "笔记生成失败：模型返回空内容",
+                http_status=status.HTTP_502_BAD_GATEWAY,
+                detail=f"run_id={state.get('run_id')}",
+            )
+
+        leftovers = sorted(set(_LEFTOVER_PLACEHOLDER.findall(content)))
+        if leftovers:
+            raise SystemException(
+                "笔记正文存在未替换的模板占位符，已取消保存",
+                http_status=status.HTTP_502_BAD_GATEWAY,
+                detail=f"run_id={state.get('run_id')} placeholders={leftovers}",
+            )
+
         request_text = _clean_text(state.get("request_text"), TITLE_MAX_CHARS)
-        title = (
+        fallback_title = (
             f"学习测评笔记：{request_text}" if request_text else "学习测评笔记"
         )
+        title = _extract_title(content, fallback_title)
 
         return {
-            "weaknesses": weaknesses,
-            "a2a_envelope": state.get("a2a_envelope"),
             "title": title,
             "content": content,
             "tags": _sorted_unique([NOTE_TAG, *weaknesses]),
@@ -173,7 +251,7 @@ class NoteArchiveService:
                 "session_id": state.get("session_id"),
                 "workflow_type": WORKFLOW_TYPE,
                 "score": state.get("score", 0),
-                "question_count": question_count,
+                "question_count": len(quiz),
                 "correct_count": correct_count,
                 "wrong_count": wrong_count,
                 "weakness_count": len(weaknesses),
@@ -194,21 +272,30 @@ class NoteArchiveService:
 
 
 def archive_note_handler(
-    _envelope: A2AEnvelope, context: dict[str, Any]
+    _: A2AEnvelope, context: dict[str, Any]
 ) -> dict[str, Any]:
-    """A2A handler：优先使用派发上下文里的完整 state，否则回源运行记录。"""
+    """A2A handler：只做编排，先生成笔记再交给 NoteService 保存。"""
     user_id = context.get("user_id")
     if not isinstance(user_id, int):
         raise RuntimeError("缺少 user_id，无法归档笔记")
 
     state = context.get("state")
-    if isinstance(state, dict) and state:
-        return NoteArchiveService().archive_from_state(user_id, state)
-
     run_id = context.get("run_id")
-    if not run_id:
-        raise RuntimeError("缺少 state 或 run_id，无法归档笔记")
-    return NoteArchiveService().archive_from_run(user_id, str(run_id))
+    if isinstance(state, dict) and state:
+        archive = NoteArchiveService().archive_from_state(user_id, state)
+        session_id = context.get("session_id") or state.get("session_id")
+        run_id = run_id or state.get("run_id")
+    else:
+        if not run_id:
+            raise RuntimeError("缺少 state 或 run_id，无法归档笔记")
+        archive = NoteArchiveService().archive_from_run(user_id, str(run_id))
+        session_id = context.get("session_id")
+
+    if not isinstance(session_id, int) or not run_id:
+        raise RuntimeError("缺少 session_id 或 run_id，无法保存笔记")
+    return NoteService().save_learning_quiz_note(
+        user_id, session_id, str(run_id), archive
+    )
 
 
 # 导入本模块即完成注册；新增下游智能体按同样方式登记 handler 即可

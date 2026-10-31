@@ -99,9 +99,76 @@ def test_orchestrator_delegates_to_handoff_service(monkeypatch) -> None:
         return {}
 
     monkeypatch.setitem(HANDLERS, "note_archiver", handler)
-    result = OrchestratorService().dispatch_handoff(
+    result = OrchestratorService().dispatch_a2a_handoff(
         _envelope(), user_id=3, run_id="run-3", session_id=9
     )
 
     assert result["status"] == "completed"
     assert captured == {"user_id": 3, "run_id": "run-3", "session_id": 9}
+
+
+class _Background:
+    """BackgroundTasks 测试替身：只记录待执行任务。"""
+
+    def __init__(self) -> None:
+        self.tasks: list[tuple] = []
+
+    def add_task(self, func, *args, **kwargs) -> None:
+        self.tasks.append((func, args, kwargs))
+
+
+def test_orchestrator_schedules_handoff_when_background_tasks_given(
+    monkeypatch,
+) -> None:
+    """传 background_tasks 时只登记后台任务，返回 scheduled。"""
+    captured: dict = {}
+
+    def handler(envelope, context):
+        captured.update(context)
+        return {}
+
+    monkeypatch.setitem(HANDLERS, "note_archiver", handler)
+    background = _Background()
+
+    result = OrchestratorService().dispatch_a2a_handoff(
+        _envelope(),
+        user_id=1,
+        run_id="run-1",
+        session_id=2,
+        state={"status": "completed"},
+        background_tasks=background,
+    )
+
+    assert result == {
+        "status": "scheduled",
+        "from_agent": "learning_evaluator",
+        "next_agent": "note_archiver",
+        "result": None,
+        "reason": "A2A 接力已转入后台执行",
+    }
+    assert captured == {}
+    assert len(background.tasks) == 1
+
+    func, args, kwargs = background.tasks[0]
+    func(*args, **kwargs)
+    assert captured == {
+        "user_id": 1,
+        "run_id": "run-1",
+        "session_id": 2,
+        "state": {"status": "completed"},
+    }
+
+
+def test_orchestrator_keeps_rejection_synchronous_with_background_tasks() -> None:
+    """没有下一跳时无需后台，直接同步返回 rejected。"""
+    background = _Background()
+    result = OrchestratorService().dispatch_a2a_handoff(
+        _envelope(target=None),
+        user_id=1,
+        run_id="run-1",
+        session_id=2,
+        background_tasks=background,
+    )
+
+    assert result["status"] == "rejected"
+    assert background.tasks == []

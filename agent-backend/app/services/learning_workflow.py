@@ -18,7 +18,7 @@ import re
 import time
 import uuid
 
-from fastapi import status
+from fastapi import BackgroundTasks, status
 from langgraph.types import Command
 
 from ..agent.workflows import learning_quiz
@@ -283,7 +283,11 @@ def start_learning_workflow(user_id: int, payload) -> dict:
 
 
 def submit_learning_workflow(
-    user_id: int, run_id: str, payload: LearningWorkflowSubmitIn
+    user_id: int,
+    run_id: str,
+    payload: LearningWorkflowSubmitIn,
+    *,
+    background_tasks: BackgroundTasks | None = None,
 ) -> dict:
     """校验 checkpoint → 校验作答 → 恢复图完成评分 → 持久化结果。"""
     row = workflow_run_repo.get_for_user(run_id, user_id)
@@ -364,12 +368,13 @@ def submit_learning_workflow(
     # 专家 Agent 只产出信封；总控触发统一派发，校验与 handler 路由都不在本层
     from .orchestrator_service import OrchestratorService  # 延迟导入，避免与总控循环依赖
 
-    handoff_result = OrchestratorService().dispatch_handoff(
+    handoff_result = OrchestratorService().dispatch_a2a_handoff(
         completed_state.get("a2a_envelope"),
         user_id=user_id,
         run_id=run_id,
         session_id=completed_state.get("session_id"),
         state=completed_state,
+        background_tasks=background_tasks,
     )
     completed_state["next_agent"] = handoff_result["next_agent"]
     completed_state["handoff_result"] = handoff_result
