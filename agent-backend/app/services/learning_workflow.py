@@ -369,6 +369,7 @@ def submit_learning_workflow(
         user_id=user_id,
         run_id=run_id,
         session_id=completed_state.get("session_id"),
+        state=completed_state,
     )
     completed_state["next_agent"] = handoff_result["next_agent"]
     completed_state["handoff_result"] = handoff_result

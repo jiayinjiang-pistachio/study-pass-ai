@@ -41,8 +41,9 @@ def test_dispatch_rejects_when_dispatcher_denies() -> None:
     assert result["next_agent"] is None
 
 
-def test_dispatch_pending_when_handler_missing() -> None:
+def test_dispatch_pending_when_handler_missing(monkeypatch) -> None:
     """校验通过但下游未实现 → pending，不阻断上游。"""
+    monkeypatch.delitem(HANDLERS, "note_archiver", raising=False)
     result = A2AHandoffService().dispatch(_envelope(), context={"user_id": 1})
     assert result == {
         "status": "pending",

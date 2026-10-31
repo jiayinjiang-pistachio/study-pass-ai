@@ -354,9 +354,17 @@ async def test_submit_marks_failed_on_invalid_evaluation(
     assert row["state_json"]["error_node"] == "evaluate_answer"
 
 
-@pytest.mark.parametrize("weaknesses", [["数据库选型"], []])
-def test_finalize_result_builds_a2a_envelope(weaknesses: list[str]) -> None:
-    """测评完成后统一生成 learning_evaluator → note_archiver 的接力意图。"""
+@pytest.mark.parametrize(
+    ("weaknesses", "next_agent", "confidence"),
+    [
+        (["数据库选型"], "note_archiver", 0.9),
+        ([], None, 0.4),
+    ],
+)
+def test_finalize_result_builds_a2a_envelope(
+    weaknesses: list[str], next_agent: str | None, confidence: float
+) -> None:
+    """只有存在薄弱点才建议接力给笔记智能体；否则流程直接结束。"""
     result = learning_quiz.finalize_result(
         {"score": 67, "weaknesses": weaknesses}
     )
@@ -366,8 +374,8 @@ def test_finalize_result_builds_a2a_envelope(weaknesses: list[str]) -> None:
         "from_agent": "learning_evaluator",
         "payload_type": "weak_points",
         "payload": {"score": 67, "weaknesses": weaknesses},
-        "next_agent": "note_archiver",
-        "confidence": 0.9,
+        "next_agent": next_agent,
+        "confidence": confidence,
     }
 
 
@@ -459,14 +467,21 @@ async def test_submit_scores_and_completes(
     assert data["weaknesses"] == ["数据库选型", "索引原理"]
     assert data["review"] == "建议补充索引与存储选型知识。"
     assert data["next_agent"] == "note_archiver"
-    # note_archiver 尚未实现 handler：派发应返回 pending，不影响测评结果
-    assert data["handoff_result"] == {
-        "status": "pending",
-        "from_agent": "learning_evaluator",
-        "next_agent": "note_archiver",
-        "result": None,
-        "reason": "note_archiver handler 未实现",
-    }
+    # 存在薄弱点 → 接力给笔记智能体，派发结果内联笔记 JSON
+    handoff = data["handoff_result"]
+    assert handoff["status"] == "completed"
+    assert handoff["from_agent"] == "learning_evaluator"
+    assert handoff["next_agent"] == "note_archiver"
+    assert handoff["reason"] is None
+    note = handoff["result"]
+    assert note["title"] == "学习测评笔记：测一下 Python 基础"
+    assert note["weaknesses"] == ["数据库选型", "索引原理"]
+    assert note["tags"] == ["学习测评", "数据库选型", "索引原理"]
+    for section in ("测评概览", "薄弱点总结", "错题复盘", "复习建议"):
+        assert f"## {section}" in note["content"]
+    assert note["metadata"]["run_id"] == started["run_id"]
+    assert note["metadata"]["correct_count"] == 2
+    assert note["metadata"]["wrong_count"] == 1
 
     row = workflow_run_repo.get_for_user(started["run_id"], auth_user["id"])
     assert row["status"] == learning_workflow.STATUS_COMPLETED
@@ -474,7 +489,10 @@ async def test_submit_scores_and_completes(
     assert row["state_json"]["answers"] == answers
     assert row["state_json"]["score"] == 67
     assert row["state_json"]["next_agent"] == "note_archiver"
-    assert row["state_json"]["handoff_result"]["status"] == "pending"
+    assert row["state_json"]["handoff_result"]["status"] == "completed"
+    assert row["state_json"]["handoff_result"]["result"]["title"].startswith(
+        "学习测评笔记："
+    )
     envelope = row["state_json"]["a2a_envelope"]
     assert envelope["from_agent"] == "learning_evaluator"
     assert envelope["payload_type"] == "weak_points"
@@ -499,6 +517,48 @@ async def test_submit_scores_and_completes(
     )
     assert again.status_code == 409
     assert "已提交" in again.json()["message"]
+
+
+async def test_submit_without_weakness_skips_note_handoff(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """无薄弱点时不声明接力，派发被拒绝且不生成笔记。"""
+    evaluation = json.loads(EVAL_JSON)
+    evaluation["weaknesses"] = []
+    session = _new_session(auth_user["id"])
+    _patch_model(
+        monkeypatch,
+        QUIZ_JSON,
+        json.dumps(evaluation, ensure_ascii=False),
+    )
+    started = await _start(client, auth_headers, session["id"])
+
+    resp = await client.post(
+        f"/api/learning-workflows/{started['run_id']}/submit",
+        headers=auth_headers,
+        json={
+            "answers": [
+                {"question_id": 1, "value": "A"},
+                {"question_id": 2, "value": ["A"]},
+                {"question_id": 3, "value": "加速查询"},
+            ]
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["status"] == learning_workflow.STATUS_COMPLETED
+    assert data["weaknesses"] == []
+    assert data["next_agent"] is None
+    assert data["handoff_result"]["status"] == "rejected"
+    assert data["handoff_result"]["next_agent"] is None
+    assert data["handoff_result"]["result"] is None
+
+    row = workflow_run_repo.get_for_user(started["run_id"], auth_user["id"])
+    assert row["state_json"]["a2a_envelope"]["next_agent"] is None
 
 
 async def test_submit_rejects_incomplete_answers(

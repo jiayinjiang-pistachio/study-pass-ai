@@ -519,18 +519,20 @@ def _evaluate_answer_once(state: LearningWorkflowState) -> dict:
 
 
 def finalize_result(state: LearningWorkflowState) -> dict:
-    """收尾节点：标记完成，并产出 A2A 信封表达接力意图（不直接调用下游）。"""
+    """收尾节点：标记完成，并产出 A2A 信封表达接力意图（不直接调用下游）。
+
+    只有存在薄弱点时才建议转给笔记智能体；无薄弱点则流程直接结束。
+    """
     from app.agent.a2a import A2AEnvelope
 
+    weaknesses = state.get("weaknesses") or []
+    has_weakness = bool(weaknesses)
     envelope = A2AEnvelope(
         from_agent="learning_evaluator",
         payload_type="weak_points",
-        payload={
-            "score": state.get("score", 0),
-            "weaknesses": state.get("weaknesses") or [],
-        },
-        next_agent="note_archiver",
-        confidence=0.9,
+        payload={"score": state.get("score", 0), "weaknesses": weaknesses},
+        next_agent="note_archiver" if has_weakness else None,
+        confidence=0.9 if has_weakness else 0.4,
     )
     return {"status": STATUS_COMPLETED, "a2a_envelope": envelope.model_dump()}
 

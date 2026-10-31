@@ -27,6 +27,7 @@ from .routers import profile as profile_router
 from .routers import prompt as prompt_router
 from .routers import session as session_router
 from .routers import user as user_router
+from .services import note_archive_service  # noqa: F401  导入即注册 note_archiver handler
 from .services import prompt_template_service, resource_cleanup
 from .services.semantic_intent import SemanticIntentClassifier
 

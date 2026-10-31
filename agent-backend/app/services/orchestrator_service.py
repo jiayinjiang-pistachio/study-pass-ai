@@ -149,16 +149,18 @@ class OrchestratorService:
         user_id: int,
         run_id: str,
         session_id: int | None,
+        state: dict | None = None,
     ) -> dict:
         """统一 A2A 派发入口：只委托派发服务，不写具体下游业务。"""
-        return A2AHandoffService().dispatch(
-            envelope,
-            context={
-                "user_id": user_id,
-                "run_id": run_id,
-                "session_id": session_id,
-            },
-        )
+        context = {
+            "user_id": user_id,
+            "run_id": run_id,
+            "session_id": session_id,
+        }
+        # 上游已有完整快照时直接下传，下游无需再回源数据库
+        if state is not None:
+            context["state"] = state
+        return A2AHandoffService().dispatch(envelope, context=context)
 
     def build_chat_payload(self, payload: AgentTaskStartIn) -> StreamChatIn:
         """把总控入参映射成聊天入参；question_count / provider 由聊天分支忽略。"""
