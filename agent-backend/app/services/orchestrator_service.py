@@ -21,6 +21,7 @@ from ..schemas.chat import StreamChatIn
 from ..schemas.learning_workflow import LearningWorkflowStartIn
 from ..schemas.orchestrator import AgentTaskStartIn
 from . import learning_workflow
+from .a2a_handoff_service import A2AHandoffService
 from .semantic_intent import SemanticIntentClassifier
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,24 @@ class OrchestratorService:
             "工作流配置错误，请联系管理员",
             http_status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"unsupported workflow_type={rule.workflow_type}",
+        )
+
+    def dispatch_handoff(
+        self,
+        envelope: dict | None,
+        *,
+        user_id: int,
+        run_id: str,
+        session_id: int | None,
+    ) -> dict:
+        """统一 A2A 派发入口：只委托派发服务，不写具体下游业务。"""
+        return A2AHandoffService().dispatch(
+            envelope,
+            context={
+                "user_id": user_id,
+                "run_id": run_id,
+                "session_id": session_id,
+            },
         )
 
     def build_chat_payload(self, payload: AgentTaskStartIn) -> StreamChatIn:

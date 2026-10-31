@@ -82,6 +82,16 @@ class EvaluationItemOut(BaseModel):
     comment: str = Field(..., description="逐题点评")
 
 
+class HandoffResultOut(BaseModel):
+    """A2A 统一派发结果：completed / pending / rejected / failed。"""
+
+    status: str = Field(..., description="派发状态")
+    from_agent: str | None = Field(default=None, description="信封产出方")
+    next_agent: str | None = Field(default=None, description="校验通过的接力目标")
+    result: dict[str, Any] | None = Field(default=None, description="handler 返回值")
+    reason: str | None = Field(default=None, description="未完成派发的原因")
+
+
 class LearningWorkflowSubmitOut(BaseModel):
     run_id: str = Field(..., description="工作流运行 ID")
     status: str = Field(..., description="流程状态，提交成功为 completed")
@@ -91,6 +101,9 @@ class LearningWorkflowSubmitOut(BaseModel):
     review: str = Field(..., description="整体学习建议")
     next_agent: str | None = Field(
         default=None, description="校验通过的接力目标；None 表示流程结束"
+    )
+    handoff_result: HandoffResultOut | None = Field(
+        default=None, description="A2A 派发结果；handler 未实现时为 pending"
     )
 
 

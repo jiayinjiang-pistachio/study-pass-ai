@@ -83,6 +83,7 @@ class LearningWorkflowState(TypedDict, total=False):
     status: str
     a2a_envelope: dict[str, Any]
     next_agent: str | None
+    handoff_result: dict[str, Any]
 
 
 # 数据库模板只有角色与出题 / 评分规则，JSON 结构由下面的静态契约补齐。
@@ -518,20 +519,18 @@ def _evaluate_answer_once(state: LearningWorkflowState) -> dict:
 
 
 def finalize_result(state: LearningWorkflowState) -> dict:
-    """收尾节点：标记完成，并产出 A2A 信封供后续智能体消费。"""
+    """收尾节点：标记完成，并产出 A2A 信封表达接力意图（不直接调用下游）。"""
     from app.agent.a2a import A2AEnvelope
 
-    weaknesses = state.get("weaknesses") or []
-    has_weakness = bool(weaknesses)
     envelope = A2AEnvelope(
         from_agent="learning_evaluator",
         payload_type="weak_points",
         payload={
             "score": state.get("score", 0),
-            "weaknesses": weaknesses,
+            "weaknesses": state.get("weaknesses") or [],
         },
-        next_agent="difficulty_learner" if has_weakness else None,
-        confidence=0.9 if has_weakness else 0.4,
+        next_agent="note_archiver",
+        confidence=0.9,
     )
     return {"status": STATUS_COMPLETED, "a2a_envelope": envelope.model_dump()}
 

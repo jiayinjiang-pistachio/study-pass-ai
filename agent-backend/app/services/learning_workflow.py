@@ -21,7 +21,6 @@ import uuid
 from fastapi import status
 from langgraph.types import Command
 
-from ..agent.a2a import A2AEnvelope, decide_next_agent
 from ..agent.workflows import learning_quiz
 from ..agent.workflows.checkpoint import (
     build_thread_config,
@@ -184,17 +183,6 @@ def _raise_workflow_error(
         http_status=status.HTTP_502_BAD_GATEWAY,
         detail=f"run_id={run_id} node={node} error={exc}",
     ) from exc
-
-
-def _resolve_next_agent(envelope: dict | None) -> str | None:
-    """校验 A2A 信封后返回放行的下一跳；信封缺失或校验异常静默降级为流程结束。"""
-    if not envelope:
-        return None
-    try:
-        return decide_next_agent(A2AEnvelope(**envelope))
-    except Exception:
-        logger.warning("A2A 接力校验失败，按流程结束处理", exc_info=True)
-        return None
 
 
 def start_learning_workflow(user_id: int, payload) -> dict:
@@ -373,10 +361,17 @@ def submit_learning_workflow(
         )
 
     completed_state = {**grading_state, **result, "status": STATUS_COMPLETED}
-    # 信封只是产出方建议，下一跳必须经调度器校验后才落库与对外返回
-    completed_state["next_agent"] = _resolve_next_agent(
-        completed_state.get("a2a_envelope")
+    # 专家 Agent 只产出信封；总控触发统一派发，校验与 handler 路由都不在本层
+    from .orchestrator_service import OrchestratorService  # 延迟导入，避免与总控循环依赖
+
+    handoff_result = OrchestratorService().dispatch_handoff(
+        completed_state.get("a2a_envelope"),
+        user_id=user_id,
+        run_id=run_id,
+        session_id=completed_state.get("session_id"),
     )
+    completed_state["next_agent"] = handoff_result["next_agent"]
+    completed_state["handoff_result"] = handoff_result
     workflow_run_repo.update(
         run_id,
         {
@@ -413,6 +408,7 @@ def submit_learning_workflow(
         "weaknesses": completed_state.get("weaknesses", []),
         "review": completed_state.get("review", ""),
         "next_agent": completed_state.get("next_agent"),
+        "handoff_result": completed_state.get("handoff_result"),
     }
 
 

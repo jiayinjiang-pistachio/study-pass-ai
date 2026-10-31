@@ -14,6 +14,7 @@ from langchain_core.runnables import RunnableLambda
 from sqlalchemy import select
 
 from app.agent.a2a import A2AEnvelope, decide_next_agent
+from app.agent.a2a.rules import HANDOFF_RULES, MIN_CONFIDENCE
 from app.agent.workflows import learning_quiz
 from app.agent.workflows.checkpoint import (
     build_thread_config,
@@ -353,17 +354,9 @@ async def test_submit_marks_failed_on_invalid_evaluation(
     assert row["state_json"]["error_node"] == "evaluate_answer"
 
 
-@pytest.mark.parametrize(
-    ("weaknesses", "next_agent", "confidence"),
-    [
-        (["数据库选型"], "difficulty_learner", 0.9),
-        ([], None, 0.4),
-    ],
-)
-def test_finalize_result_builds_a2a_envelope(
-    weaknesses: list[str], next_agent: str | None, confidence: float
-) -> None:
-    """有薄弱点才建议转难点学习；无薄弱点时置信度降低且流程结束。"""
+@pytest.mark.parametrize("weaknesses", [["数据库选型"], []])
+def test_finalize_result_builds_a2a_envelope(weaknesses: list[str]) -> None:
+    """测评完成后统一生成 learning_evaluator → note_archiver 的接力意图。"""
     result = learning_quiz.finalize_result(
         {"score": 67, "weaknesses": weaknesses}
     )
@@ -373,8 +366,8 @@ def test_finalize_result_builds_a2a_envelope(
         "from_agent": "learning_evaluator",
         "payload_type": "weak_points",
         "payload": {"score": 67, "weaknesses": weaknesses},
-        "next_agent": next_agent,
-        "confidence": confidence,
+        "next_agent": "note_archiver",
+        "confidence": 0.9,
     }
 
 
@@ -403,7 +396,37 @@ def test_decide_next_agent_whitelist(
         next_agent=target,
     )
 
-    assert decide_next_agent(envelope) == expected
+    assert (
+        decide_next_agent(
+            envelope, rules=HANDOFF_RULES, min_confidence=MIN_CONFIDENCE
+        )
+        == expected
+    )
+
+
+def test_decide_next_agent_uses_injected_rules() -> None:
+    """调度器不内置业务规则，换一套注入规则即生效。"""
+    envelope = A2AEnvelope(
+        from_agent="custom_evaluator",
+        payload_type="weak_points",
+        confidence=0.95,
+        next_agent="custom_coach",
+    )
+
+    assert (
+        decide_next_agent(
+            envelope,
+            rules={"custom_evaluator": ("custom_coach",)},
+            min_confidence=0.9,
+        )
+        == "custom_coach"
+    )
+    assert (
+        decide_next_agent(
+            envelope, rules=HANDOFF_RULES, min_confidence=MIN_CONFIDENCE
+        )
+        is None
+    )
 
 
 async def test_submit_scores_and_completes(
@@ -435,18 +458,27 @@ async def test_submit_scores_and_completes(
     assert [item["question_id"] for item in data["evaluation"]] == [1, 2, 3]
     assert data["weaknesses"] == ["数据库选型", "索引原理"]
     assert data["review"] == "建议补充索引与存储选型知识。"
-    assert data["next_agent"] == "difficulty_learner"
+    assert data["next_agent"] == "note_archiver"
+    # note_archiver 尚未实现 handler：派发应返回 pending，不影响测评结果
+    assert data["handoff_result"] == {
+        "status": "pending",
+        "from_agent": "learning_evaluator",
+        "next_agent": "note_archiver",
+        "result": None,
+        "reason": "note_archiver handler 未实现",
+    }
 
     row = workflow_run_repo.get_for_user(started["run_id"], auth_user["id"])
     assert row["status"] == learning_workflow.STATUS_COMPLETED
     assert isinstance(row["completed_at"], int)
     assert row["state_json"]["answers"] == answers
     assert row["state_json"]["score"] == 67
-    assert row["state_json"]["next_agent"] == "difficulty_learner"
+    assert row["state_json"]["next_agent"] == "note_archiver"
+    assert row["state_json"]["handoff_result"]["status"] == "pending"
     envelope = row["state_json"]["a2a_envelope"]
     assert envelope["from_agent"] == "learning_evaluator"
     assert envelope["payload_type"] == "weak_points"
-    assert envelope["next_agent"] == "difficulty_learner"
+    assert envelope["next_agent"] == "note_archiver"
     assert envelope["confidence"] == 0.9
     assert envelope["payload"]["score"] == 67
 
