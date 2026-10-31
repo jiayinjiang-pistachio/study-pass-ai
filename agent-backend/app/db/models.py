@@ -71,6 +71,13 @@ class UserProfile(Base):
     created_at: Mapped[int] = mapped_column(
         BigInteger, server_default=text("(UNIX_TIMESTAMP())"), nullable=False
     )
+    # 最近一次资料写入时间：与简历上传时间比较，决定面试准备以哪一方为准
+    updated_at: Mapped[int] = mapped_column(
+        BigInteger,
+        server_default=text("(UNIX_TIMESTAMP())"),
+        onupdate=text("UNIX_TIMESTAMP()"),
+        nullable=False,
+    )
 
 
 class ChatSession(Base):

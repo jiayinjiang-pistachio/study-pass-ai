@@ -1,5 +1,7 @@
-"""面试主考官智能体：只负责调用大模型从简历提取面试准备变量。
+"""面试主考官智能体：只负责调用大模型提取面试准备变量。
 
+一次调用同时完成两件事：从简历提取基础变量，并从用户本轮表述中解析
+显式提出的要求（`user_stated`），供工作流按「最新输入优先」覆盖。
 流程编排、会话 / 简历校验与实际提示词注入都在工作流层，本模块不感知。
 """
 
@@ -18,7 +20,7 @@ NODE_NAME = "interview_host_extract"
 OPENING_QUESTION_MAX_CHARS = 500
 
 # 输出契约静态写在 SystemMessage 中，避免提示词模板里的花括号被当成变量
-EXTRACT_SYSTEM_PROMPT = """你是面试主考官的资料分析助手。请仅依据候选人简历，提取面试准备所需信息。
+EXTRACT_SYSTEM_PROMPT = """你是面试主考官的资料分析助手。请阅读候选人简历与候选人本次提出的要求。
 
 输出严格为 JSON 对象，结构如下：
 {
@@ -26,33 +28,61 @@ EXTRACT_SYSTEM_PROMPT = """你是面试主考官的资料分析助手。请仅�
   "target_level": "目标职级或经验层级（如 P6 / 高级 / 应届）；未体现时填「未提供」",
   "target_skills": ["候选人已掌握的技能，优先提取具体技术栈"],
   "weak_topics": ["简历中缺失或明显薄弱的面试考察点"],
-  "opening_question": "一句中文开场问题，结合简历项目经历，只问一个问题"
+  "opening_question": "一句中文开场问题，结合简历项目经历，只问一个问题",
+  "user_stated": {
+    "target_job": "仅当候选人本次明确说明目标岗位时输出该键",
+    "target_level": "仅当候选人本次明确说明目标职级时输出该键",
+    "years_experience": 5,
+    "target_skills": ["仅当候选人本次明确说明技能时输出该键"],
+    "weak_topics": ["仅当候选人本次明确说明薄弱点时输出该键"]
+  }
 }
 
 要求：
-1. 只提取简历中出现或可合理推断的信息，不编造公司、项目与数据；
-2. target_skills 最多 20 项，weak_topics 最多 10 项，每项不超过 50 字；
-3. 技能与薄弱点去重，使用简历原文中的技术名词；
-4. 不要输出 Markdown 代码块或任何解释文字。"""
+1. 前五个键只依据简历提取，不因本次要求改写；
+2. user_stated 只提取候选人本次要求中明确表达的信息，不推断、不照抄简历；
+   没有明确信息时输出空对象 {}；
+3. years_experience 为整数（0 表示应届 / 无经验），未提及则不要输出该键；
+4. target_skills 最多 20 项，weak_topics 最多 10 项，每项不超过 50 字；
+5. 技能与薄弱点去重，使用原文中的技术名词，不编造公司、项目与数据；
+6. 不要输出 Markdown 代码块或任何解释文字。"""
 
 
 class InterviewHostAgent:
     """面试主考官智能体；extract_variables 是唯一的对外能力。"""
 
-    def extract_variables(self, resume_text: str) -> dict[str, Any]:
-        """从简历正文提取 target_job / target_level / target_skills /
-        weak_topics / opening_question。"""
+    def extract_variables(
+        self, resume_text: str, user_request: str = ""
+    ) -> dict[str, Any]:
+        """从简历提取基础变量，并解析用户本轮明确提出的要求。
+
+        返回的 `user_stated` 只包含用户明确说明的字段，供工作流按
+        「最新输入优先」覆盖简历 / 画像结果。
+        """
         prompt = ChatPromptTemplate.from_messages(
             [
                 SystemMessage(content=EXTRACT_SYSTEM_PROMPT),
-                ("human", "候选人简历正文如下：\n\n{resume_text}"),
+                (
+                    "human",
+                    "候选人简历正文如下：\n\n{resume_text}\n\n"
+                    "候选人本次提出的要求（可能为空）：\n{user_request}",
+                ),
             ]
         )
         chain = prompt | get_chat_model() | StrOutputParser()
         raw = run_with_retry(
-            lambda: chain.invoke({"resume_text": resume_text}), node=NODE_NAME
+            lambda: chain.invoke(
+                {
+                    "resume_text": resume_text,
+                    "user_request": user_request.strip() or "（未提供）",
+                }
+            ),
+            node=NODE_NAME,
         )
-        return self._normalize(parse_json_object(raw))
+        data = parse_json_object(raw)
+        result = self._normalize(data)
+        result["user_stated"] = self._normalize_stated(data.get("user_stated"))
+        return result
 
     @staticmethod
     def _normalize(data: dict[str, Any]) -> dict[str, Any]:
@@ -66,3 +96,32 @@ class InterviewHostAgent:
                 data.get("opening_question"), OPENING_QUESTION_MAX_CHARS
             ),
         }
+
+    @staticmethod
+    def _normalize_stated(data: object) -> dict[str, Any]:
+        """清洗用户本轮表述：只保留出现且非空的字段，年限限定 0..60。"""
+        if not isinstance(data, dict):
+            return {}
+        stated: dict[str, Any] = {}
+        job = sanitize_text(data.get("target_job"))
+        if job:
+            stated["target_job"] = job
+        level = sanitize_text(data.get("target_level"))
+        if level:
+            stated["target_level"] = level
+        skills = sanitize_items(data.get("target_skills"))
+        if skills:
+            stated["target_skills"] = skills
+        weak_topics = sanitize_items(data.get("weak_topics"))
+        if weak_topics:
+            stated["weak_topics"] = weak_topics[:10]
+
+        years = data.get("years_experience")
+        if years is not None and str(years).strip():
+            try:
+                years_value = int(years)
+            except (TypeError, ValueError):
+                years_value = None
+            if years_value is not None and 0 <= years_value <= 60:
+                stated["years_experience"] = years_value
+        return stated

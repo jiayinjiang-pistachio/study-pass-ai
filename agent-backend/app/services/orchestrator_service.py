@@ -163,7 +163,7 @@ class OrchestratorService:
             == interview_host_workflow.WORKFLOW_TYPE_INTERVIEW_PREPARE
         ):
             result = interview_host_workflow.start_interview_prepare(
-                user_id, payload.session_id
+                user_id, payload.session_id, payload.request_text
             )
             return {
                 "route": "workflow",

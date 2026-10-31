@@ -1,10 +1,12 @@
 """面试主考官面试前准备测试。
 
 覆盖：总控直接分发、会话模式校验、简历资源与切片读取、变量提取、
-提示词注入、开场问题返回与用户隔离。模型与提示词模板用替身。
+最新输入优先（本轮表述 / 资料与简历按时间取新）、提示词注入、
+开场问题返回与用户隔离。模型与提示词模板用替身。
 """
 
 import json
+import time
 import uuid
 
 import httpx
@@ -12,7 +14,12 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 
 from app.agent.agents import interview_host
-from app.db import knowledge_chunk_repo, resource_repo, session_repo
+from app.db import (
+    knowledge_chunk_repo,
+    resource_repo,
+    session_repo,
+    user_profile_repo,
+)
 from app.db.models import KnowledgeChunk
 from app.db.session import SessionLocal
 from app.services import interview_host_workflow
@@ -32,6 +39,21 @@ EXTRACTED = {
     "opening_question": "请介绍你最近负责的那个订单系统项目。",
 }
 EXTRACTION_JSON = json.dumps(EXTRACTED, ensure_ascii=False)
+
+STATED = {
+    "target_job": "前端开发工程师",
+    "target_level": "P7",
+    "years_experience": 5,
+    "target_skills": ["Vue", "TypeScript"],
+    "weak_topics": ["性能优化"],
+}
+STATED_JSON = json.dumps(
+    {**EXTRACTED, "user_stated": STATED}, ensure_ascii=False
+)
+
+# 资料写入时间需要相对简历上传时间可控：未来一秒即「资料更新」，过去一秒反之
+PROFILE_NEWER = int(time.time()) + 3600
+PROFILE_OLDER = int(time.time()) - 3600
 
 PROMPT_TEMPLATE = (
     "岗位：{target_job}；职级：{target_level}；年限：{years_experience}；"
@@ -121,7 +143,7 @@ async def test_prepare_returns_prompt_and_opening_question(
     auth_headers: dict,
     monkeypatch,
 ) -> None:
-    """成功链路：简历变量覆盖画像，年限沿用画像，开场问题独立返回。"""
+    """成功链路：无资料时采用简历变量，年限沿用画像，开场问题独立返回。"""
     _patch_model(monkeypatch)
     _patch_template(monkeypatch)
     session = _interview_session(auth_user["id"])
@@ -152,6 +174,187 @@ async def test_prepare_returns_prompt_and_opening_question(
     assert "技能：Python、MySQL" in data["prompt"]
     assert "薄弱点：分布式事务" in data["prompt"]
     assert "{target_job}" not in data["prompt"]
+
+
+async def test_user_profile_overrides_resume_extraction(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """资料晚于简历上传时，资料中的岗位 / 职级 / 技能 / 薄弱点优先，开场问题仍取简历。"""
+    _patch_model(monkeypatch)
+    _patch_template(monkeypatch)
+    session = _interview_session(auth_user["id"])
+    _add_resume(auth_user["id"], ["项目经历：订单系统，技术栈 Python、MySQL。"])
+    user_profile_repo.insert(
+        auth_user["id"],
+        {
+            "target_job": "前端开发工程师",
+            "years_experience": 5,
+            "target_level": "P7",
+            "target_skills": ["Vue", "TypeScript"],
+            "weak_topics": ["性能优化"],
+            "updated_at": PROFILE_NEWER,
+        },
+    )
+
+    resp = await client.post(
+        BASE,
+        headers=auth_headers,
+        json={
+            "agent_name": INTERVIEW_HOST_AGENT_NAME,
+            "session_id": session["id"],
+            "request_text": "开始面试",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["variables"] == {
+        "target_job": "前端开发工程师",
+        "target_level": "P7",
+        "target_skills": ["Vue", "TypeScript"],
+        "weak_topics": ["性能优化"],
+        "opening_question": EXTRACTED["opening_question"],
+    }
+    assert "岗位：前端开发工程师" in data["prompt"]
+    assert "职级：P7" in data["prompt"]
+    assert "技能：Vue、TypeScript" in data["prompt"]
+    assert "薄弱点：性能优化" in data["prompt"]
+    assert EXTRACTED["target_job"] not in data["prompt"]
+    assert "Python" not in data["prompt"]
+
+
+async def test_empty_profile_fields_fall_back_to_resume(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """资料更新更晚，但未填 / 空值的字段仍回退简历提取结果。"""
+    _patch_model(monkeypatch)
+    _patch_template(monkeypatch)
+    session = _interview_session(auth_user["id"])
+    _add_resume(auth_user["id"], ["教育背景：本科；项目经历：订单系统。"])
+    user_profile_repo.insert(
+        auth_user["id"],
+        {
+            "target_job": "前端开发工程师",
+            "target_skills": [],
+            "updated_at": PROFILE_NEWER,
+        },
+    )
+
+    resp = await client.post(
+        BASE,
+        headers=auth_headers,
+        json={
+            "agent_name": INTERVIEW_HOST_AGENT_NAME,
+            "session_id": session["id"],
+            "request_text": "开始面试",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["variables"]["target_job"] == "前端开发工程师"
+    assert data["variables"]["target_level"] == EXTRACTED["target_level"]
+    assert data["variables"]["target_skills"] == EXTRACTED["target_skills"]
+    assert data["variables"]["weak_topics"] == EXTRACTED["weak_topics"]
+
+
+async def test_resume_newer_than_profile_wins(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """简历上传晚于资料写入时，冲突字段以简历为准。"""
+    _patch_model(monkeypatch)
+    _patch_template(monkeypatch)
+    session = _interview_session(auth_user["id"])
+    _add_resume(auth_user["id"], ["项目经历：订单系统，技术栈 Python、MySQL。"])
+    user_profile_repo.insert(
+        auth_user["id"],
+        {
+            "target_job": "前端开发工程师",
+            "years_experience": 5,
+            "target_level": "P7",
+            "target_skills": ["Vue", "TypeScript"],
+            "weak_topics": ["性能优化"],
+            "updated_at": PROFILE_OLDER,
+        },
+    )
+
+    resp = await client.post(
+        BASE,
+        headers=auth_headers,
+        json={
+            "agent_name": INTERVIEW_HOST_AGENT_NAME,
+            "session_id": session["id"],
+            "request_text": "开始面试",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["variables"] == EXTRACTED
+    assert "岗位：后端开发工程师" in data["prompt"]
+    assert "技能：Python、MySQL" in data["prompt"]
+    assert "前端开发工程师" not in data["prompt"]
+    assert "Vue" not in data["prompt"]
+
+
+async def test_chat_statement_overrides_profile_and_resume(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """本轮明确表述优先级最高：覆盖更晚写入的资料与简历，年限同步更新。"""
+    _patch_model(monkeypatch, STATED_JSON)
+    _patch_template(monkeypatch)
+    session = _interview_session(auth_user["id"])
+    _add_resume(auth_user["id"], ["项目经历：订单系统，技术栈 Python、MySQL。"])
+    user_profile_repo.insert(
+        auth_user["id"],
+        {
+            "target_job": "全栈开发工程师",
+            "years_experience": 8,
+            "target_level": "P8",
+            "target_skills": ["Java"],
+            "weak_topics": ["架构设计"],
+            "updated_at": PROFILE_NEWER,
+        },
+    )
+
+    resp = await client.post(
+        BASE,
+        headers=auth_headers,
+        json={
+            "agent_name": INTERVIEW_HOST_AGENT_NAME,
+            "session_id": session["id"],
+            "request_text": "我想面前端，5 年经验，P7，重点考察性能优化",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["variables"] == {
+        "target_job": STATED["target_job"],
+        "target_level": STATED["target_level"],
+        "target_skills": STATED["target_skills"],
+        "weak_topics": STATED["weak_topics"],
+        "opening_question": EXTRACTED["opening_question"],
+    }
+    assert "岗位：前端开发工程师" in data["prompt"]
+    assert "职级：P7" in data["prompt"]
+    assert "年限：5 年" in data["prompt"]
+    assert "技能：Vue、TypeScript" in data["prompt"]
+    assert "薄弱点：性能优化" in data["prompt"]
+    assert "全栈开发工程师" not in data["prompt"]
+    assert "Java" not in data["prompt"]
 
 
 async def test_prepare_requires_interview_session(
