@@ -3,7 +3,7 @@
 工作流状态以 run_id 定位；对上层只暴露 dict 副本，不泄露 ORM 对象。
 """
 
-from sqlalchemy import select
+from sqlalchemy import select, update as sql_update
 
 from .models import WorkflowRun
 from .session import SessionLocal
@@ -34,6 +34,28 @@ def get_for_user(run_id: str, user_id: int) -> dict | None:
             )
         )
         return _to_dict(obj) if obj else None
+
+
+def claim_status(
+    run_id: str, user_id: int, expected_status: str, new_status: str
+) -> bool:
+    """原子地把 run 从 expected_status 切到 new_status。
+
+    以 `UPDATE ... WHERE status=expected` 的条件更新保证并发确认时只有一次成功；
+    返回是否抢到状态迁移。
+    """
+    with SessionLocal() as session:
+        result = session.execute(
+            sql_update(WorkflowRun)
+            .where(
+                WorkflowRun.run_id == run_id,
+                WorkflowRun.user_id == user_id,
+                WorkflowRun.status == expected_status,
+            )
+            .values(status=new_status)
+        )
+        session.commit()
+        return result.rowcount == 1
 
 
 def update(run_id: str, fields: dict) -> dict | None:

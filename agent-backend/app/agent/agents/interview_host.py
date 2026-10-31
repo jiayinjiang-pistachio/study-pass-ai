@@ -18,6 +18,10 @@ from ...services.prompt_injection_service import sanitize_items, sanitize_text
 
 NODE_NAME = "interview_host_extract"
 OPENING_QUESTION_MAX_CHARS = 500
+PROJECT_EXPERIENCE_MAX_CHARS = 1000
+# 工作年限允许范围，与用户资料校验保持一致
+YEARS_MIN = 0
+YEARS_MAX = 60
 
 # 输出契约静态写在 SystemMessage 中，避免提示词模板里的花括号被当成变量
 EXTRACT_SYSTEM_PROMPT = """你是面试主考官的资料分析助手。请阅读候选人简历与候选人本次提出的要求。
@@ -26,7 +30,9 @@ EXTRACT_SYSTEM_PROMPT = """你是面试主考官的资料分析助手。请阅�
 {
   "target_job": "目标岗位；简历未体现时填「未提供」",
   "target_level": "目标职级或经验层级（如 P6 / 高级 / 应届）；未体现时填「未提供」",
+  "years_experience": 3,
   "target_skills": ["候选人已掌握的技能，优先提取具体技术栈"],
+  "project_experience": "用一句话概括候选人最重要的项目经历；未体现时输出空字符串",
   "weak_topics": ["简历中缺失或明显薄弱的面试考察点"],
   "opening_question": "一句中文开场问题，结合简历项目经历，只问一个问题",
   "user_stated": {
@@ -39,13 +45,15 @@ EXTRACT_SYSTEM_PROMPT = """你是面试主考官的资料分析助手。请阅�
 }
 
 要求：
-1. 前五个键只依据简历提取，不因本次要求改写；
+1. 除 user_stated 外的键只依据简历提取，不因本次要求改写；
 2. user_stated 只提取候选人本次要求中明确表达的信息，不推断、不照抄简历；
    没有明确信息时输出空对象 {}；
-3. years_experience 为整数（0 表示应届 / 无经验），未提及则不要输出该键；
+3. years_experience 为整数（0 表示应届 / 无经验）；简历未体现时填 null，
+   user_stated 中未提及则不要输出该键；
 4. target_skills 最多 20 项，weak_topics 最多 10 项，每项不超过 50 字；
 5. 技能与薄弱点去重，使用原文中的技术名词，不编造公司、项目与数据；
-6. 不要输出 Markdown 代码块或任何解释文字。"""
+6. project_experience 只概括简历中已出现的一个代表性项目，不超过 200 字；
+7. 不要输出 Markdown 代码块或任何解释文字。"""
 
 
 class InterviewHostAgent:
@@ -90,7 +98,11 @@ class InterviewHostAgent:
         return {
             "target_job": sanitize_text(data.get("target_job")) or "未提供",
             "target_level": sanitize_text(data.get("target_level")) or "未提供",
+            "years_experience": _normalize_years(data.get("years_experience")),
             "target_skills": sanitize_items(data.get("target_skills")),
+            "project_experience": sanitize_text(
+                data.get("project_experience"), PROJECT_EXPERIENCE_MAX_CHARS
+            ),
             "weak_topics": sanitize_items(data.get("weak_topics"))[:10],
             "opening_question": sanitize_text(
                 data.get("opening_question"), OPENING_QUESTION_MAX_CHARS
@@ -116,12 +128,18 @@ class InterviewHostAgent:
         if weak_topics:
             stated["weak_topics"] = weak_topics[:10]
 
-        years = data.get("years_experience")
-        if years is not None and str(years).strip():
-            try:
-                years_value = int(years)
-            except (TypeError, ValueError):
-                years_value = None
-            if years_value is not None and 0 <= years_value <= 60:
-                stated["years_experience"] = years_value
+        years = _normalize_years(data.get("years_experience"))
+        if years is not None:
+            stated["years_experience"] = years
         return stated
+
+
+def _normalize_years(value: object) -> int | None:
+    """把年限清洗为 0..60 的整数；缺失或非法返回 None。"""
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        years = int(value)
+    except (TypeError, ValueError):
+        return None
+    return years if YEARS_MIN <= years <= YEARS_MAX else None

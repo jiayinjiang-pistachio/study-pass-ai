@@ -28,6 +28,16 @@ def get(message_id: int) -> dict | None:
         return _to_dict(obj) if obj else None
 
 
+def delete_by_id(message_id: int) -> int:
+    """删除单条消息，返回删除行数（确认面试失败时补偿入口消息）。"""
+    with SessionLocal() as session:
+        result = session.execute(
+            delete(ChatMessage).where(ChatMessage.id == message_id)
+        )
+        session.commit()
+        return result.rowcount
+
+
 def get_by_request_id(request_id: str, user_id: int) -> dict | None:
     """按 request_id + user_id 查询最新一条。
 
@@ -106,6 +116,17 @@ def update_result(
         obj.response_text = response_text
         obj.status = status
         obj.reference_sources = reference_sources
+        session.commit()
+        return True
+
+
+def set_interview_id(message_id: int, interview_id: int) -> bool:
+    """把入口消息关联到面试记录；消息不存在返回 False。"""
+    with SessionLocal() as session:
+        obj = session.get(ChatMessage, message_id)
+        if obj is None:
+            return False
+        obj.interview_id = interview_id
         session.commit()
         return True
 

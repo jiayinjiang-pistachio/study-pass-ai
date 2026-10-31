@@ -165,6 +165,10 @@ class Interview(Base):
     )
     # 一问一答列表：[{id, question, answer, created_at}, ...]，created_at 为 Unix 秒
     qa_object: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    # 用户确认背景后重新渲染的主考官提示词；仅第二阶段写入
+    interview_host_prompt: Mapped[str | None] = mapped_column(
+        MEDIUMTEXT, nullable=True
+    )
     interview_duration: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), nullable=False
     )  # 累计面试时长（秒）
