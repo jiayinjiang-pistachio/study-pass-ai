@@ -99,6 +99,7 @@ agent-backend/
 │   │   ├── chat.py          #   流式对话入参（StreamChatIn / SegmentIn）
 │   │   ├── interview.py     #   面试详情出参（InterviewOut，含 qa_object）
 │   │   ├── learning_workflow.py # 测评入参 / 出参（Start / Submit / Detail）
+│   │   ├── interview_host.py # 面试前准备出参（ResumeInfoOut / InterviewVariablesOut / InterviewPrepareOut）
 │   │   ├── note.py          #   笔记 CRUD 入参 / 分页出参（NoteCreate / NoteUpdate / NoteOut / NoteListOut）
 │   │   ├── orchestrator.py  #   总控入参 / 工作流分支出参
 │   │   ├── profile.py       #   背景资料入参 / 出参（ProfileCreate / ProfileUpdate / ProfileOut）
@@ -120,6 +121,7 @@ agent-backend/
 │   │   ├── prompt_injection_service.py # 提示词变量注入：验证（清洗 / 限长）→ 转换（格式化 / 默认值）→ 填充（占位符替换）
 │   │   ├── interview_service.py # 面试详情查询（interview_id + user_id 防越权）
 │   │   ├── learning_workflow.py # 学习测评：checkpoint 校验 + interrupt 恢复 + 状态持久化
+│   │   ├── interview_host_workflow.py # 面试前准备：会话 / 简历校验 + 变量提取 + 提示词注入
 │   │   ├── note_archive_service.py # 笔记归档：Markdown 生成 + 占位符校验 + A2A handler
 │   │   ├── note_service.py  #   笔记：学习测评幂等保存 + CRUD（按 user_id 隔离）
 │   │   ├── orchestrator_service.py # 流程总控：规则表 + 关键词 / 语义路由 + 入参映射
@@ -131,7 +133,9 @@ agent-backend/
 │   │   ├── avatar_service.py #   用户头像读取：resources/用户头像路径 → MinIO 字节流
 │   │   ├── resource_cleanup.py # 每天 03:00 清理过期资源（先删对象再删元数据）
 │   │   └── health_service.py#   健康检查：数据库探活，异常转 SystemException(503)
-│   ├── agent/               # Agent 编排层：LangGraph 工作流图 + 跨请求执行现场
+│   ├── agent/               # Agent 编排层：智能体能力 + LangGraph 工作流图 + 跨请求执行现场
+│   │   ├── agents/
+│   │   │   └── interview_host.py # 面试主考官 Agent：只调用大模型从简历提取准备变量
 │   │   └── workflows/
 │   │       ├── checkpoint.py #   全局 MemorySaver 单例 + thread 配置（thread_id = run_id）
 │   │       └── learning_quiz.py # 学习测评单图：出题 → interrupt 等待作答 → 评分 → 完成
@@ -179,6 +183,7 @@ agent-backend/
 │   ├── test_learning_workflow.py # 学习测评：interrupt 暂停 / 恢复评分 / checkpoint 失效 / 作答校验
 │   ├── test_notes.py        # 笔记 CRUD：分页 / 过滤 / 检索 / 用户隔离 / 校验
 │   ├── test_note_archive.py # 笔记归档：Markdown 生成 / 占位符 / 落库 / A2A 集成
+│   ├── test_interview_host.py # 面试前准备：直接分发 / 会话模式 / 简历切片 / 提示词注入
 │   ├── test_orchestrator.py #   流程总控：路由策略 / 混合响应 / 越权隔离
 │   ├── test_semantic_intent.py # 语义意图：阈值 / 多示例 / 缓存 / 失败降级
 │   └── test_resources.py    #   过期资源清理用例
@@ -354,13 +359,14 @@ agent-backend/
 - **笔记管理约定**（`/api/notes`，整组需登录）：列表按创建时间倒序分页，支持 `note_type` 精确过滤与 `keyword` 在标题 / 正文模糊检索（`%` / `_` 自动转义）；详情 / 更新 / 删除按 `note_id + user_id` 查询，越权统一 `404`。手动创建需指定当前用户的 `session_id`（别人的会话 → `404`），`source_run_id` 由后端生成 UUID 满足唯一约束；更新为局部更新（`exclude_unset`），列表不返回正文 `content`。出参不暴露 `user_id`。
 - **流程总控约定**（`POST /api/agent/tasks/start`，需登录）：
   - 前端统一入口：传 `agent_name` + `session_id` + `request_text`，由后端决定走工作流还是通用聊天。入参还包含 `select_mode` / `question_count` / `provider` / `request_id` / `request_segments`，按分支各取所需。
-  - 路由策略（`app/services/orchestrator_service.py`）：未登记的 `agent_name` → `404`；`required_keywords` 任一命中 → 直接启动工作流；否则用 fastembed 语义相似度对比规则的 `intent_examples`，最大相似度 `>= intent_threshold` 也启动；仍未命中 → 通用聊天。关键词为双字词，避免「问题 / 话题 / 标题」误命中。
-  - 已登记聊天智能体（`CHAT_AGENT_NAMES`：`difficulty_learner / note_archiver / interview_host / interview_evaluator`）没有工作流规则时**直接走通用聊天**，不触发关键词 / 语义判断，仍使用统一聊天提示词；只有既无规则又不在名单内的 `agent_name` 才返回 `404`。
-  - 当前规则 `quiz_generate_workflow -> learning_quiz`：命中后显式构造 `LearningWorkflowStartIn` 调用 `learning_workflow.start_learning_workflow()`，返回 `{route, agent_name, workflow_type, run_id, status, quiz}`。规则指向未实现的 `workflow_type` → `500`（配置错误）。
-  - **混合响应例外**：工作流分支返回统一 JSON 信封；聊天分支复用 `chat_service.prepare_stream()` + `stream_reply()`，返回 `text/event-stream`（事件与 `/stream-chat` 一致）。因此该路由**不设置 `response_class`**（否则 JSON 分支跳过 `response_model` 校验），`response_model` 只描述工作流分支，SSE 契约通过 `responses` 在 OpenAPI 中声明。
+  - 路由策略（`app/services/orchestrator_service.py`）：未登记的 `agent_name` → `404`；`direct=True` 的规则直接启动工作流；否则 `required_keywords` 任一命中 → 直接启动工作流；否则用 fastembed 语义相似度对比规则的 `intent_examples`，最大相似度 `>= intent_threshold` 也启动；仍未命中 → 通用聊天。关键词为双字词，避免「问题 / 话题 / 标题」误命中。
+  - 已登记聊天智能体（`CHAT_AGENT_NAMES`：`difficulty_learner / note_archiver / interview_evaluator`）没有工作流规则时**直接走通用聊天**，不触发关键词 / 语义判断，仍使用统一聊天提示词；只有既无规则又不在名单内的 `agent_name` 才返回 `404`。
+  - 当前规则：`quiz_generate_workflow -> learning_quiz`（关键词 / 语义命中），`interview_host -> interview_prepare`（`direct=True`，agent_name 命中即启动）。学习测评分支显式构造 `LearningWorkflowStartIn` 调用 `learning_workflow.start_learning_workflow()`；面试准备分支调用 `interview_host_workflow.start_interview_prepare()`。规则指向未实现的 `workflow_type` → `500`（配置错误）。
+  - **面试前准备约定**（`workflow_type=interview_prepare`）：会话必须归属当前用户且 `session_mode=1`（否则 `400`）；取该用户最新未过期的 `doc_category='resume'` 资源（无简历 `404`），按 `knowledge_chunks.chunk_index` 升序拼接正文（无切片 `409`）；`InterviewHostAgent` 只负责调用模型提取 `target_job / target_level / target_skills / weak_topics / opening_question`；工作流读取 `interview_host:interview` 公共 + 私有模板，先用用户画像注入（`years_experience` 等），再用简历提取值覆盖并渲染；`opening_question` 只随响应返回，不写入提示词。变量提取与提示词生成各打一条 INFO 日志。
+  - **混合响应例外**：工作流分支返回统一 JSON 信封；聊天分支复用 `chat_service.prepare_stream()` + `stream_reply()`，返回 `text/event-stream`（事件与 `/stream-chat` 一致）。因此该路由**不设置 `response_class`**（否则 JSON 分支跳过 `response_model` 校验），`response_model` 用按 `workflow_type` 区分的联合类型描述工作流分支，SSE 契约通过 `responses` 在 OpenAPI 中声明。
   - 双契约限制：工作流分支忽略 `select_mode` / `request_segments`，`request_id` 暂未做幂等（重试会新建 `workflow_runs`）；聊天分支忽略 `question_count` / `provider`（聊天模型走全局配置）。
   - 语义模型在 `main.py` 的 `lifespan` 中用守护线程预热，失败只告警、首次判断时重试，不阻塞启动；关键词命中时不会调用向量模型。
-  - 扩展方式：在 `WORKFLOW_ROUTE_RULES` 增加一条 `WorkflowRouteRule`（`workflow_type` / `required_keywords` / `intent_examples` / `intent_threshold`），并在 `start_task` 中补对应 `workflow_type` 分支。
+  - 扩展方式：在 `WORKFLOW_ROUTE_RULES` 增加一条 `WorkflowRouteRule`（`workflow_type` / `required_keywords` / `intent_examples` / `intent_threshold` / 可选 `direct`），并在 `start_task` 中补对应 `workflow_type` 分支。
   - 路由决策、双分支时序、LangGraph 内部结构与语义兜底细节见 [`docs/orchestrator-workflow-design.md`](docs/orchestrator-workflow-design.md)。
 - **用户背景资料约定**（`/api/profiles`，整组需登录）：一人一份（`user_profiles.user_id` 唯一），`user_id` 一律取自令牌，不接受客户端传入，因此只能操作自己的资料。`POST /api/profiles` 创建（已存在 → `409`）；`GET/PUT/DELETE /api/profiles/me` 查询 / 局部更新 / 删除（不存在 → `404`）。字段：`target_job`（≤64）、`years_experience`（0..60）、`target_level`（≤32）、`target_skills` / `weak_topics`（字符串数组，≤20 项、单项 ≤50 字）。出参不含 `user_id`。资料供提示词变量注入使用，删除后注入回退为默认值。
 - **提示词版本管理约定**（`/api/prompt`，整组需登录）：

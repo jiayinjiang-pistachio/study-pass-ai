@@ -9,6 +9,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field, StringConstraints
 
 from .chat import SegmentIn
+from .interview_host import InterviewPrepareOut
 from .learning_workflow import (
     DEFAULT_QUESTION_COUNT,
     MAX_QUESTION_COUNT,
@@ -54,9 +55,18 @@ class AgentTaskStartIn(BaseModel):
     )
 
 
-class AgentTaskWorkflowOut(LearningWorkflowStartOut):
-    """工作流分支出参：在学习测评结果上追加路由元信息。"""
+class AgentTaskLearningWorkflowOut(LearningWorkflowStartOut):
+    """学习测评分支出参：在学习测评结果上追加路由元信息。"""
 
     route: Literal["workflow"] = Field("workflow", description="固定为 workflow")
     agent_name: str = Field(..., description="命中的智能体标识")
-    workflow_type: str = Field(..., description="实际启动的工作流类型")
+    workflow_type: Literal["learning_quiz"] = Field(
+        ..., description="实际启动的工作流类型"
+    )
+
+
+# 工作流分支可能有多种结果，按 workflow_type 区分；学习测评与面试准备字段不同
+AgentTaskWorkflowOut = Annotated[
+    AgentTaskLearningWorkflowOut | InterviewPrepareOut,
+    Field(discriminator="workflow_type"),
+]

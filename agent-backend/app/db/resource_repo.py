@@ -5,7 +5,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from .models import Resource
 from .session import SessionLocal
@@ -69,6 +69,22 @@ def delete(resource_id: int) -> bool:
         session.delete(obj)
         session.commit()
         return True
+
+
+def get_latest_by_category(user_id: int, doc_category: str) -> dict | None:
+    """取用户某类文档中最新上传且未过期的一条；没有时返回 None。"""
+    with SessionLocal() as session:
+        obj = session.scalar(
+            select(Resource)
+            .where(
+                Resource.user_id == user_id,
+                Resource.doc_category == doc_category,
+                or_(Resource.expire_time.is_(None), Resource.expire_time > func.now()),
+            )
+            .order_by(Resource.create_time.desc(), Resource.id.desc())
+            .limit(1)
+        )
+        return _to_dict(obj) if obj else None
 
 
 def list_by_user(user_id: int) -> list[dict]:

@@ -149,9 +149,13 @@ def test_route_chat_agents_go_straight_to_chat(monkeypatch, agent_name: str) -> 
 
 
 def test_route_rules_use_precise_keywords() -> None:
-    """规则不变量：双字关键词、不含单字「题」、阈值合法。"""
+    """规则不变量：普通规则用双字关键词且不含单字「题」；直接分发规则不再筛词。"""
     for rule in WORKFLOW_ROUTE_RULES.values():
         assert rule.workflow_type
+        if rule.direct:
+            assert not rule.required_keywords
+            assert not rule.intent_examples
+            continue
         assert rule.required_keywords
         assert rule.intent_examples
         assert all(len(keyword) >= 2 for keyword in rule.required_keywords)

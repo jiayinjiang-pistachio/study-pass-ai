@@ -11,7 +11,18 @@ from sqlalchemy import select
 from .models import KnowledgeChunk, Resource
 from .session import SessionLocal
 
-__all__ = ["fetch_sources_by_vector_ids"]
+__all__ = ["fetch_sources_by_vector_ids", "get_text_by_resource"]
+
+
+def get_text_by_resource(resource_id: int) -> str:
+    """按 chunk_index 升序拼接某资源的全部切片原文；没有切片时返回空串。"""
+    with SessionLocal() as session:
+        texts = session.scalars(
+            select(KnowledgeChunk.text)
+            .where(KnowledgeChunk.resource_id == resource_id)
+            .order_by(KnowledgeChunk.chunk_index.asc())
+        ).all()
+        return "\n".join(texts)
 
 
 def fetch_sources_by_vector_ids(vector_ids: Sequence[str]) -> dict[str, dict]:

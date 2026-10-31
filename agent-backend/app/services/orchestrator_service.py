@@ -20,13 +20,14 @@ from ..core.exceptions import BusinessException, SystemException
 from ..schemas.chat import StreamChatIn
 from ..schemas.learning_workflow import LearningWorkflowStartIn
 from ..schemas.orchestrator import AgentTaskStartIn
-from . import learning_workflow
+from . import interview_host_workflow, learning_workflow
 from .a2a_handoff_service import A2AHandoffService
 from .semantic_intent import SemanticIntentClassifier
 
 logger = logging.getLogger(__name__)
 
 QUIZ_AGENT_NAME = "quiz_generate_workflow"
+INTERVIEW_HOST_AGENT_NAME = "interview_host"
 STATUS_SCHEDULED = "scheduled"
 
 
@@ -45,7 +46,6 @@ CHAT_AGENT_NAMES = frozenset(
     {
         "difficulty_learner",
         "note_archiver",
-        "interview_host",
         "interview_evaluator",
     }
 )
@@ -63,6 +63,8 @@ class WorkflowRouteRule:
     required_keywords: tuple[str, ...]
     intent_examples: tuple[str, ...]
     intent_threshold: float = 0.6
+    # 直接分发：agent_name 命中即启动工作流，不做关键词 / 语义判断
+    direct: bool = False
 
 
 WORKFLOW_ROUTE_RULES: dict[str, WorkflowRouteRule] = {
@@ -92,6 +94,12 @@ WORKFLOW_ROUTE_RULES: dict[str, WorkflowRouteRule] = {
         # 真实出题改写句普遍 ≥ 0.68，故取 0.65 留出余量；短句「考考我…」走关键词。
         intent_threshold=0.65,
     ),
+    INTERVIEW_HOST_AGENT_NAME: WorkflowRouteRule(
+        workflow_type=interview_host_workflow.WORKFLOW_TYPE_INTERVIEW_PREPARE,
+        required_keywords=(),
+        intent_examples=(),
+        direct=True,
+    ),
 }
 
 
@@ -111,6 +119,9 @@ class OrchestratorService:
                 http_status=status.HTTP_404_NOT_FOUND,
                 detail=f"agent_name={agent_name}",
             )
+
+        if rule.direct:
+            return rule
 
         text = request_text.strip()
         if any(keyword in text for keyword in rule.required_keywords):
@@ -140,6 +151,20 @@ class OrchestratorService:
                 provider=payload.provider,
             )
             result = learning_workflow.start_learning_workflow(user_id, start)
+            return {
+                "route": "workflow",
+                "agent_name": payload.agent_name,
+                "workflow_type": rule.workflow_type,
+                **result,
+            }
+
+        if (
+            rule.workflow_type
+            == interview_host_workflow.WORKFLOW_TYPE_INTERVIEW_PREPARE
+        ):
+            result = interview_host_workflow.start_interview_prepare(
+                user_id, payload.session_id
+            )
             return {
                 "route": "workflow",
                 "agent_name": payload.agent_name,
