@@ -176,6 +176,25 @@ async def test_start_generates_quiz_and_persists(
     assert message["status"] == 1
 
 
+async def test_start_recovers_from_transient_model_failure(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """首次输出非法 → 自动重试，第二次成功即正常出题，用户无感。"""
+    session = _new_session(auth_user["id"])
+    _patch_model(monkeypatch, "抱歉，我无法出题", QUIZ_JSON)
+
+    data = await _start(client, auth_headers, session["id"])
+
+    assert data["status"] == learning_workflow.STATUS_WAITING_ANSWER
+    assert [q["question_id"] for q in data["quiz"]] == [1, 2, 3]
+    row = workflow_run_repo.get_for_user(data["run_id"], auth_user["id"])
+    assert row["status"] == learning_workflow.STATUS_WAITING_ANSWER
+    assert row["error_message"] is None
+
+
 @pytest.mark.parametrize(
     ("request_text", "expected"),
     [
@@ -247,9 +266,10 @@ async def test_start_marks_failed_on_invalid_model_output(
     auth_headers: dict,
     monkeypatch,
 ) -> None:
-    """模型输出非 JSON → 502，运行记录置为 failed 并保留错误原因。"""
+    """模型输出非 JSON → 重试耗尽后 502，记录失败节点与原因。"""
     session = _new_session(auth_user["id"])
-    _patch_model(monkeypatch, "抱歉，我无法出题")
+    # 默认执行 2 次（首次 + 重试），两次都返回非法输出才会彻底失败
+    _patch_model(monkeypatch, "抱歉，我无法出题", "抱歉，我无法出题")
 
     resp = await client.post(
         "/api/learning-workflows/start",
@@ -266,6 +286,8 @@ async def test_start_marks_failed_on_invalid_model_output(
         ).one()
     assert row.status == learning_workflow.STATUS_FAILED
     assert "JSON" in (row.error_message or "")
+    assert row.state_json["error_node"] == "generate_quiz"
+    assert "generate_quiz" in row.state_json["error_message"]
 
 
 async def test_submit_rejects_expired_checkpoint(
@@ -307,9 +329,9 @@ async def test_submit_marks_failed_on_invalid_evaluation(
     auth_headers: dict,
     monkeypatch,
 ) -> None:
-    """评分阶段模型输出非 JSON → 502，运行记录置为 failed。"""
+    """评分阶段模型输出非 JSON → 重试耗尽后 502，记录失败节点。"""
     session = _new_session(auth_user["id"])
-    _patch_model(monkeypatch, QUIZ_JSON, "评分失败")
+    _patch_model(monkeypatch, QUIZ_JSON, "评分失败", "评分失败")
     started = await _start(client, auth_headers, session["id"])
 
     resp = await client.post(
@@ -328,6 +350,7 @@ async def test_submit_marks_failed_on_invalid_evaluation(
     row = workflow_run_repo.get_for_user(started["run_id"], auth_user["id"])
     assert row["status"] == learning_workflow.STATUS_FAILED
     assert "JSON" in (row["error_message"] or "")
+    assert row["state_json"]["error_node"] == "evaluate_answer"
 
 
 @pytest.mark.parametrize(

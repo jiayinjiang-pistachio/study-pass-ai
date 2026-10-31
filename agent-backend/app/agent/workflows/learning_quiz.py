@@ -21,6 +21,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from ...core.exceptions import BusinessException
+from ...core.retry import run_with_retry
 from ...services import prompt_template_service
 from ...services.ai.json_utils import parse_json_object
 from ...services.ai.llm import get_chat_model
@@ -435,7 +436,12 @@ def normalize_answers(quiz: list[dict], answers: list) -> list[dict]:
 
 
 def generate_quiz(state: LearningWorkflowState) -> dict:
-    """调用模型生成结构化题目，并归一化成前端可渲染的 JSON。"""
+    """调用模型生成题目；瞬时故障自动重试，耗尽后交业务层统一落库。"""
+    return run_with_retry(lambda: _generate_quiz_once(state), node="generate_quiz")
+
+
+def _generate_quiz_once(state: LearningWorkflowState) -> dict:
+    """单次出题：模型输出经解析、归一化后返回可渲染题目。"""
     question_count = state.get("question_count") or DEFAULT_QUESTION_COUNT
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -477,7 +483,12 @@ def wait_user_answer(state: LearningWorkflowState) -> dict:
 
 
 def evaluate_answer(state: LearningWorkflowState) -> dict:
-    """一次模型调用完成评分、逐题点评、薄弱点与整体建议。"""
+    """调用模型完成评分；瞬时故障自动重试，耗尽后交业务层统一落库。"""
+    return run_with_retry(lambda: _evaluate_answer_once(state), node="evaluate_answer")
+
+
+def _evaluate_answer_once(state: LearningWorkflowState) -> dict:
+    """单次评分：一次模型调用完成评分、逐题点评、薄弱点与整体建议。"""
     payload = json.dumps(
         {
             "quiz": state.get("quiz") or [],

@@ -39,6 +39,7 @@ from ..agent.workflows.learning_quiz import (
 )
 from ..core.config import LLM_PROVIDER
 from ..core.exceptions import BusinessException, SystemException
+from ..core.retry import RetryExhaustedError
 from ..db import message_repo, session_repo, workflow_run_repo
 from ..schemas.learning_workflow import (
     DEFAULT_QUESTION_COUNT,
@@ -130,39 +131,58 @@ def _delete_thread(run_id: str) -> None:
         logger.warning("释放工作流 checkpoint 失败 | run_id=%s", run_id, exc_info=True)
 
 
-def _mark_failed(run_id: str, state: LearningWorkflowState, exc: Exception) -> None:
-    """把失败状态与原因写回数据库；写库失败不能掩盖原始异常。"""
-    failed_state = {**state, "status": STATUS_FAILED}
+def mark_failed(
+    run_id: str, state: LearningWorkflowState, exc: Exception, *, node: str
+) -> None:
+    """统一失败落库：状态、报错节点与错误信息标准化写回；写库失败不掩盖原始异常。"""
+    message = str(exc)[:ERROR_MESSAGE_MAX_CHARS]
+    failed_state = {
+        **state,
+        "status": STATUS_FAILED,
+        "error_node": node,
+        "error_message": message,
+    }
     try:
         workflow_run_repo.update(
             run_id,
             {
                 "status": STATUS_FAILED,
                 "state_json": failed_state,
-                "error_message": str(exc)[:ERROR_MESSAGE_MAX_CHARS],
+                "error_message": message,
             },
         )
     except Exception:
-        logger.warning("记录工作流失败状态出错 | run_id=%s", run_id, exc_info=True)
+        logger.warning(
+            "记录工作流失败状态出错 | run_id=%s node=%s", run_id, node, exc_info=True
+        )
 
 
 def _raise_workflow_error(
-    run_id: str, state: LearningWorkflowState, exc: Exception, action: str
+    run_id: str,
+    state: LearningWorkflowState,
+    exc: Exception,
+    *,
+    node: str,
+    action: str,
 ) -> None:
     """按错误类型转成 503（配置缺失）或 502（模型 / 解析失败）。"""
-    _mark_failed(run_id, state, exc)
+    mark_failed(run_id, state, exc, node=node)
     _delete_thread(run_id)
-    if isinstance(exc, RuntimeError):
+    # 重试耗尽只包装；配置缺失等原始异常类型仍用于区分 503 / 502
+    cause = exc.last_error if isinstance(exc, RetryExhaustedError) else exc
+    if isinstance(cause, RuntimeError):
         raise SystemException(
             "学习测评服务暂不可用",
             http_status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
+            detail=str(cause),
         ) from exc
-    logger.error("学习测评%s失败 | run_id=%s", action, run_id, exc_info=True)
+    logger.error(
+        "学习测评%s失败 | run_id=%s node=%s", action, run_id, node, exc_info=True
+    )
     raise SystemException(
         f"学习测评{action}失败，请稍后重试",
         http_status=status.HTTP_502_BAD_GATEWAY,
-        detail=f"run_id={run_id} error={exc}",
+        detail=f"run_id={run_id} node={node} error={exc}",
     ) from exc
 
 
@@ -226,12 +246,16 @@ def start_learning_workflow(user_id: int, payload) -> dict:
         graph.invoke(state, config)
         snapshot = graph.get_state(config)
     except Exception as exc:
-        _raise_workflow_error(run_id, state, exc, "生成")
+        _raise_workflow_error(run_id, state, exc, node="generate_quiz", action="生成")
 
     # 图应停在等待作答节点；停在其他地方说明编排异常，尽早暴露
     if "wait_user_answer" not in snapshot.next:
         _raise_workflow_error(
-            run_id, state, ValueError(f"图未停在等待作答：next={snapshot.next}"), "生成"
+            run_id,
+            state,
+            ValueError(f"图未停在等待作答：next={snapshot.next}"),
+            node="generate_quiz",
+            action="生成",
         )
 
     quiz = snapshot.values.get("quiz") or []
@@ -311,7 +335,12 @@ def submit_learning_workflow(
     if snapshot is None or snapshot.next != ("wait_user_answer",) or not snapshot.values.get("quiz"):
         # MemorySaver 随进程消失：重启 / 多进程 / 记录被手工改动都会走到这里，
         # 不能直接 resume（LangGraph 会从 START 重新出题并再调用一次模型）。
-        _mark_failed(run_id, dict(row["state_json"] or {}), RuntimeError("checkpoint 丢失"))
+        mark_failed(
+            run_id,
+            dict(row["state_json"] or {}),
+            RuntimeError("checkpoint 丢失"),
+            node="checkpoint",
+        )
         _delete_thread(run_id)
         raise BusinessException(
             "测评流程已失效，请重新发起测评",
@@ -339,7 +368,9 @@ def submit_learning_workflow(
     try:
         result = graph.invoke(Command(resume=answers), config)
     except Exception as exc:
-        _raise_workflow_error(run_id, grading_state, exc, "评测")
+        _raise_workflow_error(
+            run_id, grading_state, exc, node="evaluate_answer", action="评测"
+        )
 
     completed_state = {**grading_state, **result, "status": STATUS_COMPLETED}
     # 信封只是产出方建议，下一跳必须经调度器校验后才落库与对外返回
