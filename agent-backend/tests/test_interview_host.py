@@ -26,7 +26,7 @@ from app.db import (
 )
 from app.db.models import KnowledgeChunk
 from app.db.session import SessionLocal
-from app.services import interview_host_workflow
+from app.services import interview_host_workflow, voice_interview_service
 from app.services.orchestrator_service import (
     INTERVIEW_HOST_AGENT_NAME,
     WORKFLOW_ROUTE_RULES,
@@ -96,6 +96,38 @@ def _patch_template(monkeypatch) -> None:
             "injected_variables": {"years_experience": "3 年"},
         },
     )
+
+
+def _patch_voice(monkeypatch) -> tuple[list[dict], list[int]]:
+    """替身 RTC：记录启动 / 停止调用，避免测试触达真实火山服务。"""
+    started: list[dict] = []
+    stopped: list[int] = []
+
+    def fake_start(self, interview: dict) -> dict:
+        started.append(interview)
+        interview_id = interview["id"]
+        return {
+            "app_id": "rtc-app",
+            "room_id": f"voiceinterview{interview_id}",
+            "user_id": str(interview["user_id"]),
+            "bot_user_id": f"aiinterviewer{interview_id}",
+            "task_id": f"voiceinterview{interview_id}",
+            "token": "rtc-token",
+            "expire_at": 2000000000,
+            "started": True,
+        }
+
+    def fake_stop(self, interview_id: int) -> bool:
+        stopped.append(interview_id)
+        return True
+
+    monkeypatch.setattr(
+        voice_interview_service.VoiceInterviewService, "start_voice_chat", fake_start
+    )
+    monkeypatch.setattr(
+        voice_interview_service.VoiceInterviewService, "stop_voice_chat", fake_stop
+    )
+    return started, stopped
 
 
 def _interview_session(user_id: int, session_mode: int = 1) -> dict:
@@ -532,6 +564,90 @@ async def test_confirm_creates_interview_message_and_prompt(
     )
     assert detail.status_code == 200, detail.text
     assert "岗位：前端开发工程师" in detail.json()["data"]["interview_host_prompt"]
+
+
+async def test_confirm_returns_voice_room_and_finish_saves_result(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """确认后返回入房参数并启动 AI；挂断接口停止 AI 并落库问答与时长。"""
+    session, prepared = await _prepare(
+        client, auth_headers, auth_user["id"], monkeypatch
+    )
+    _patch_template(monkeypatch)
+    started, stopped = _patch_voice(monkeypatch)
+
+    confirmed = await client.post(
+        CONFIRM,
+        headers=auth_headers,
+        json={"run_id": prepared["run_id"], "background": prepared["background"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    data = confirmed.json()["data"]
+    interview_id = data["interview_id"]
+    voice = data["voice"]
+    assert voice["task_id"] == f"voiceinterview{interview_id}"
+    assert voice["room_id"] == f"voiceinterview{interview_id}"
+    assert voice["bot_user_id"] == f"aiinterviewer{interview_id}"
+    assert voice["user_id"] == str(auth_user["id"])
+    assert voice["token"] == "rtc-token"
+    assert voice["started"] is True
+    assert started[0]["id"] == interview_id
+    assert "岗位：后端开发工程师" in started[0]["interview_host_prompt"]
+
+    qa_object = [
+        {"id": 1, "question": "请自我介绍。", "answer": "你好。", "created_at": 1}
+    ]
+    finished = await client.post(
+        f"/api/interviews/{interview_id}/voice/finish",
+        headers=auth_headers,
+        json={"qa_object": qa_object, "interview_duration": 321},
+    )
+    assert finished.status_code == 200, finished.text
+    result = finished.json()["data"]
+    assert result["interview_id"] == interview_id
+    assert result["status"] == 1
+    assert result["interview_duration"] == 321
+    assert result["qa_count"] == 1
+    assert stopped == [interview_id]
+
+    interview = interview_repo.get(interview_id)
+    assert interview["status"] == 1
+    assert interview["qa_object"] == qa_object
+    assert interview["interview_duration"] == 321
+    assert interview["session_id"] == session["id"]
+
+
+async def test_finish_rejects_foreign_interview(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    other_auth: tuple[dict, dict],
+    monkeypatch,
+) -> None:
+    """不能结束别人的面试。"""
+    _, prepared = await _prepare(
+        client, auth_headers, auth_user["id"], monkeypatch
+    )
+    _patch_template(monkeypatch)
+    _patch_voice(monkeypatch)
+    confirmed = await client.post(
+        CONFIRM,
+        headers=auth_headers,
+        json={"run_id": prepared["run_id"], "background": prepared["background"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    _, other_headers = other_auth
+
+    resp = await client.post(
+        f"/api/interviews/{confirmed.json()['data']['interview_id']}/voice/finish",
+        headers=other_headers,
+        json={"qa_object": [], "interview_duration": 1},
+    )
+
+    assert resp.status_code == 404
 
 
 async def test_confirm_only_once(

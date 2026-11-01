@@ -120,6 +120,7 @@ agent-backend/
 │   │   ├── prompt_template_service.py # 提示词版本管理：智能体配置 / 拼接 / 回滚 / Redis 缓存
 │   │   ├── prompt_injection_service.py # 提示词变量注入：验证（清洗 / 限长）→ 转换（格式化 / 默认值）→ 填充（占位符替换）
 │   │   ├── interview_service.py # 面试详情查询（interview_id + user_id 防越权）
+│   │   ├── voice_interview_service.py # 火山 RTC 语音面试：启动 / 停止 AI、结果落库
 │   │   ├── learning_workflow.py # 学习测评：checkpoint 校验 + interrupt 恢复 + 状态持久化
 │   │   ├── interview_host_workflow.py # 面试前准备：会话 / 简历校验 + 变量提取 + 提示词注入
 │   │   ├── note_archive_service.py # 笔记归档：Markdown 生成 + 占位符校验 + A2A handler
@@ -299,6 +300,7 @@ agent-backend/
   | 会话消息（分页） | `GET /api/sessions/{session_id}/messages?page=&page_size=` | `200` |
   | 流式对话（SSE） | `POST /api/sessions/{session_id}/stream-chat` | `200` |
   | 面试详情 | `GET /api/interviews/{interview_id}` | `200` |
+  | 结束语音面试 | `POST /api/interviews/{interview_id}/voice/finish` | `200` |
   | 发起学习测评 | `POST /api/learning-workflows/start` | `200` |
   | 提交测评作答 | `POST /api/learning-workflows/{run_id}/submit` | `200` |
   | 测评运行详情 | `GET /api/learning-workflows/{run_id}` | `200` |
@@ -344,6 +346,11 @@ agent-backend/
   - 长期记忆写入：`chat_service.prepare_stream` 先调用 `LongTermMemory.should_write()`（fastembed 本地向量 + 余弦相似度，阈值 0.6，模型异常降级为 False）；命中画像写入意图时跳过 RAG 检索。**触发条件**为「意图命中」或「三项必填资料缺失（`missing_required_fields()` 非空）且本轮消息去空白后 ≥ 2 字」；后者不跳过 RAG，用于接住用户对开场白表单的简短回答（如「3 年」「后端开发」）。流成功后用最近 4 条历史消息 + 本轮回复调用 `submit_profile_update_async()`，后台线程让 LLM 抽取全部 9 个业务画像字段（`target_job / years_experience / target_level / target_skills / weak_topics` 及 `learning_goal / learning_style / interview_focus / long_term_summary`），经 `profile_service.create_or_update()` 写回 `user_profiles`；抽取为空或任一步失败只记日志。**画像以新会话开场白表单为主（前端写入）、对话抽取为补充**，AI 不在对话中反复追问缺失项。
   - 模型统一走 OpenAI 兼容协议，配置项 `LLM_PROVIDER / LLM_MODEL / LLM_API_KEY / LLM_BASE_URL / LLM_TEMPERATURE / LLM_TIMEOUT / LLM_MAX_RETRIES`；密钥只放环境变量，缺失时该接口返回 503，不影响其他接口启动。
 - **面试记录约定**：`interviews.user_id` 记录归属；`GET /api/interviews/{interview_id}` 必须按 `interview_id + user_id` 查询，返回含 `qa_object` 的详情，防止越权读取他人面试记录。
+- **语音面试约定**（火山 RTC AI 面试官）：
+  - 复用 `POST /api/interviews/confirm`：确认背景并创建 Interview 后，`VoiceInterviewService.start_voice_chat()` 生成前端入房参数（`voice`：`room_id / user_id / bot_user_id / task_id / token / expire_at / started`）并调用 `StartVoiceChat`；系统提示词取 `interviews.interview_host_prompt`。
+  - 绑定关系固定：`TaskId = RoomId = voiceinterview{interview_id}`、`BotId = aiinterviewer{interview_id}`；RTC 应用凭证与音色等配置项见 `.env.example` 的 `VOLC_RTC_*`。
+  - `POST /api/interviews/{interview_id}/voice/finish`：先尽力调用 `StopVoiceChat`，再由前端提交的 `qa_object` / `interview_duration` 落库并置 `status=1`；停止失败不阻断结果保存。
+  - RTC 未配置或调用失败只记日志（`started=false` / `token=null`），**不得影响面试确认与结果落库**。
 - **学习测评工作流约定**（`/api/learning-workflows`，整组需登录）：
   - 两次请求闭环：`POST /start` 出题（`waiting_answer`）→ `POST /{run_id}/submit` 评分（`completed`）；`GET /{run_id}` 返回状态与完整 `state`。`run_id` 为 UUID，同时也是 LangGraph `thread_id`，按 `user_id` 隔离，越权 / 不存在统一 `404`。
   - 题量：`question_count` 可省略，缺省时从 `request_text` 提取「N 道 / N 题」（支持「三道」等中文数字），仍无则默认 5，上限 20。

@@ -40,6 +40,30 @@ def get_for_user(interview_id: int, user_id: int) -> dict | None:
         return _to_dict(obj) if obj else None
 
 
+def finish(
+    interview_id: int,
+    user_id: int,
+    qa_object: list[dict],
+    interview_duration: int,
+) -> dict | None:
+    """保存最终问答与时长并置 status=1；记录不存在或不属于该用户返回 None。"""
+    with SessionLocal() as session:
+        obj = session.scalar(
+            select(Interview).where(
+                Interview.id == interview_id,
+                Interview.user_id == user_id,
+            )
+        )
+        if obj is None:
+            return None
+        obj.qa_object = qa_object
+        obj.interview_duration = interview_duration
+        obj.status = 1
+        session.commit()
+        session.refresh(obj)
+        return _to_dict(obj)
+
+
 def delete_by_session(session_id: int) -> int:
     """删除会话关联的全部面试记录，返回删除行数。"""
     with SessionLocal() as session:

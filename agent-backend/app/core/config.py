@@ -215,6 +215,79 @@ VOLC_ACCESS_KEY: str | None = os.getenv("VOLC_ACCESS_KEY")
 VOLC_SECRET_KEY: str | None = os.getenv("VOLC_SECRET_KEY")
 VOLC_REGION: str = os.getenv("VOLC_REGION", "cn-north-1")
 
+# ---- 火山 RTC 实时语音面试（AI 面试官）----
+# 应用凭证只走环境变量；缺失时不阻断面试确认，仅不返回入房 token、不启动 AI。
+VOLC_RTC_APP_ID: str | None = os.getenv("VOLC_RTC_APP_ID")
+VOLC_RTC_APP_KEY: str | None = os.getenv("VOLC_RTC_APP_KEY")
+# 前端入房 token 有效期（秒），默认 6 小时
+VOLC_RTC_TOKEN_TTL_SECONDS: int = int(
+    os.getenv("VOLC_RTC_TOKEN_TTL_SECONDS", "21600")
+)
+# 豆包语音合成音色与可选凭证（凭证缺失时由 RTC 服务端默认配置兜底）
+VOLC_RTC_TTS_SPEAKER: str = os.getenv(
+    "VOLC_RTC_TTS_SPEAKER", "zh_female_linjianvhai_moon_bigtts"
+)
+VOLC_RTC_TTS_APP_ID: str | None = os.getenv("VOLC_RTC_TTS_APP_ID")
+VOLC_RTC_TTS_ACCESS_TOKEN: str | None = os.getenv("VOLC_RTC_TTS_ACCESS_TOKEN")
+# 流式语音识别可选凭证（bigmodel 模式需要）
+VOLC_RTC_ASR_APP_ID: str | None = os.getenv("VOLC_RTC_ASR_APP_ID")
+VOLC_RTC_ASR_ACCESS_TOKEN: str | None = os.getenv("VOLC_RTC_ASR_ACCESS_TOKEN")
+# AI 面试官开场白、LLM 带入的历史轮数、静默超时（秒）与字幕开关
+VOLC_RTC_WELCOME_MESSAGE: str = os.getenv(
+    "VOLC_RTC_WELCOME_MESSAGE", "你好，我是本场面试的 AI 面试官，我们现在开始。"
+)
+VOLC_RTC_HISTORY_LENGTH: int = int(os.getenv("VOLC_RTC_HISTORY_LENGTH", "10"))
+VOLC_RTC_IDLE_TIMEOUT: int = int(os.getenv("VOLC_RTC_IDLE_TIMEOUT", "180"))
+VOLC_RTC_SUBTITLE_MODE: int = int(os.getenv("VOLC_RTC_SUBTITLE_MODE", "0"))
+
+
+class RTCConfig(NamedTuple):
+    """火山 RTC 语音面试连接与默认参数。"""
+
+    app_id: str
+    app_key: str
+    token_ttl_seconds: int
+    tts_speaker: str
+    tts_app_id: str | None
+    tts_access_token: str | None
+    asr_app_id: str | None
+    asr_access_token: str | None
+    welcome_message: str
+    history_length: int
+    idle_timeout: int
+    subtitle_mode: int
+
+
+def has_rtc_config() -> bool:
+    """RTC 应用凭证是否齐全；缺失时语音面试降级为「只建面试、不启动 AI」。"""
+    return bool(VOLC_RTC_APP_ID and VOLC_RTC_APP_KEY)
+
+
+def get_rtc_config() -> RTCConfig:
+    """返回 RTC 配置；缺失时立即报错（与 get_llm_config 一致）。
+
+    延迟到调用时校验：未配置 RTC 时其他接口仍应可用，确认面试也不会因此失败。
+    """
+    if not VOLC_RTC_APP_ID or not VOLC_RTC_APP_KEY:
+        raise RuntimeError(
+            "环境变量 VOLC_RTC_APP_ID / VOLC_RTC_APP_KEY 未配置，语音面试不可用"
+        )
+
+    return RTCConfig(
+        app_id=VOLC_RTC_APP_ID,
+        app_key=VOLC_RTC_APP_KEY,
+        token_ttl_seconds=VOLC_RTC_TOKEN_TTL_SECONDS,
+        tts_speaker=VOLC_RTC_TTS_SPEAKER,
+        tts_app_id=VOLC_RTC_TTS_APP_ID,
+        tts_access_token=VOLC_RTC_TTS_ACCESS_TOKEN,
+        asr_app_id=VOLC_RTC_ASR_APP_ID,
+        asr_access_token=VOLC_RTC_ASR_ACCESS_TOKEN,
+        welcome_message=VOLC_RTC_WELCOME_MESSAGE,
+        history_length=VOLC_RTC_HISTORY_LENGTH,
+        idle_timeout=VOLC_RTC_IDLE_TIMEOUT,
+        subtitle_mode=VOLC_RTC_SUBTITLE_MODE,
+    )
+
 
 class MinioConfig(NamedTuple):
     """MinIO 客户端连接参数。"""

@@ -17,6 +17,19 @@ class InterviewConfirmIn(BaseModel):
     background: InterviewBackground = Field(..., description="确认后的面试背景")
 
 
+class VoiceRoomOut(BaseModel):
+    """前端加入 RTC 房间所需的参数（RTC 未配置时 token 为空）。"""
+
+    app_id: str | None = Field(None, description="RTC 应用 AppID，未配置时为 null")
+    room_id: str = Field(..., description="RTC 房间 ID")
+    user_id: str = Field(..., description="候选人 RTC 用户 ID")
+    bot_user_id: str = Field(..., description="AI 面试官 RTC 用户 ID")
+    task_id: str = Field(..., description="RTC AI 任务 ID")
+    token: str | None = Field(None, description="入房 AccessToken，未配置时为 null")
+    expire_at: int | None = Field(None, description="Token 过期时间（Unix 秒）")
+    started: bool = Field(..., description="AI 面试官是否已成功启动")
+
+
 class InterviewConfirmOut(BaseModel):
     """第二阶段出参：正式面试已创建。"""
 
@@ -25,6 +38,25 @@ class InterviewConfirmOut(BaseModel):
     session_id: int = Field(..., description="所属会话 ID")
     message_id: int = Field(..., description="面试入口消息 ID")
     status: Literal["confirmed"] = Field("confirmed", description="固定为 confirmed")
+    voice: VoiceRoomOut = Field(..., description="前端加入 RTC 房间的参数")
+
+
+class VoiceFinishIn(BaseModel):
+    """挂断语音面试入参：最终问答明细与时长。"""
+
+    qa_object: list[dict[str, Any]] = Field(
+        default_factory=list, description="最终问答明细列表"
+    )
+    interview_duration: int = Field(0, ge=0, description="本次面试累计时长（秒）")
+
+
+class InterviewVoiceFinishOut(BaseModel):
+    """挂断语音面试出参：面试已结束。"""
+
+    interview_id: int = Field(..., description="面试记录 ID")
+    status: int = Field(..., description="面试状态：1=已结束")
+    interview_duration: int = Field(..., description="累计面试时长（秒）")
+    qa_count: int = Field(..., description="保存的问答条数")
 
 
 class InterviewOut(BaseModel):

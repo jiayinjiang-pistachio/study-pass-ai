@@ -2,7 +2,13 @@
 
 from fastapi import APIRouter, Depends
 
-from ..schemas.interview import InterviewConfirmIn, InterviewConfirmOut, InterviewOut
+from ..schemas.interview import (
+    InterviewConfirmIn,
+    InterviewConfirmOut,
+    InterviewOut,
+    InterviewVoiceFinishOut,
+    VoiceFinishIn,
+)
 from ..schemas.response import ResponseModel, ok
 from ..services.interview_service import InterviewService
 from .deps import get_current_user
@@ -25,6 +31,24 @@ def confirm_interview(
 ) -> dict:
     """接收第一阶段 run_id 与用户编辑后的 background，创建入口消息与正式面试。"""
     return ok(InterviewService().confirm_interview(current_user["id"], payload))
+
+
+@router.post(
+    "/{interview_id}/voice/finish",
+    response_model=ResponseModel[InterviewVoiceFinishOut],
+    summary="结束语音面试并保存结果",
+)
+def finish_voice_interview(
+    interview_id: int,
+    payload: VoiceFinishIn,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """停止 RTC AI 面试官，保存 qa_object 与时长，并置为已结束。"""
+    return ok(
+        InterviewService().finish_voice_interview(
+            current_user["id"], interview_id, payload
+        )
+    )
 
 
 @router.get(

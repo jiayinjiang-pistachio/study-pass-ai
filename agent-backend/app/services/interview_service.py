@@ -12,7 +12,7 @@ from fastapi import status
 
 from ..core.exceptions import BusinessException, SystemException
 from ..db import interview_repo, message_repo, session_repo, workflow_run_repo
-from . import interview_host_workflow
+from . import interview_host_workflow, voice_interview_service
 
 logger = logging.getLogger(__name__)
 
@@ -200,10 +200,25 @@ class InterviewService:
             interview["id"],
             message["id"],
         )
+
+        # 落库完成后再拉起 AI 面试官：RTC 失败不影响面试本身，只体现在 started
+        voice = voice_interview_service.VoiceInterviewService().start_voice_chat(
+            interview
+        )
         return {
             "run_id": payload.run_id,
             "interview_id": interview["id"],
             "session_id": row["session_id"],
             "message_id": message["id"],
             "status": interview_host_workflow.STATUS_CONFIRMED,
+            "voice": voice,
         }
+
+    def finish_voice_interview(self, user_id: int, interview_id: int, payload) -> dict:
+        """挂断后收尾：停止 RTC AI，保存问答与时长并置 status=1。"""
+        return voice_interview_service.VoiceInterviewService().finish_interview(
+            user_id,
+            interview_id,
+            payload.qa_object,
+            payload.interview_duration,
+        )
