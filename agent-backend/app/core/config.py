@@ -232,6 +232,15 @@ VOLC_RTC_TTS_ACCESS_TOKEN: str | None = os.getenv("VOLC_RTC_TTS_ACCESS_TOKEN")
 # 流式语音识别可选凭证（bigmodel 模式需要）
 VOLC_RTC_ASR_APP_ID: str | None = os.getenv("VOLC_RTC_ASR_APP_ID")
 VOLC_RTC_ASR_ACCESS_TOKEN: str | None = os.getenv("VOLC_RTC_ASR_ACCESS_TOKEN")
+# 判停静音时长（毫秒，官方允许 [500, 3000)）：面试场景语速较慢、思考停顿多，
+# 默认 1500ms，避免用户句间停顿被误判为回答结束；AIVAD 开启语义判停，
+# 语义不完整时会等到静音超过 2 秒才结束本轮。
+VOLC_RTC_VAD_SILENCE_TIME_MS: int = int(
+    os.getenv("VOLC_RTC_VAD_SILENCE_TIME_MS", "1500")
+)
+VOLC_RTC_AIVAD: bool = (
+    os.getenv("VOLC_RTC_AIVAD", "true").strip().lower() in {"1", "true", "yes", "on"}
+)
 # AI 面试官开场白、LLM 带入的历史轮数、静默超时（秒）与字幕开关
 VOLC_RTC_WELCOME_MESSAGE: str = os.getenv(
     "VOLC_RTC_WELCOME_MESSAGE", "你好，我是本场面试的 AI 面试官，我们现在开始。"
@@ -252,6 +261,8 @@ class RTCConfig(NamedTuple):
     tts_access_token: str | None
     asr_app_id: str | None
     asr_access_token: str | None
+    vad_silence_time_ms: int
+    aivad: bool
     welcome_message: str
     history_length: int
     idle_timeout: int
@@ -282,6 +293,8 @@ def get_rtc_config() -> RTCConfig:
         tts_access_token=VOLC_RTC_TTS_ACCESS_TOKEN,
         asr_app_id=VOLC_RTC_ASR_APP_ID,
         asr_access_token=VOLC_RTC_ASR_ACCESS_TOKEN,
+        vad_silence_time_ms=VOLC_RTC_VAD_SILENCE_TIME_MS,
+        aivad=VOLC_RTC_AIVAD,
         welcome_message=VOLC_RTC_WELCOME_MESSAGE,
         history_length=VOLC_RTC_HISTORY_LENGTH,
         idle_timeout=VOLC_RTC_IDLE_TIMEOUT,

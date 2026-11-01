@@ -202,8 +202,20 @@ def _build_config(rtc: config.RTCConfig, system_prompt: str) -> dict:
         "HistoryLength": rtc.history_length,
     }
 
+    # 官方取值范围为 [500, 3000) ms；超出会让 StartVoiceChat 直接报参数错误
+    silence_time_ms = min(max(rtc.vad_silence_time_ms, 500), 2999)
+
     return {
-        "ASRConfig": {"Provider": "volcano", "ProviderParams": asr_params},
+        "ASRConfig": {
+            "Provider": "volcano",
+            "ProviderParams": asr_params,
+            "VADConfig": {
+                # 静音超过该时长才判定用户本轮说完；面试场景默认 1500ms
+                "SilenceTime": silence_time_ms,
+                # 语义判停：语义不完整时最多等到静音 2 秒，减少思考停顿被误判
+                "AIVAD": rtc.aivad,
+            },
+        },
         "TTSConfig": {
             "Provider": "volcano_bidirection",
             "ProviderParams": tts_params,
