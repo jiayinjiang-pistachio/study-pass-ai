@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "@volcengine/rtc": "^4.69.4",
     "@wangeditor-next/editor": "^6.5.0",
     "@wangeditor-next/editor-for-vue": "^6.5.0",
     "axios": "^1.20.0",

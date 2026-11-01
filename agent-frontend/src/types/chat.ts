@@ -54,12 +54,41 @@ export interface InterviewConfirmPayload {
   background: InterviewBackground
 }
 
-/** 第二阶段返回体：面试已正式创建，可用于刷新会话 */
+/**
+ * RTC 语音面试入房参数：全部以后端返回为准，前端不得写死。
+ * token 只放 history state，不进入 URL。
+ */
+export interface VoiceRoom {
+  appId: string
+  roomId: string
+  /** 当前用户 ID（用于识别字幕中的「我」） */
+  userId: string
+  /** AI 面试官 Bot ID（用于识别字幕中的「AI」） */
+  botId: string
+  rtcToken: string
+  taskId: string
+  /** token 过期时间（epoch 秒），缺失时为 null */
+  expireAt: number | null
+  /** AI 面试官是否已成功拉起；false 时前端不应入房 */
+  started: boolean
+}
+
+/** 语音面试问答明细：挂断时提交给后端，并用于面试详情展示 */
+export interface VoiceQaItem {
+  id: number
+  question: string
+  answer: string
+  /** 生成时间（epoch 秒） */
+  created_at: number
+}
+
+/** 第二阶段返回体：面试已正式创建，可用于刷新会话 / 进入语音面试 */
 export interface InterviewConfirmResult {
   runId: string
   interviewId: number
   sessionId: number
   messageId: number
+  voice: VoiceRoom | null
 }
 
 export interface ChatMessage {

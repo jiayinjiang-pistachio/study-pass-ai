@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import ChatMessageList from '@/components/chat/ChatMessageList.vue'
 import ChatInputBar from '@/components/chat/ChatInputBar.vue'
@@ -23,6 +24,7 @@ function emptyBackground(): InterviewBackground {
 
 const chatStore = useChatStore()
 const conversationStore = useConversationStore()
+const router = useRouter()
 
 const dialogVisible = ref(false)
 const confirming = ref(false)
@@ -51,7 +53,6 @@ async function handleConfirm(): Promise<void> {
       runId,
       background: { ...background },
     })
-    ElMessage.success('面试已创建，请开始作答')
     dialogVisible.value = false
 
     const sessionId =
@@ -63,6 +64,32 @@ async function handleConfirm(): Promise<void> {
         // 刷新失败不影响面试创建，重新进入会话后可看到入口消息
       }
     }
+
+    const voice = result.voice
+    if (!result.interviewId || !voice || !voice.started) {
+      ElMessage.warning('面试已创建，但 AI 语音面试未能启动，请稍后重试')
+      return
+    }
+
+    ElMessage.success('面试已创建，正在进入语音面试')
+    // interview_id 放 query；voice（含 rtc_token）只放 history state，避免出现在 URL。
+    // 逐字段展开为普通值（HistoryState 只接受可结构化克隆的基础类型）。
+    await router.push({
+      name: 'interview-voice',
+      query: { interview_id: String(result.interviewId) },
+      state: {
+        voice: {
+          appId: voice.appId,
+          roomId: voice.roomId,
+          userId: voice.userId,
+          botId: voice.botId,
+          rtcToken: voice.rtcToken,
+          taskId: voice.taskId,
+          expireAt: voice.expireAt,
+          started: voice.started,
+        },
+      },
+    })
   } catch {
     // 请求层已统一提示错误（404 / 409 等），保留弹窗供用户重试
   } finally {

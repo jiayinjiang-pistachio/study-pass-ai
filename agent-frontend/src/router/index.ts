@@ -33,6 +33,12 @@ const router = createRouter({
         },
       ],
     },
+    {
+      // 语音面试为全屏页面，不套 AppShell；interview_id 在 query，voice 在 history state
+      path: '/interview/voice',
+      name: 'interview-voice',
+      component: () => import('@/views/VoiceInterviewPage.vue'),
+    },
     { path: '/:pathMatch(.*)*', redirect: { name: ModuleKey.Interview } },
   ],
 })
