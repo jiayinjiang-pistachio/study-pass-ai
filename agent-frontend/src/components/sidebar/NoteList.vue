@@ -3,25 +3,33 @@ import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
 import SidebarItem from './SidebarItem.vue'
 import { useNoteStore } from '@/stores/note'
+import { NOTE_ICON } from '@/types/note'
 
 const noteStore = useNoteStore()
-const { notes, activeNoteId, loading } = storeToRefs(noteStore)
+const { noteList, activeNoteId, loading } = storeToRefs(noteStore)
 
 function handleSelect(id: string | number): void {
-  noteStore.select(String(id))
+  void noteStore.select(Number(id)).catch(() => {
+    /* 错误提示由请求层统一处理 */
+  })
 }
 
 function handleRename(id: string | number, title: string): void {
-  void noteStore.rename(String(id), title)
+  void noteStore.rename(Number(id), title).catch(() => {
+    /* 错误提示由请求层统一处理 */
+  })
 }
 
 async function handleRemove(id: string | number): Promise<void> {
-  await noteStore.remove(String(id))
+  try {
+    await noteStore.remove(Number(id))
+  } catch {
+    /* 错误提示由请求层统一处理 */
+  }
 }
 
 function handleExport(id: string | number): void {
-  const key = String(id)
-  const target = notes.value.find((item) => item.id === key)
+  const target = noteList.value.find((item) => item.id === Number(id))
   ElMessage.info(`导出「${target?.title ?? ''}」功能开发中`)
 }
 </script>
@@ -29,11 +37,11 @@ function handleExport(id: string | number): void {
 <template>
   <ul v-loading="loading" class="sidebar-list scroll-area">
     <SidebarItem
-      v-for="item in notes"
+      v-for="item in noteList"
       :key="item.id"
       :id="item.id"
       :title="item.title"
-      :icon="item.icon"
+      :icon="NOTE_ICON"
       :active="item.id === activeNoteId"
       entity-label="笔记"
       @select="handleSelect"

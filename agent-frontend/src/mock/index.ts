@@ -3,6 +3,5 @@
  * 请求层（src/api/request.ts）固定 axios adapter: 'xhr'，因此 Mock 对 axios 同样生效；
  * 若改用 axios 的 fetch 适配器，这里的拦截会失效。
  *
- * 会话 / 消息 / 面试已接入真实后端，这里只保留笔记模块的 Mock。
+ * 会话 / 消息 / 面试 / 笔记均已接入真实后端，当前没有需要拦截的接口。
  */
-import './notes'
