@@ -104,6 +104,46 @@ MINIO_SECURE: bool = os.getenv("MINIO_SECURE", "false").strip().lower() in {
     "yes",
     "on",
 }
+# 预签名 URL 有效期：历史消息每次读取都会重新续签，默认 7 天（MinIO 单次上限）
+MINIO_PRESIGN_EXPIRE_SECONDS: int = int(
+    os.getenv("MINIO_PRESIGN_EXPIRE_SECONDS", str(7 * 24 * 60 * 60))
+)
+
+
+# ---- Seedream 文生图（难点知识卡）----
+# 密钥只走环境变量；缺失时知识卡接口返回 503，不影响其他工作流启动。
+SEEDREAM_API_KEY: str | None = os.getenv("SEEDREAM_API_KEY")
+SEEDREAM_BASE_URL: str = os.getenv(
+    "SEEDREAM_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"
+)
+SEEDREAM_MODEL: str = os.getenv("SEEDREAM_MODEL", "doubao-seedream-4-0-250828")
+# 合法值：WIDTHxHEIGHT 或 2k / 3k / 4k；默认 3:4 竖版，适配手机信息图
+SEEDREAM_IMAGE_SIZE: str = os.getenv("SEEDREAM_IMAGE_SIZE", "1728x2304")
+SEEDREAM_TIMEOUT: float = float(os.getenv("SEEDREAM_TIMEOUT", "120"))
+
+
+class SeedreamConfig(NamedTuple):
+    """Seedream 文生图连接参数。"""
+
+    api_key: str
+    base_url: str
+    model: str
+    image_size: str
+    timeout: float
+
+
+def get_seedream_config() -> SeedreamConfig:
+    """返回 Seedream 配置；缺失时立即报错（与 get_llm_config 一致）。"""
+    if not SEEDREAM_API_KEY:
+        raise RuntimeError("环境变量 SEEDREAM_API_KEY 未配置，知识卡出图不可用")
+
+    return SeedreamConfig(
+        api_key=SEEDREAM_API_KEY,
+        base_url=SEEDREAM_BASE_URL.rstrip("/"),
+        model=SEEDREAM_MODEL,
+        image_size=SEEDREAM_IMAGE_SIZE,
+        timeout=SEEDREAM_TIMEOUT,
+    )
 
 
 # ---- AI 对话配置（OpenAI 兼容协议）----

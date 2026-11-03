@@ -9,6 +9,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field, StringConstraints
 
 from .chat import SegmentIn
+from .difficulty_card import DifficultyCardOut
 from .interview_host import InterviewPrepareOut
 from .learning_workflow import (
     DEFAULT_QUESTION_COUNT,
@@ -65,8 +66,8 @@ class AgentTaskLearningWorkflowOut(LearningWorkflowStartOut):
     )
 
 
-# 工作流分支可能有多种结果，按 workflow_type 区分；学习测评与面试准备字段不同
+# 工作流分支可能有多种结果，按 workflow_type 区分；各分支字段不同
 AgentTaskWorkflowOut = Annotated[
-    AgentTaskLearningWorkflowOut | InterviewPrepareOut,
+    AgentTaskLearningWorkflowOut | InterviewPrepareOut | DifficultyCardOut,
     Field(discriminator="workflow_type"),
 ]

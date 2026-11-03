@@ -5,19 +5,27 @@
 
 import io
 import logging
+from datetime import timedelta
 from functools import lru_cache
 
 from minio import Minio
 from minio.error import S3Error
 from urllib3.exceptions import HTTPError
 
-from .config import MinioConfig, get_minio_config
+from .config import (
+    MINIO_PRESIGN_EXPIRE_SECONDS,
+    MinioConfig,
+    get_minio_config,
+)
 from .exceptions import SystemException
 
 logger = logging.getLogger(__name__)
 
 STORAGE_PREFIX = "minio:/"
 DEFAULT_CONTENT_TYPE = "application/octet-stream"
+# MinIO / S3 预签名有效期上限为 7 天
+MAX_PRESIGN_SECONDS = 7 * 24 * 60 * 60
+MIN_PRESIGN_SECONDS = 60
 
 
 @lru_cache
@@ -136,3 +144,31 @@ def object_key_from_storage_path(storage_path: str) -> str | None:
         return None
     key = storage_path.removeprefix(prefix)
     return key or None
+
+
+def presigned_get_url(
+    object_key: str, expires_seconds: int | None = None
+) -> str:
+    """生成对象的预签名下载地址；有效期按配置并收敛到 MinIO 允许范围。"""
+    seconds = expires_seconds or MINIO_PRESIGN_EXPIRE_SECONDS
+    seconds = max(MIN_PRESIGN_SECONDS, min(seconds, MAX_PRESIGN_SECONDS))
+    try:
+        return get_client().presigned_get_object(
+            _config().bucket,
+            object_key,
+            expires=timedelta(seconds=seconds),
+        )
+    except (S3Error, HTTPError, OSError, ValueError) as exc:
+        raise _storage_failure("presign object", exc) from exc
+
+
+def presigned_url_for_storage_path(
+    storage_path: str, expires_seconds: int | None = None
+) -> str | None:
+    """把 `minio:/{bucket}/{key}` 转成预签名地址；空路径 / 非本桶返回 None。"""
+    if not storage_path:
+        return None
+    object_key = object_key_from_storage_path(storage_path)
+    if object_key is None:
+        return None
+    return presigned_get_url(object_key, expires_seconds)

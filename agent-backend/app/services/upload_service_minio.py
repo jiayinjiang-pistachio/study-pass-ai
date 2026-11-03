@@ -17,7 +17,7 @@ from fastapi import BackgroundTasks, status
 from sqlalchemy.exc import IntegrityError
 
 from ..core import minio_client
-from ..core.exceptions import BusinessException
+from ..core.exceptions import BusinessException, SystemException
 from ..db import resource_repo, user_repo
 from . import file_type
 
@@ -241,3 +241,61 @@ def upload(
         user_repo.update(user_id, {"avatar": resource["storage_path"]})
 
     return _to_out(resource, len(data), kind, not created)
+
+
+def save_generated_image(
+    user_id: int,
+    data: bytes,
+    *,
+    file_name: str = "knowledge-card",
+) -> dict:
+    """保存模型生成的图片：永久存储、按 (user_id, MD5) 去重。
+
+    与上传接口不同，生成图不走用户上传白名单，也不更新头像；返回的
+    resource 只存元数据，对外 URL 由读取方按需预签名。
+    """
+    if not data:
+        raise SystemException(
+            "模型返回的图片为空",
+            http_status=status.HTTP_502_BAD_GATEWAY,
+            detail=f"user_id={user_id}",
+        )
+
+    suffix = file_type.detect_image(data)
+    if not suffix:
+        raise SystemException(
+            "模型返回的图片格式不受支持",
+            http_status=status.HTTP_502_BAD_GATEWAY,
+            detail=f"user_id={user_id} size={len(data)}",
+        )
+
+    md5 = hashlib.md5(data, usedforsecurity=False).hexdigest()
+    existing = resource_repo.find_by_hash(user_id, md5)
+    if existing is not None:
+        return {"resource": existing, "created": False}
+
+    object_key = f"users/{user_id}/{md5}{suffix}"
+    minio_client.put_object(object_key, data, file_type.content_type_for(suffix))
+    base_name = Path(file_name).stem[:200] or "knowledge-card"
+    record = {
+        "resource_type": RESOURCE_TYPE_IMAGE,
+        "storage_scene": SCENE_LONG,
+        "upload_purpose": PURPOSE_GENERAL,
+        "file_name": f"{base_name}{suffix}",
+        "file_hash": md5,
+        "storage_path": minio_client.build_storage_path(object_key),
+        "user_id": user_id,
+        "expire_time": None,
+        "doc_category": None,
+    }
+    try:
+        resource = resource_repo.insert(record)
+        created = True
+    except IntegrityError:
+        # 并发生成同一张图：唯一键兜底，复用先写入的记录
+        resource = resource_repo.find_by_hash(user_id, md5)
+        if resource is None:
+            raise
+        created = False
+
+    return {"resource": resource, "created": created}

@@ -2,19 +2,73 @@
 
 消息表只存来源索引 [{chunk_id, score}]，查询时回查知识片段原文；
 知识块已删除时返回提示文案，保证前端历史回显不中断。
+附件段只存 resource_id，读取时重新预签名，避免历史图片链接过期。
 """
+
+import logging
 
 from fastapi import status
 
+from ..core import minio_client
 from ..core.exceptions import BusinessException
-from ..db import knowledge_chunk_repo, message_repo, session_repo
+from ..db import knowledge_chunk_repo, message_repo, resource_repo, session_repo
+
+logger = logging.getLogger(__name__)
 
 DELETED_SOURCE_TEXT = "该参考片段已被删除"
 
 
 def _segments(value: object) -> list[dict]:
     """附件段只接受数组；历史脏数据统一按空数组返回。"""
-    return value if isinstance(value, list) else []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _segment_resource_ids(rows: list[dict]) -> list[int]:
+    """收集本页消息附件引用的资源 ID，批量回表避免逐条查询。"""
+    ids: set[int] = set()
+    for row in rows:
+        for key in ("request_segments", "response_segments"):
+            for segment in _segments(row.get(key)):
+                resource_id = segment.get("resource_id")
+                if isinstance(resource_id, int):
+                    ids.add(resource_id)
+    return list(ids)
+
+
+def _signed_url(resource: dict) -> str | None:
+    """按资源存储路径生成预签名地址；失败只记日志，不阻断消息列表。"""
+    storage_path = resource.get("storage_path")
+    if not isinstance(storage_path, str) or not storage_path:
+        return None
+    try:
+        return minio_client.presigned_url_for_storage_path(storage_path)
+    except Exception:
+        logger.warning(
+            "消息附件预签名失败 | resource_id=%s", resource.get("id"), exc_info=True
+        )
+        return None
+
+
+def _enrich_segments(
+    value: object, resources: dict[int, dict]
+) -> list[dict]:
+    """补全附件段：资源存在时刷新 url 与文件名，实现历史链接自动续签。"""
+    segments: list[dict] = []
+    for segment in _segments(value):
+        item = dict(segment)
+        resource = resources.get(item.get("resource_id"))
+        if resource is not None:
+            if not item.get("file_name"):
+                item["file_name"] = resource.get("file_name")
+            url = _signed_url(resource)
+            if url:
+                item["url"] = url
+            else:
+                item.pop("url", None)
+        segments.append(item)
+    return segments
 
 
 def _reference_refs(value: object) -> list[dict]:
@@ -66,15 +120,21 @@ def _build_sources(rows: list[dict]) -> dict[int, list[dict]]:
     return sources
 
 
-def _to_out(message: dict, sources: list[dict]) -> dict:
+def _to_out(
+    message: dict, sources: list[dict], resources: dict[int, dict]
+) -> dict:
     """正文、附件段、状态与参考来源一起返回，供前端渲染消息与来源卡片。"""
     return {
         "id": message["id"],
         "request_id": message.get("request_id"),
         "request_text": message["request_text"],
         "response_text": message["response_text"],
-        "request_segments": _segments(message.get("request_segments")),
-        "response_segments": _segments(message.get("response_segments")),
+        "request_segments": _enrich_segments(
+            message.get("request_segments"), resources
+        ),
+        "response_segments": _enrich_segments(
+            message.get("response_segments"), resources
+        ),
         "response_payload": message.get("response_payload"),
         "status": message["status"],
         "interview_id": message.get("interview_id"),
@@ -97,8 +157,11 @@ def list_messages(
     offset = (page - 1) * page_size
     rows = message_repo.list_by_session(session_id, offset, page_size)
     sources = _build_sources(rows)
+    resources = resource_repo.get_many(_segment_resource_ids(rows))
     return {
-        "items": [_to_out(row, sources.get(row["id"], [])) for row in rows],
+        "items": [
+            _to_out(row, sources.get(row["id"], []), resources) for row in rows
+        ],
         "total": message_repo.count_by_session(session_id),
         "page": page,
         "page_size": page_size,

@@ -23,6 +23,18 @@ def get(resource_id: int) -> dict | None:
         return _to_dict(obj) if obj else None
 
 
+def get_many(resource_ids: list[int]) -> dict[int, dict]:
+    """按 id 批量查询，返回 {resource_id: 记录}；不存在的 id 不出现在结果中。"""
+    ids = list(dict.fromkeys(resource_ids))
+    if not ids:
+        return {}
+    with SessionLocal() as session:
+        rows = session.scalars(
+            select(Resource).where(Resource.id.in_(ids))
+        ).all()
+        return {row.id: _to_dict(row) for row in rows}
+
+
 def find_by_hash(user_id: int, file_hash: str) -> dict | None:
     """按 (user_id, file_hash) 查询，用于上传前的用户级去重预查。"""
     with SessionLocal() as session:

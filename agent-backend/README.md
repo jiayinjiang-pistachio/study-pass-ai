@@ -29,6 +29,7 @@ uvicorn app.main:app --reload --port 8000
 - 流式对话需在 `.env` 中配置 `LLM_PROVIDER / LLM_MODEL / LLM_API_KEY`（OpenAI 兼容协议，可选 `LLM_BASE_URL`）；未配置时仅该接口返回 503，其他接口不受影响。
 - 提示词版本管理默认使用本机 Redis 做缓存（`REDIS_HOST=127.0.0.1`、`REDIS_PORT=6379`、`REDIS_DB=1`，可选 `REDIS_PASSWORD`）。默认 db1 是为与其他项目常用的 db0 隔离；Redis 不可用时自动回源 MySQL，接口不受影响。
 - RAG 向量化入库需配置 `DASHSCOPE_API_KEY`（text-embedding-v4，1024 维）与 Qdrant 地址 `QDRANT_HOST` / `QDRANT_PORT`（默认 `127.0.0.1:6333`）；collection `knowledge_chunks` 不存在时自动创建。
+- 难点知识卡（`difficulty_learner`）需额外配置 `SEEDREAM_API_KEY`（可选 `SEEDREAM_BASE_URL` / `SEEDREAM_MODEL` / `SEEDREAM_IMAGE_SIZE`）；未配置时仅知识卡接口返回 503，不影响其他功能。配置与联调步骤见 [docs/difficulty-card-guide.md](./docs/difficulty-card-guide.md)。
 
 ## 数据库迁移（Alembic）
 

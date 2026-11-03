@@ -20,7 +20,11 @@ from ..core.exceptions import BusinessException, SystemException
 from ..schemas.chat import StreamChatIn
 from ..schemas.learning_workflow import LearningWorkflowStartIn
 from ..schemas.orchestrator import AgentTaskStartIn
-from . import interview_host_workflow, learning_workflow
+from . import (
+    difficulty_card_workflow,
+    interview_host_workflow,
+    learning_workflow,
+)
 from .a2a_handoff_service import A2AHandoffService
 from .semantic_intent import SemanticIntentClassifier
 
@@ -28,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 QUIZ_AGENT_NAME = "quiz_generate_workflow"
 INTERVIEW_HOST_AGENT_NAME = "interview_host"
+DIFFICULTY_AGENT_NAME = "difficulty_learner"
 STATUS_SCHEDULED = "scheduled"
 
 
@@ -44,7 +49,6 @@ def _run_a2a_handoff(envelope: dict, context: dict) -> None:
 # 不在此集合且没有工作流规则的 agent_name 仍然 404，避免前端拼错被静默降级。
 CHAT_AGENT_NAMES = frozenset(
     {
-        "difficulty_learner",
         "note_archiver",
         "interview_evaluator",
     }
@@ -96,6 +100,12 @@ WORKFLOW_ROUTE_RULES: dict[str, WorkflowRouteRule] = {
     ),
     INTERVIEW_HOST_AGENT_NAME: WorkflowRouteRule(
         workflow_type=interview_host_workflow.WORKFLOW_TYPE_INTERVIEW_PREPARE,
+        required_keywords=(),
+        intent_examples=(),
+        direct=True,
+    ),
+    DIFFICULTY_AGENT_NAME: WorkflowRouteRule(
+        workflow_type=difficulty_card_workflow.WORKFLOW_TYPE_DIFFICULTY_CARD,
         required_keywords=(),
         intent_examples=(),
         direct=True,
@@ -163,6 +173,20 @@ class OrchestratorService:
             == interview_host_workflow.WORKFLOW_TYPE_INTERVIEW_PREPARE
         ):
             result = interview_host_workflow.start_interview_prepare(
+                user_id, payload.session_id, payload.request_text
+            )
+            return {
+                "route": "workflow",
+                "agent_name": payload.agent_name,
+                "workflow_type": rule.workflow_type,
+                **result,
+            }
+
+        if (
+            rule.workflow_type
+            == difficulty_card_workflow.WORKFLOW_TYPE_DIFFICULTY_CARD
+        ):
+            result = difficulty_card_workflow.start_difficulty_card(
                 user_id, payload.session_id, payload.request_text
             )
             return {

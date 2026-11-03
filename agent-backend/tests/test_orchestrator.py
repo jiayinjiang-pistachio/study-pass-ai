@@ -348,7 +348,7 @@ async def test_start_agent_task_chat_agent_returns_sse(
         "/api/agent/tasks/start",
         headers=auth_headers,
         json={
-            "agent_name": "difficulty_learner",
+            "agent_name": "note_archiver",
             "session_id": session["id"],
             "request_text": "帮我出几道练习题",
         },
