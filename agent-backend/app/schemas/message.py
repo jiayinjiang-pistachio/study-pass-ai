@@ -44,8 +44,12 @@ class MessageOut(BaseModel):
     response_segments: list[SegmentOut] = Field(
         default_factory=list, description="AI 回复附件段"
     )
-    response_payload: list[dict] | None = Field(
-        None, description="结构化回复载荷：当前为学习测评 quiz 数组，评分后为 null"
+    response_payload: list[dict] | dict | None = Field(
+        None,
+        description=(
+            "结构化回复载荷：学习测评出题为 quiz 数组、评分后为 null；"
+            "知识卡为 {type: knowledge_card}"
+        ),
     )
     sources: list[SourceOut] = Field(
         default_factory=list,

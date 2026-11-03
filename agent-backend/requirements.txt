@@ -70,3 +70,6 @@ pillow==13.0.0
 
 # 火山引擎 SDK：扫描版 PDF 的 OCR（VisualService / OCRNormal）
 volcengine==1.0.229
+
+# WebSocket 客户端：火山语音播客大模型（知识卡播客音频，wss 二进制协议）
+websockets==17.3

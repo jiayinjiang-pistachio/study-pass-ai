@@ -3,9 +3,11 @@ import { computed } from 'vue'
 import { Service, User } from '@element-plus/icons-vue'
 import ChatSourceList from './ChatSourceList.vue'
 import InterviewCard from './InterviewCard.vue'
+import KnowledgeCard from './KnowledgeCard.vue'
 import MsgFile from './MsgFile.vue'
 import QuizEntryCard from './QuizEntryCard.vue'
-import type { ChatMessage } from '@/types/chat'
+import LoadingDots from '@/components/common/LoadingDots.vue'
+import { SegmentType, type ChatMessage } from '@/types/chat'
 
 import { renderMarkdown } from '@/utils/markdownUtil'
 
@@ -30,10 +32,35 @@ const quizRequestId = computed(() => {
 })
 const showQuizEntry = computed(() => quizRequestId.value !== null)
 
+/** 知识卡消息：接口先本地渲染，历史消息靠 payload.type 识别 */
+const isKnowledgeCard = computed(
+  () => props.message.payloadType === 'knowledge_card',
+)
+const knowledgeTitle = computed(() => {
+  const match = props.message.responseText.match(/「([^」]+)」/)
+  return match?.[1]?.trim() || '知识卡'
+})
+const knowledgeImage = computed(
+  () =>
+    props.message.responseSegments.find(
+      (segment) => segment.type === SegmentType.Image,
+    )?.url ?? '',
+)
+const knowledgeAudio = computed(
+  () =>
+    props.message.responseSegments.find(
+      (segment) => segment.type === SegmentType.Audio,
+    )?.url || null,
+)
+/** 知识卡生成中：知识卡 + 播客耗时较长，展示专门的等待提示 */
+const isKnowledgePending = computed(
+  () => props.message.status === 0 && Boolean(props.message.loadingHint),
+)
+
 /** 生成中 / 失败的状态提示，正文为空时展示 */
 const responsePlaceholder = computed(() => {
   if (props.message.responseText.trim().length > 0) return ''
-  if (props.message.status === 0) return '正在生成…'
+  if (props.message.status === 0) return props.message.loadingHint ?? '正在生成…'
   if (props.message.status === 2) return '生成失败'
   return ''
 })
@@ -46,6 +73,7 @@ const hasResponse = computed(
     props.message.responseText.trim().length > 0 ||
     props.message.responseSegments.length > 0 ||
     props.message.sources.length > 0 ||
+    isKnowledgeCard.value ||
     showInterviewCard.value ||
     showQuizEntry.value ||
     responsePlaceholder.value.length > 0,
@@ -93,20 +121,38 @@ const timeLabel = computed(() => {
 
       <div class="msg__body">
         <div
-          v-if="message.responseText.trim().length"
-          class="msg__bubble"
-          v-html="renderedResponse"
+          v-if="isKnowledgePending"
+          class="msg__bubble msg__bubble--muted msg__loading"
+        >
+          <LoadingDots />
+          <span>{{ message.loadingHint }}</span>
+        </div>
+        <KnowledgeCard
+          v-else-if="isKnowledgeCard"
+          :title="knowledgeTitle"
+          :image-url="knowledgeImage"
+          :audio-url="knowledgeAudio"
         />
-        <div v-else-if="responsePlaceholder" class="msg__bubble msg__bubble--muted">
-          {{ responsePlaceholder }}
-        </div>
-        <div v-if="message.responseSegments.length" class="msg__files">
-          <MsgFile
-            v-for="(segment, index) in message.responseSegments"
-            :key="`res-${segment.resourceId}-${index}`"
-            :segment="segment"
+        <template v-else>
+          <div
+            v-if="message.responseText.trim().length"
+            class="msg__bubble"
+            v-html="renderedResponse"
           />
-        </div>
+          <div
+            v-else-if="responsePlaceholder"
+            class="msg__bubble msg__bubble--muted"
+          >
+            {{ responsePlaceholder }}
+          </div>
+          <div v-if="message.responseSegments.length" class="msg__files">
+            <MsgFile
+              v-for="(segment, index) in message.responseSegments"
+              :key="`res-${segment.resourceId}-${index}`"
+              :segment="segment"
+            />
+          </div>
+        </template>
         <InterviewCard
           v-if="showInterviewCard && message.interviewId !== null"
           :interview-id="message.interviewId"
@@ -178,6 +224,12 @@ const timeLabel = computed(() => {
     &--muted {
       color: var(--color-text-muted);
     }
+  }
+
+  &__loading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
   &__files {

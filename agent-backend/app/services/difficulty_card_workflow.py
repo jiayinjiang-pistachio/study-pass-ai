@@ -1,13 +1,16 @@
-"""业务层：难点讲解知识卡工作流。
+"""业务层：难点讲解知识卡工作流（图片 + 播客音频）。
 
-一次请求内完成：整理卡片原料（模型）→ 拼接绘图提示词（代码）→ Seedream 出图 →
-MinIO 永久存储 + resources 去重 → 写入带 resource_id 的会话图片消息。
-Agent 只负责整理原料，接口 / 数据库 / 出图 API 均由本层编排。
+一次请求内完成：整理卡片原料（模型）→ 代码拼接绘图 / 播客提示词 →
+Seedream 出图与播客 TTS 并行 → 两份字节分别永久落 MinIO + resources 去重 →
+写入一条带 image（可选 audio）resource_id 的会话消息。
+Agent 只负责整理原料，接口 / 数据库 / 出图 / 音频 API 均由本层编排；
+音频是加分项，生成或落库失败只记日志，不影响知识卡图片。
 """
 
 import logging
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from fastapi import status
@@ -15,12 +18,13 @@ from fastapi import status
 from ..agent.agents.difficulty_learner import (
     DifficultyLearnerAgent,
     build_image_prompt,
+    build_podcast_topic,
 )
 from ..core import minio_client
 from ..core.exceptions import BusinessException, SystemException
 from ..core.retry import RetryExhaustedError
 from ..db import message_repo, session_repo, workflow_run_repo
-from . import seedream_service, upload_service_minio
+from . import podcast_service, seedream_service, upload_service_minio
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +43,7 @@ QA_CONTEXT_MAX_CHARS = 4000
 ERROR_MESSAGE_MAX_CHARS = 2000
 
 CARD_MESSAGE_TEXT_TEMPLATE = "已生成知识卡「{title}」，点击查看大图。"
+AUDIO_MESSAGE_TEXT_TEMPLATE = "已生成知识卡「{title}」，点击查看大图，可收听语音讲解。"
 
 __all__ = [
     "WORKFLOW_TYPE_DIFFICULTY_CARD",
@@ -109,6 +114,27 @@ def _as_system_error(exc: Exception) -> SystemException:
     )
 
 
+def _generate_podcast(card: dict[str, Any]) -> tuple[str, bytes] | None:
+    """生成播客音频；任何失败都降级为 None，不阻断知识卡图片。"""
+    try:
+        topic = build_podcast_topic(card)
+        return topic, podcast_service.generate_podcast(topic)
+    except Exception:
+        logger.warning("播客音频生成失败，仅返回知识卡", exc_info=True)
+        return None
+
+
+def _save_audio(user_id: int, card: dict[str, Any], data: bytes) -> dict | None:
+    """音频落库；存储失败同样只降级，不影响主产物。"""
+    try:
+        return upload_service_minio.save_generated_audio(
+            user_id, data, file_name=f"知识卡播客-{card['title']}"
+        )
+    except Exception:
+        logger.warning("播客音频落库失败，仅返回知识卡", exc_info=True)
+        return None
+
+
 def _save_card_message(
     user_id: int,
     session_id: int,
@@ -116,13 +142,29 @@ def _save_card_message(
     request_text: str,
     title: str,
     resource: dict,
+    audio_resource: dict | None,
 ) -> dict:
-    """写入一条带图片 resource_id 的消息，历史读取时按 resource_id 续签 URL。"""
-    segment = {
-        "type": "image",
-        "resource_id": resource["id"],
-        "file_name": resource["file_name"],
-    }
+    """写入一条带 resource_id 的消息，历史读取时按 resource_id 续签 URL。"""
+    segments = [
+        {
+            "type": "image",
+            "resource_id": resource["id"],
+            "file_name": resource["file_name"],
+        }
+    ]
+    if audio_resource is not None:
+        segments.append(
+            {
+                "type": "audio",
+                "resource_id": audio_resource["id"],
+                "file_name": audio_resource["file_name"],
+            }
+        )
+    template = (
+        AUDIO_MESSAGE_TEXT_TEMPLATE
+        if audio_resource is not None
+        else CARD_MESSAGE_TEXT_TEMPLATE
+    )
     return message_repo.insert(
         {
             "user_id": user_id,
@@ -130,8 +172,10 @@ def _save_card_message(
             "select_mode": SELECT_MODE_KNOWLEDGE,
             "request_id": f"{run_id}:card",
             "request_text": request_text,
-            "response_text": CARD_MESSAGE_TEXT_TEMPLATE.format(title=title),
-            "response_segments": [segment],
+            "response_text": template.format(title=title),
+            "response_segments": segments,
+            # 只标记消息形态，不把音频稿 / 临时链接塞进 payload
+            "response_payload": {"type": "knowledge_card"},
             "status": 1,
         }
     )
@@ -174,13 +218,30 @@ def start_difficulty_card(
             user_id, request_text, qa_context
         )
         image_prompt = build_image_prompt(card)
-        image_bytes = seedream_service.generate_image(image_prompt)
+        # 出图与出音频互不依赖，并行执行；总耗时接近较慢的一路
+        with ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="knowledge-card"
+        ) as pool:
+            image_future = pool.submit(
+                seedream_service.generate_image, image_prompt
+            )
+            audio_future = pool.submit(_generate_podcast, card)
+            # 图片是主产物：失败直接抛出；音频内部已兜底，不会抛
+            image_bytes = image_future.result()
+            podcast = audio_future.result()
+
         saved = upload_service_minio.save_generated_image(
             user_id,
             image_bytes,
             file_name=f"知识卡-{card['title']}",
         )
         resource = saved["resource"]
+        audio_saved = (
+            _save_audio(user_id, card, podcast[1]) if podcast is not None else None
+        )
+        audio_resource = (
+            audio_saved["resource"] if audio_saved is not None else None
+        )
         message = _save_card_message(
             user_id,
             session_id,
@@ -188,6 +249,7 @@ def start_difficulty_card(
             request_text,
             card["title"],
             resource,
+            audio_resource,
         )
     except Exception as exc:
         _mark_failed(run_id, state, exc, node="generate_card")
@@ -196,12 +258,27 @@ def start_difficulty_card(
     image_url = ""
     try:
         image_url = (
-            minio_client.presigned_url_for_storage_path(resource["storage_path"])
+            minio_client.presigned_url_for_storage_path(
+                resource["storage_path"]
+            )
             or ""
         )
     except Exception:
         # 预签名失败不影响已落库的图片：历史消息读取时会再次尝试续签
         logger.warning("知识卡预签名失败 | resource_id=%s", resource["id"], exc_info=True)
+
+    audio_url: str | None = None
+    if audio_resource is not None:
+        try:
+            audio_url = minio_client.presigned_url_for_storage_path(
+                audio_resource["storage_path"]
+            )
+        except Exception:
+            logger.warning(
+                "知识卡音频预签名失败 | resource_id=%s",
+                audio_resource["id"],
+                exc_info=True,
+            )
 
     completed_state = {
         **state,
@@ -211,6 +288,10 @@ def start_difficulty_card(
         "resource_id": resource["id"],
         "message_id": message["id"],
         "image_reused": not saved["created"],
+        "podcast_topic": podcast[0] if podcast is not None else None,
+        "audio_resource_id": (
+            audio_resource["id"] if audio_resource is not None else None
+        ),
     }
     workflow_run_repo.update(
         run_id,
@@ -223,11 +304,13 @@ def start_difficulty_card(
     )
 
     logger.info(
-        "知识卡已生成 | user_id=%s session_id=%s run_id=%s resource_id=%s reused=%s",
+        "知识卡已生成 | user_id=%s session_id=%s run_id=%s resource_id=%s "
+        "audio_resource_id=%s reused=%s",
         user_id,
         session_id,
         run_id,
         resource["id"],
+        completed_state["audio_resource_id"],
         not saved["created"],
     )
     return {
@@ -237,4 +320,6 @@ def start_difficulty_card(
         "title": card["title"],
         "resource_id": resource["id"],
         "image_url": image_url,
+        "audio_resource_id": completed_state["audio_resource_id"],
+        "audio_url": audio_url,
     }

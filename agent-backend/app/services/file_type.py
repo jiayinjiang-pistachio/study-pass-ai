@@ -109,6 +109,11 @@ def _has_audio_header(data: bytes, suffix: str) -> bool:
     return any(data.startswith(magic) for magic in _AUDIO_MAGICS[suffix])
 
 
+def detect_generated_mp3(data: bytes) -> str | None:
+    """识别模型生成的音频；只接受 MP3（ID3 标签或 MPEG 帧同步）。"""
+    return ".mp3" if _has_audio_header(data, ".mp3") else None
+
+
 def detect_audio(data: bytes, filename: str) -> str | None:
     """返回音频扩展名；扩展名不在白名单或文件头不符时返回 None。"""
     suffix = Path(filename).suffix.lower()

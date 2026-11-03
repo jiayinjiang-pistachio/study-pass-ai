@@ -1,9 +1,11 @@
-# 难点知识卡（Seedream）配置与验证指南
+# 难点知识卡（Seedream + 播客 TTS）配置与验证指南
 
 面向本地联调，覆盖两件事：
 
-1. **配置**：接入火山方舟 Seedream 文生图所需的模型、密钥、尺寸与 MinIO 存储配置；
-2. **验证**：从一次请求开始，跑通「卡片原料 → 出图 → 永久存储 → 会话图片消息 → 历史续签」全链路。
+1. **配置**：接入火山方舟 Seedream 文生图与火山播客 TTS 所需的密钥、尺寸与 MinIO 存储配置；
+2. **验证**：从一次请求开始，跑通「卡片原料 → 出图 + 出音频（并行）→ 永久存储 → 会话消息 → 历史续签」全链路。
+
+> 图片是主产物，音频是可选加分项：未配置或生成失败时只返回图片，不影响整体成功。
 
 相关代码：
 
@@ -11,7 +13,8 @@
 - 工作流编排：[`app/services/difficulty_card_workflow.py`](../app/services/difficulty_card_workflow.py)
 - 卡片原料与提示词：[`app/agent/agents/difficulty_learner.py`](../app/agent/agents/difficulty_learner.py)
 - Seedream 调用：[`app/services/seedream_service.py`](../app/services/seedream_service.py)
-- 图片落库：[`app/services/upload_service_minio.py`](../app/services/upload_service_minio.py)
+- 播客 TTS 调用：[`app/services/podcast_service.py`](../app/services/podcast_service.py)
+- 图片 / 音频落库：[`app/services/upload_service_minio.py`](../app/services/upload_service_minio.py)
 - 历史消息续签：[`app/services/message_service.py`](../app/services/message_service.py)
 - 配置入口：[`app/core/config.py`](../app/core/config.py)
 - 自动化回归：[`tests/test_difficulty_card.py`](../tests/test_difficulty_card.py)
@@ -29,10 +32,12 @@ flowchart LR
     F[前端<br/>agent_name=difficulty_learner] --> R[routers/orchestrator.py]
     R --> O[services/orchestrator_service.py<br/>direct 分发]
     O --> W[services/difficulty_card_workflow.py<br/>编排 / 重试 / 落库]
-    W --> A[agent/agents/difficulty_learner.py<br/>prepare_card + build_image_prompt]
+    W --> A[agent/agents/difficulty_learner.py<br/>prepare_card + build_image_prompt + build_podcast_topic]
     A --> L[LLM<br/>整理卡片原料]
     W --> S[services/seedream_service.py]
     S --> ARK[火山方舟<br/>Seedream 出图]
+    W --> P[services/podcast_service.py<br/>可选：音频失败不阻断]
+    P --> TTS[火山播客 TTS<br/>话题 → MP3]
     W --> U[services/upload_service_minio.py]
     U --> M[MinIO 对象存储]
     U --> DB[(MySQL resources)]
@@ -59,6 +64,7 @@ generating ──成功──> completed
 | 依赖 | 用途 | 说明 |
 | --- | --- | --- |
 | 火山方舟 API Key | 调用 Seedream 出图 | 未配置时仅知识卡接口返回 `503`，不影响服务启动与其他接口 |
+| 火山播客 TTS 凭证 | 生成语音讲解 MP3（可选） | 未配置时知识卡照常返回，只是没有音频 |
 | 兼容 OpenAI 协议的 LLM | `prepare_card` 整理卡片原料 | 复用现有 `LLM_*` 配置；缺失时同样返回 `503` |
 | MinIO | 保存生成图片 | 未配置 / 不可达时，图片落库失败返回 `502` |
 | MySQL | `workflow_runs` / `resources` / `chat_messages` | 需先执行 `alembic upgrade head` |
@@ -195,6 +201,45 @@ PY
 | `502 生成图片过大，已取消保存` | 图片超过 20MB | 降低 `SEEDREAM_IMAGE_SIZE` 或换更小的尺寸 |
 | 图片保存失败 `502` | MinIO 不可达 / 凭证错误 / 桶创建失败 | 确认 MinIO 已启动、`MINIO_*` 正确 |
 
+### 1.7 播客 TTS 配置（可选）
+
+语音讲解与出图并行，**任何音频问题都不会让知识卡请求失败**（只记 WARNING）。
+
+在 `.env` 中补充：
+
+```dotenv
+# ===== 火山语音播客大模型（知识卡语音讲解）=====
+PODCAST_TTS_APP_ID=your_app_id
+PODCAST_TTS_ACCESS_KEY=your_access_key
+# 以下按语音控制台实际接口覆盖，默认值见下
+# PODCAST_TTS_BASE_URL=wss://openspeech.bytedance.com
+# PODCAST_TTS_PATH=/api/v3/sami/podcasttts
+# PODCAST_TTS_RESOURCE_ID=volc.service_type.10050
+# PODCAST_TTS_TIMEOUT=300
+```
+
+| 变量 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `PODCAST_TTS_APP_ID` | 是 | 无 | 语音控制台的 App ID（不是 RTC App ID） |
+| `PODCAST_TTS_ACCESS_KEY` | 是 | 无 | 语音控制台的 Access Key / Access Token |
+| `PODCAST_TTS_BASE_URL` | 否 | `wss://openspeech.bytedance.com` | 自动去掉末尾 `/`；写 `https://` 会自动转 `wss://` |
+| `PODCAST_TTS_PATH` | 否 | `/api/v3/sami/podcasttts` | 自动补前导 `/` |
+| `PODCAST_TTS_RESOURCE_ID` | 否 | `volc.service_type.10050` | 语音播客服务资源 ID |
+| `PODCAST_TTS_TIMEOUT` | 否 | `300` | 单次播客生成超时（秒） |
+
+请求约定（客户端实现见 `app/services/podcast_service.py`）：
+
+- **WebSocket 二进制协议**：`X-Api-App-Id` / `X-Api-Access-Key` / `X-Api-Resource-Id` 建连；
+- 上行 `StartSession`（event 100）payload 为 `action=0` + `input_text`，由
+  `build_podcast_topic()` 从同一份卡片原料确定性拼接；音频参数 `mp3 / 24000`，默认双人音色；
+- 下行 `PodcastRoundResponse`（event 361）为音频字节，按序拼接；`PodcastEnd`（363）后发送
+  `FinishSession`（102），收到 `SessionFinished`（152）结束；错误帧按 `error code` 转 502；
+- 音频只接受 MP3（ID3 或 MPEG 帧同步），超过 30MB 拒绝保存；**不重试**，避免重复扣费；
+- 不落本地、不保存对白稿；音频字节经 `save_generated_audio()` 永久入 MinIO，消息只存 `resource_id`。
+
+> WebSocket 握手、二进制帧逐字节解析、事件流与排障对照的完整说明见
+> **[podcast-communication-guide.md](./podcast-communication-guide.md)**。
+
 ---
 
 ## 2. 启动与准备
@@ -259,13 +304,16 @@ uvicorn app.main:app --reload --reload-exclude 'logs/*' --port 8000
     "status": "completed",
     "title": "Python GIL",
     "resource_id": 45,
-    "image_url": "http://127.0.0.1:9000/ai-resource/users/1/<md5>.png?X-Amz-..."
+    "image_url": "http://127.0.0.1:9000/ai-resource/users/1/<md5>.png?X-Amz-...",
+    "audio_resource_id": 46,
+    "audio_url": "http://127.0.0.1:9000/ai-resource/users/1/<md5>.mp3?X-Amz-..."
   }
 }
 ```
 
 - `image_url` 是 MinIO 预签名地址，默认 7 天有效；
 - 预签名失败时 `image_url` 为空串，图片本身已落库，可通过历史消息接口重新续签；
+- 音频未配置 / 生成失败时 `audio_resource_id` 与 `audio_url` 均为 `null`，知识卡仍为 `completed`；
 - 出参模型见 [`app/schemas/difficulty_card.py`](../app/schemas/difficulty_card.py)。
 
 ### 3.4 校验会话图片消息
@@ -277,20 +325,27 @@ uvicorn app.main:app --reload --reload-exclude 'logs/*' --port 8000
   "id": 9001,
   "request_id": "<run_id>:card",
   "request_text": "解释一下 Python GIL，以及它对多线程的影响",
-  "response_text": "已生成知识卡「Python GIL」，点击查看大图。",
+  "response_text": "已生成知识卡「Python GIL」，点击查看大图，可收听语音讲解。",
+  "response_payload": {"type": "knowledge_card"},
   "response_segments": [
     {
       "type": "image",
       "resource_id": 45,
       "file_name": "知识卡-Python GIL.png",
       "url": "http://127.0.0.1:9000/ai-resource/users/1/<md5>.png?X-Amz-..."
+    },
+    {
+      "type": "audio",
+      "resource_id": 46,
+      "file_name": "知识卡播客-Python GIL.mp3",
+      "url": "http://127.0.0.1:9000/ai-resource/users/1/<md5>.mp3?X-Amz-..."
     }
   ],
   "status": 1
 }
 ```
 
-消息表只存 `resource_id`；每次读取历史时由 `message_service` 重新预签名。可将这条消息的 `url` 直接在浏览器打开，确认图片可访问。
+消息表只存 `resource_id`；每次读取历史时由 `message_service` 重新预签名。可将这条消息的 `url` 直接在浏览器打开，确认图片 / 音频可访问。音频生成失败时 `response_segments` 只有 `image` 段。
 
 ### 3.5 数据落库核对
 
@@ -313,9 +368,9 @@ FROM chat_messages WHERE id = <message_id>;
 
 预期：
 
-- `workflow_runs.status=completed`，`state_json` 含 `card / image_prompt / resource_id / message_id / image_reused`；
-- `resources.resource_type=1`（图片）、`storage_scene=0`（长期）、`expire_time IS NULL`；
-- `chat_messages.select_mode=1`、`request_id={run_id}:card`、`status=1`，`response_segments` 为 `[{type:"image", resource_id, file_name}]`。
+- `workflow_runs.status=completed`，`state_json` 含 `card / image_prompt / resource_id / message_id / image_reused / podcast_topic / audio_resource_id`；
+- `resources.resource_type=1`（图片）或 `2`（音频）、`storage_scene=0`（长期）、`expire_time IS NULL`；
+- `chat_messages.select_mode=1`、`request_id={run_id}:card`、`status=1`、`response_payload={"type":"knowledge_card"}`，`response_segments` 为 `[{type:"image",...}]` 或 `[{type:"image",...},{type:"audio",...}]`。
 
 ### 3.6 日志核对
 
@@ -427,13 +482,14 @@ flowchart TD
 | --- | --- |
 | 分发方式 | `difficulty_learner` 命中 `direct=True`，不触发关键词 / 语义判断 |
 | 卡片原料 | `title / topic / summary / points` 齐全，`points` 为 1..3 条且每条含 `title + tip` |
-| 绘图提示词 | 由代码拼接，含竖版、短文案、少图标、禁止漫画分镜等硬约束 |
-| 出参 | `route=workflow`、`workflow_type=difficulty_card`、`status=completed`，含 `run_id / title / resource_id / image_url` |
-| 运行记录 | `workflow_runs.status=completed`，`state_json` 含 `card / image_prompt / resource_id / message_id` |
-| 图片资源 | `resources.resource_type=1`、`expire_time IS NULL`，`storage_path` 为 `minio:/{bucket}/users/{user_id}/{md5}.ext` |
-| 会话消息 | `select_mode=1`、`request_id={run_id}:card`、`status=1`，附件段只存 `resource_id` |
+| 提示词 | 绘图与播客话题都由同一份卡片原料确定性拼接；播客要求双人口语化、不念稿 |
+| 并行 | 出图与出音频并行执行，总耗时接近较慢的一路 |
+| 出参 | `route=workflow`、`workflow_type=difficulty_card`、`status=completed`，含 `run_id / title / resource_id / image_url`，音频可额外含 `audio_resource_id / audio_url` |
+| 运行记录 | `workflow_runs.status=completed`，`state_json` 含 `card / image_prompt / resource_id / message_id / audio_resource_id` |
+| 资源 | 图片 `resource_type=1`、音频 `resource_type=2`，均 `expire_time IS NULL`，`storage_path` 为 `minio:/{bucket}/users/{user_id}/{md5}.ext` |
+| 会话消息 | `select_mode=1`、`request_id={run_id}:card`、`status=1`、`response_payload={"type":"knowledge_card"}`，附件段只存 `resource_id` |
 | 历史回显 | `GET /api/sessions/{id}/messages` 返回 `response_segments[].url`，且每次读取重新签名 |
-| 去重 | 同一用户重复生成同一图片时 `image_reused=true`，复用原 `resource_id` |
+| 去重 | 同一用户重复生成同一图片 / 音频时复用原 `resource_id`（`*_reused=true`） |
 
 ---
 
@@ -449,6 +505,9 @@ flowchart TD
 | 返回非图片内容 | 假接口返回纯文本 | `502 模型返回的图片格式不受支持` |
 | 图片超过 20MB | 使用超清尺寸 | `502 生成图片过大，已取消保存` |
 | LLM 配置缺失 | 注释 `LLM_API_KEY` | `503 知识卡服务暂不可用` |
+| 未配置播客 TTS | 注释 `PODCAST_TTS_*` | 知识卡照常 `200`，`audio_resource_id / audio_url` 为 `null` |
+| 播客接口失败 / 超时 | 错误凭证或断开网络 | 只记 WARNING，知识卡照常返回，消息无 `audio` 段 |
+| 音频落库失败 | MinIO 写入异常（仅音频） | 同上，不阻断图片 |
 | 模型输出非 JSON | 模型持续返回普通文本 | 重试耗尽后 `502 知识卡生成失败，请稍后重试` |
 | 提示词模板未初始化 | 未执行 `init_prompt.py` | 不报错，自动降级为内置角色提示词并继续出图 |
 
@@ -460,4 +519,4 @@ flowchart TD
 .venv/bin/python -m pytest tests/test_difficulty_card.py -v
 ```
 
-覆盖：直接分发、提示词确定性、图片消息落库、历史 URL 续签、会话越权、Seedream 缺 Key `503`。
+覆盖：直接分发、绘图 / 播客提示词确定性、图片与音频消息落库、音频软失败、历史 URL 续签、会话越权、Seedream 缺 Key `503`。

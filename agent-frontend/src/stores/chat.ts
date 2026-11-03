@@ -1,13 +1,15 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { ChatMessage } from '@/types/chat'
+import type { ChatMessage, MessageSegment } from '@/types/chat'
 import type { QuizAnswer } from '@/types/quiz'
-import type { AgentTaskResult } from '@/api/conversation'
+import { AgentName } from '@/types/agent'
+import type { AgentTaskResult, KnowledgeCardData } from '@/api/conversation'
 import * as conversationApi from '@/api/conversation'
 import { submitLearningQuiz } from '@/api/learningWorkflow'
 import { buildEvaluationText, quizRunId } from '@/utils/quiz'
 
 const PAGE_SIZE = 20
+const KNOWLEDGE_LOADING_HINT = '正在生成知识卡和播客，请稍等…'
 
 export interface SendMessageOptions {
   /**
@@ -61,6 +63,40 @@ function mergeServerWins(
   // 服务端快照是落库后的最终结果（测评题目 / 评分），同 ID 覆盖本地副本
   for (const item of [...current, ...incoming]) merged.set(item.id, item)
   return [...merged.values()]
+}
+
+/**
+ * 用工作流 JSON 结果先渲染知识卡，再等会话刷新用落库消息对账。
+ * 消息体只存 resource_id 与当前签名 URL，历史读取时由后端重新续签。
+ */
+function applyKnowledgeCard(
+  item: ChatMessage,
+  data: KnowledgeCardData,
+): void {
+  const segments: MessageSegment[] = [
+    {
+      type: 'image',
+      resourceId: data.imageResourceId,
+      name: '知识卡',
+      url: data.imageUrl,
+    },
+  ]
+  if (data.audioResourceId !== null) {
+    segments.push({
+      type: 'audio',
+      resourceId: data.audioResourceId,
+      name: '语音讲解',
+      url: data.audioUrl ?? '',
+    })
+  }
+
+  item.requestId = `${data.runId}:card`
+  item.payloadType = 'knowledge_card'
+  item.responseText = data.audioResourceId
+    ? `已生成知识卡「${data.title}」，点击查看大图，可收听语音讲解。`
+    : `已生成知识卡「${data.title}」，点击查看大图。`
+  item.responseSegments = segments
+  item.loadingHint = undefined
 }
 
 export const useChatStore = defineStore('chat', () => {
@@ -190,6 +226,9 @@ export const useChatStore = defineStore('chat', () => {
       sources: [],
       status: 0,
       responsePayload: null,
+      payloadType: null,
+      loadingHint:
+        agentName === AgentName.Difficulty ? KNOWLEDGE_LOADING_HINT : undefined,
       interviewId: null,
       createdAt,
     })
@@ -228,7 +267,15 @@ export const useChatStore = defineStore('chat', () => {
 
       // 页面接管特殊任务（面试背景确认）时跳过默认刷新，保留本轮临时行
       const handled = options.onTaskResult?.(result) ?? false
-      if (!handled && result.kind === 'workflow') {
+      if (!handled && result.kind === 'difficulty_card') {
+        // 先按接口结果渲染，再用历史消息对账；刷新失败也保留已渲染的知识卡
+        applyKnowledgeCard(item, result.data)
+        try {
+          await refresh(sessionId)
+        } catch {
+          // 重进会话时会重新拉取历史消息
+        }
+      } else if (!handled && result.kind === 'workflow') {
         try {
           await refresh(sessionId)
         } catch {
@@ -267,6 +314,7 @@ export const useChatStore = defineStore('chat', () => {
     if (target) {
       target.responseText = buildEvaluationText(result)
       target.responsePayload = null
+      target.payloadType = null
       target.status = 1
     }
 

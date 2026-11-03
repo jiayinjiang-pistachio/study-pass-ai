@@ -132,6 +132,12 @@ function toSources(value: unknown): MessageSource[] {
     .filter((source): source is MessageSource => source !== null)
 }
 
+function toPayloadType(value: unknown): 'knowledge_card' | null {
+  return isRecord(value) && value.type === 'knowledge_card'
+    ? 'knowledge_card'
+    : null
+}
+
 function toMessage(raw: RawMessage): ChatMessage {
   const status = raw.status === 0 || raw.status === 2 ? raw.status : 1
   const createdSeconds = toNumber(raw.created_at)
@@ -151,6 +157,7 @@ function toMessage(raw: RawMessage): ChatMessage {
     sources: toSources(raw.sources),
     status,
     responsePayload: quiz.length ? quiz : null,
+    payloadType: toPayloadType(raw.response_payload),
     interviewId: toNumber(raw.interview_id) || null,
     createdAt: createdSeconds > 0 ? createdSeconds * 1000 : Date.now(),
   }
@@ -363,10 +370,21 @@ export interface AgentWorkflowData {
   quiz: QuizQuestion[]
 }
 
+/** 知识卡工作流结果：图片必返，音频可空（失败不影响知识卡） */
+export interface KnowledgeCardData {
+  runId: string
+  title: string
+  imageResourceId: number
+  imageUrl: string
+  audioResourceId: number | null
+  audioUrl: string | null
+}
+
 /** 总控响应：SSE 表示通用聊天，JSON 表示已启动工作流 */
 export type AgentTaskResult =
   | { kind: 'chat' }
   | { kind: 'workflow'; data: AgentWorkflowData }
+  | { kind: 'difficulty_card'; data: KnowledgeCardData }
   | { kind: 'interview_prepare'; data: InterviewPrepareData }
 
 function toText(value: unknown): string {
@@ -407,6 +425,28 @@ function toInterviewPrepare(
   }
 }
 
+/** 知识卡结果：图片必返，音频可空；缺少图片资源视为响应异常 */
+function toKnowledgeCard(
+  runId: string,
+  data: Record<string, unknown>,
+): AgentTaskResult {
+  const imageResourceId = toNumber(data.resource_id)
+  if (!imageResourceId) throw new ApiError('知识卡响应缺少图片资源', 502)
+
+  const audioResourceId = toNumber(data.audio_resource_id) || null
+  return {
+    kind: 'difficulty_card',
+    data: {
+      runId,
+      title: toText(data.title) || '知识卡',
+      imageResourceId,
+      imageUrl: toText(data.image_url),
+      audioResourceId,
+      audioUrl: audioResourceId ? toText(data.audio_url) : null,
+    },
+  }
+}
+
 /** 解析工作流分支的统一信封，出参做防御性校验 */
 function toWorkflowResult(payload: unknown): AgentTaskResult {
   if (!isRecord(payload) || payload.code !== 200 || !isRecord(payload.data)) {
@@ -421,6 +461,10 @@ function toWorkflowResult(payload: unknown): AgentTaskResult {
 
   if (data.workflow_type === 'interview_prepare') {
     return toInterviewPrepare(runId, data)
+  }
+
+  if (data.workflow_type === 'difficulty_card') {
+    return toKnowledgeCard(runId, data)
   }
 
   return {

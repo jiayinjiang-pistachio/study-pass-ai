@@ -146,6 +146,62 @@ def get_seedream_config() -> SeedreamConfig:
     )
 
 
+# ---- 火山语音播客大模型（知识卡语音讲解）----
+# 凭证来自语音控制台（不是 RTC）；缺失时只跳过音频，不影响知识卡图片生成。
+PODCAST_TTS_APP_ID: str | None = os.getenv("PODCAST_TTS_APP_ID")
+PODCAST_TTS_ACCESS_KEY: str | None = os.getenv("PODCAST_TTS_ACCESS_KEY")
+PODCAST_TTS_BASE_URL: str = os.getenv(
+    "PODCAST_TTS_BASE_URL", "wss://openspeech.bytedance.com"
+).rstrip("/")
+# 播客接口为 WebSocket（二进制协议），路径按控制台文档覆盖
+PODCAST_TTS_PATH: str = os.getenv(
+    "PODCAST_TTS_PATH", "/api/v3/sami/podcasttts"
+)
+PODCAST_TTS_RESOURCE_ID: str = os.getenv(
+    "PODCAST_TTS_RESOURCE_ID", "volc.service_type.10050"
+)
+# 播客生成耗时明显长于出图，默认给到 5 分钟
+PODCAST_TTS_TIMEOUT: float = float(os.getenv("PODCAST_TTS_TIMEOUT", "300"))
+
+
+class PodcastTtsConfig(NamedTuple):
+    """火山播客 WebSocket 连接参数。"""
+
+    app_id: str
+    access_key: str
+    url: str
+    resource_id: str
+    timeout: float
+
+
+def _to_ws_url(base_url: str, path: str) -> str:
+    """兼容配置里写 http(s) 的情况，统一转成 ws(s) 地址。"""
+    base = base_url.rstrip("/")
+    if base.startswith("https://"):
+        base = f"wss://{base[len('https://'):]}"
+    elif base.startswith("http://"):
+        base = f"ws://{base[len('http://'):]}"
+    normalized_path = path if path.startswith("/") else f"/{path}"
+    return f"{base}{normalized_path}"
+
+
+def get_podcast_tts_config() -> PodcastTtsConfig:
+    """返回播客 TTS 配置；缺失时立即报错（由工作流降级为无音频）。"""
+    if not PODCAST_TTS_APP_ID or not PODCAST_TTS_ACCESS_KEY:
+        raise RuntimeError(
+            "环境变量 PODCAST_TTS_APP_ID / PODCAST_TTS_ACCESS_KEY 未配置，"
+            "知识卡音频不可用"
+        )
+
+    return PodcastTtsConfig(
+        app_id=PODCAST_TTS_APP_ID,
+        access_key=PODCAST_TTS_ACCESS_KEY,
+        url=_to_ws_url(PODCAST_TTS_BASE_URL, PODCAST_TTS_PATH),
+        resource_id=PODCAST_TTS_RESOURCE_ID,
+        timeout=PODCAST_TTS_TIMEOUT,
+    )
+
+
 # ---- AI 对话配置（OpenAI 兼容协议）----
 # provider 只影响 base_url 默认值；任意兼容 OpenAI 协议的服务也可用 LLM_BASE_URL 显式指定。
 LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai").strip().lower()

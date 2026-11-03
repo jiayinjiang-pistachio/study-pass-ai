@@ -1,10 +1,11 @@
 """难点知识卡工作流测试。
 
-覆盖：总控直接分发、卡片原料整理、绘图提示词确定性拼接、图片落库与会话消息、
-历史消息按 resource_id 续签 URL、会话越权、出图配置缺失（503）。
-模型 / Seedream / MinIO 均用替身，不触达外部服务。
+覆盖：总控直接分发、卡片原料整理、绘图 / 播客提示词确定性拼接、图片与音频
+落库、会话消息附件段、历史消息按 resource_id 续签 URL、音频软失败、会话越权、
+出图配置缺失（503）。模型 / Seedream / 播客 TTS / MinIO 均用替身，不触达外部服务。
 """
 
+import struct
 import uuid
 
 import httpx
@@ -14,7 +15,7 @@ from app.agent.agents import difficulty_learner
 from app.db import message_repo, resource_repo, session_repo, workflow_run_repo
 from app.db.models import WorkflowRun
 from app.db.session import SessionLocal
-from app.services import difficulty_card_workflow
+from app.services import difficulty_card_workflow, podcast_service
 from app.services.orchestrator_service import (
     DIFFICULTY_AGENT_NAME,
     WORKFLOW_ROUTE_RULES,
@@ -35,21 +36,23 @@ CARD = {
 
 
 def _patch_pipeline(monkeypatch) -> list[int]:
-    """替身：卡片原料固定，出图返回假字节，落库返回真实 resources 记录。"""
+    """替身：卡片原料固定，出图 / 出音频返回假字节，落库返回真实 resources 记录。"""
     calls: list[int] = []
 
     def fake_prepare(self, _user_id, _request_text, _qa_context=""):
         return dict(CARD)
 
-    def fake_save(user_id, data, *, file_name="knowledge-card"):
+    def _fake_save(user_id, data, *, file_name, resource_type, suffix):
         calls.append(len(data))
         resource = resource_repo.insert(
             {
                 "user_id": user_id,
-                "resource_type": 1,
-                "file_name": f"{file_name}.png",
+                "resource_type": resource_type,
+                "file_name": f"{file_name}{suffix}",
                 "file_hash": uuid.uuid4().hex,
-                "storage_path": f"minio:/bucket/users/{user_id}/{uuid.uuid4().hex}.png",
+                "storage_path": (
+                    f"minio:/bucket/users/{user_id}/{uuid.uuid4().hex}{suffix}"
+                ),
                 "expire_time": None,
             }
         )
@@ -64,14 +67,28 @@ def _patch_pipeline(monkeypatch) -> list[int]:
         lambda _prompt: b"\x89PNG\r\n\x1a\nfake",
     )
     monkeypatch.setattr(
+        difficulty_card_workflow.podcast_service,
+        "generate_podcast",
+        lambda _topic: b"ID3\x03\x00\x00\x00fake",
+    )
+    monkeypatch.setattr(
         difficulty_card_workflow.upload_service_minio,
         "save_generated_image",
-        fake_save,
+        lambda user_id, data, *, file_name="knowledge-card": _fake_save(
+            user_id, data, file_name=file_name, resource_type=1, suffix=".png"
+        ),
+    )
+    monkeypatch.setattr(
+        difficulty_card_workflow.upload_service_minio,
+        "save_generated_audio",
+        lambda user_id, data, *, file_name="knowledge-card-podcast": _fake_save(
+            user_id, data, file_name=file_name, resource_type=2, suffix=".mp3"
+        ),
     )
     monkeypatch.setattr(
         difficulty_card_workflow.minio_client,
         "presigned_url_for_storage_path",
-        lambda _path: "http://minio.local/card.png",
+        lambda _path: "http://minio.local/card-asset",
     )
     return calls
 
@@ -101,6 +118,62 @@ def test_image_prompt_is_deterministic() -> None:
     assert prompt == difficulty_learner.build_image_prompt(CARD)
 
 
+def test_podcast_topic_is_deterministic() -> None:
+    """播客话题与绘图同源：复用同一份卡片原料，且不调用模型。"""
+    topic = difficulty_learner.build_podcast_topic(CARD)
+
+    assert CARD["title"] in topic
+    assert CARD["summary"] in topic
+    assert CARD["points"][0]["tip"] in topic
+    assert "双人" in topic
+    assert topic == difficulty_learner.build_podcast_topic(CARD)
+
+
+def _server_frame(event: int, payload: bytes, session_id: str = "sid-1") -> bytes:
+    encoded_session = session_id.encode("utf-8")
+    return (
+        bytes([0x11, 0x94, 0x10, 0x00])
+        + struct.pack(">i", event)
+        + struct.pack(">I", len(encoded_session))
+        + encoded_session
+        + struct.pack(">I", len(payload))
+        + payload
+    )
+
+
+def test_podcast_frame_encoding() -> None:
+    """上行帧固定：v1 / 4 字节头 / message type 1 / JSON / 带 event。"""
+    frame = podcast_service._encode_frame(
+        podcast_service.EVENT_START_SESSION, b'{"action":0}', "sid-1"
+    )
+
+    assert frame[:4] == bytes([0x11, 0x14, 0x10, 0x00])
+    assert struct.unpack_from(">i", frame, 4)[0] == 100
+    assert struct.unpack_from(">I", frame, 8)[0] == 5
+    assert frame[12:17] == b"sid-1"
+    assert struct.unpack_from(">I", frame, 17)[0] == len(b'{"action":0}')
+    assert frame[21:] == b'{"action":0}'
+
+
+def test_podcast_frame_parsing() -> None:
+    """下行音频帧取出 payload；错误帧带 error code 与原始报文。"""
+    audio = podcast_service._parse_frame(
+        _server_frame(podcast_service.EVENT_ROUND_RESPONSE, b"ID3audio")
+    )
+    assert audio.event == podcast_service.EVENT_ROUND_RESPONSE
+    assert audio.payload == b"ID3audio"
+    assert audio.error_code is None
+
+    error = podcast_service._parse_frame(
+        bytes([0x11, 0xF0, 0x10, 0x00])
+        + struct.pack(">i", 45000000)
+        + b'{"error":"quota"}'
+    )
+    assert error.event is None
+    assert error.error_code == 45000000
+    assert error.payload == b'{"error":"quota"}'
+
+
 async def test_generate_card_creates_image_message(
     client: httpx.AsyncClient,
     auth_user: dict,
@@ -127,20 +200,64 @@ async def test_generate_card_creates_image_message(
     assert data["workflow_type"] == "difficulty_card"
     assert data["status"] == "completed"
     assert data["title"] == CARD["title"]
-    assert data["image_url"] == "http://minio.local/card.png"
+    assert data["image_url"] == "http://minio.local/card-asset"
+    assert data["audio_resource_id"] is not None
+    assert data["audio_url"] == "http://minio.local/card-asset"
     assert calls
 
     run = workflow_run_repo.get_for_user(data["run_id"], auth_user["id"])
     assert run["status"] == "completed"
     assert run["state_json"]["resource_id"] == data["resource_id"]
+    assert run["state_json"]["audio_resource_id"] == data["audio_resource_id"]
+    assert run["state_json"]["podcast_topic"]
 
     messages = message_repo.list_by_session(session["id"], 0, 20)
     card_messages = [row for row in messages if row.get("response_segments")]
     assert len(card_messages) == 1
     assert card_messages[0]["request_id"] == f"{data['run_id']}:card"
-    assert (
-        card_messages[0]["response_segments"][0]["resource_id"] == data["resource_id"]
+    assert card_messages[0]["response_payload"] == {"type": "knowledge_card"}
+    segments = card_messages[0]["response_segments"]
+    assert [segment["type"] for segment in segments] == ["image", "audio"]
+    assert segments[0]["resource_id"] == data["resource_id"]
+    assert segments[1]["resource_id"] == data["audio_resource_id"]
+
+
+async def test_podcast_failure_keeps_card_message(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """音频是加分项：生成失败仍返回知识卡，消息只挂 image 段。"""
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(
+        difficulty_card_workflow.podcast_service,
+        "generate_podcast",
+        lambda _topic: (_ for _ in ()).throw(RuntimeError("PODCAST_TTS 未配置")),
     )
+    session = _new_session(auth_user["id"])
+
+    resp = await client.post(
+        BASE,
+        headers=auth_headers,
+        json={
+            "agent_name": DIFFICULTY_AGENT_NAME,
+            "session_id": session["id"],
+            "request_text": "讲讲 Python GIL",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["status"] == "completed"
+    assert data["audio_resource_id"] is None
+    assert data["audio_url"] is None
+
+    messages = message_repo.list_by_session(session["id"], 0, 20)
+    card_messages = [row for row in messages if row.get("response_segments")]
+    assert len(card_messages) == 1
+    segments = card_messages[0]["response_segments"]
+    assert [segment["type"] for segment in segments] == ["image"]
 
 
 async def test_message_history_renews_image_url(
@@ -168,9 +285,9 @@ async def test_message_history_renews_image_url(
         headers=auth_headers,
     )
     assert listed.status_code == 200, listed.text
-    segment = listed.json()["data"]["items"][0]["response_segments"][0]
-    assert segment["type"] == "image"
-    assert segment["url"] == "http://minio.local/card.png"
+    segments = listed.json()["data"]["items"][0]["response_segments"]
+    assert [segment["type"] for segment in segments] == ["image", "audio"]
+    assert all(segment["url"] == "http://minio.local/card-asset" for segment in segments)
 
 
 async def test_generate_card_rejects_foreign_session(

@@ -21,3 +21,9 @@ class DifficultyCardOut(BaseModel):
     image_url: str = Field(
         ..., description="图片预签名地址；签名失败时为空串，可读历史消息时重新续签"
     )
+    audio_resource_id: int | None = Field(
+        None, description="播客音频资源 ID；音频生成失败或未配置时为 null"
+    )
+    audio_url: str | None = Field(
+        None, description="播客音频预签名地址；无音频或签名失败时为 null"
+    )

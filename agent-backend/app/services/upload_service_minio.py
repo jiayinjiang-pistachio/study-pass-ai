@@ -243,28 +243,31 @@ def upload(
     return _to_out(resource, len(data), kind, not created)
 
 
-def save_generated_image(
+def _save_generated_resource(
     user_id: int,
     data: bytes,
     *,
-    file_name: str = "knowledge-card",
+    suffix: str | None,
+    resource_type: int,
+    file_name: str,
+    default_name: str,
+    empty_message: str,
+    unsupported_message: str,
 ) -> dict:
-    """保存模型生成的图片：永久存储、按 (user_id, MD5) 去重。
+    """生成媒体落库：永久存储、按 (user_id, MD5) 去重。
 
-    与上传接口不同，生成图不走用户上传白名单，也不更新头像；返回的
+    与上传接口不同，生成内容不走用户上传白名单，也不更新头像；返回的
     resource 只存元数据，对外 URL 由读取方按需预签名。
     """
     if not data:
         raise SystemException(
-            "模型返回的图片为空",
+            empty_message,
             http_status=status.HTTP_502_BAD_GATEWAY,
             detail=f"user_id={user_id}",
         )
-
-    suffix = file_type.detect_image(data)
     if not suffix:
         raise SystemException(
-            "模型返回的图片格式不受支持",
+            unsupported_message,
             http_status=status.HTTP_502_BAD_GATEWAY,
             detail=f"user_id={user_id} size={len(data)}",
         )
@@ -276,9 +279,9 @@ def save_generated_image(
 
     object_key = f"users/{user_id}/{md5}{suffix}"
     minio_client.put_object(object_key, data, file_type.content_type_for(suffix))
-    base_name = Path(file_name).stem[:200] or "knowledge-card"
+    base_name = Path(file_name).stem[:200] or default_name
     record = {
-        "resource_type": RESOURCE_TYPE_IMAGE,
+        "resource_type": resource_type,
         "storage_scene": SCENE_LONG,
         "upload_purpose": PURPOSE_GENERAL,
         "file_name": f"{base_name}{suffix}",
@@ -292,10 +295,48 @@ def save_generated_image(
         resource = resource_repo.insert(record)
         created = True
     except IntegrityError:
-        # 并发生成同一张图：唯一键兜底，复用先写入的记录
+        # 并发生成同一份内容：唯一键兜底，复用先写入的记录
         resource = resource_repo.find_by_hash(user_id, md5)
         if resource is None:
             raise
         created = False
 
     return {"resource": resource, "created": created}
+
+
+def save_generated_image(
+    user_id: int,
+    data: bytes,
+    *,
+    file_name: str = "knowledge-card",
+) -> dict:
+    """保存模型生成的图片：永久存储、按 (user_id, MD5) 去重。"""
+    return _save_generated_resource(
+        user_id,
+        data,
+        suffix=file_type.detect_image(data),
+        resource_type=RESOURCE_TYPE_IMAGE,
+        file_name=file_name,
+        default_name="knowledge-card",
+        empty_message="模型返回的图片为空",
+        unsupported_message="模型返回的图片格式不受支持",
+    )
+
+
+def save_generated_audio(
+    user_id: int,
+    data: bytes,
+    *,
+    file_name: str = "knowledge-card-podcast",
+) -> dict:
+    """保存模型生成的播客音频：只接受 MP3，永久存储并按 MD5 去重。"""
+    return _save_generated_resource(
+        user_id,
+        data,
+        suffix=file_type.detect_generated_mp3(data),
+        resource_type=RESOURCE_TYPE_AUDIO,
+        file_name=file_name,
+        default_name="knowledge-card-podcast",
+        empty_message="模型返回的音频为空",
+        unsupported_message="模型返回的音频格式不受支持",
+    )
