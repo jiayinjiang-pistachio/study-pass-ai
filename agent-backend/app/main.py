@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from .core import minio_client
-from .core.config import UPLOAD_DIR, get_jwt_secret
+from .core.config import UPLOAD_DIR, IS_PROD, get_jwt_secret
 from .core.handlers import register_exception_handlers
 from .core.logging import setup_logging
 from .routers import auth as auth_router
@@ -84,6 +84,9 @@ app = FastAPI(
     description="学习 / 面试 AI 助手后端服务（四层架构：路由 → 校验 → 业务 → 数据库）",
     version="0.1.0",
     lifespan=lifespan,
+    docs_url=None if IS_PROD else "/docs",
+    redoc_url=None if IS_PROD else "/redoc",
+    openapi_url=None if IS_PROD else "/openapi.json",
 )
 
 # 注册全局异常处理器：统一转成 {code, message, detail} 错误响应体
