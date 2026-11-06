@@ -5,6 +5,7 @@
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 
+from ..core.rate_limit import enforce_workflow_limit
 from ..schemas.learning_workflow import (
     LearningWorkflowDetailOut,
     LearningWorkflowStartIn,
@@ -27,6 +28,7 @@ router = APIRouter(
     "/start",
     response_model=ResponseModel[LearningWorkflowStartOut],
     summary="发起学习测评并生成题目",
+    dependencies=[Depends(enforce_workflow_limit)],
 )
 def start_learning_workflow(
     payload: LearningWorkflowStartIn,

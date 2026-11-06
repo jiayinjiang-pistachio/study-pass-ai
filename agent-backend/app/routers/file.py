@@ -18,6 +18,7 @@ from fastapi import (
 )
 
 from ..core.config import FILE_MAX_BYTES
+from ..core.rate_limit import enforce_upload_limit
 from ..schemas.file import DocCategory, FileOut
 from ..schemas.response import ResponseModel, ok
 from ..services import avatar_service
@@ -36,6 +37,7 @@ router = APIRouter(
     response_model=ResponseModel[FileOut],
     status_code=status.HTTP_200_OK,
     summary="上传文件（文档 PDF / DOC / DOCX / TXT、音频；图片仅头像）",
+    dependencies=[Depends(enforce_upload_limit)],
 )
 async def upload_file(
     background_tasks: BackgroundTasks,

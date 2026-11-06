@@ -299,6 +299,25 @@ def get_redis_config() -> RedisConfig:
     )
 
 
+# ---- 接口限流（Redis 集中式固定窗口，失败降级进程内）----
+# 固定窗口长度（秒）；所有限流维度共用同一窗口，便于解释与验证。
+RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+# 各高危接口的单窗口配额。注册沿用原有 5 次/分钟；其余按调用成本与风险设定。
+RATE_LIMIT_REGISTER_MAX: int = int(os.getenv("RATE_LIMIT_REGISTER_MAX", "5"))
+RATE_LIMIT_CHAT_MAX: int = int(os.getenv("RATE_LIMIT_CHAT_MAX", "20"))
+RATE_LIMIT_TASK_MAX: int = int(os.getenv("RATE_LIMIT_TASK_MAX", "10"))
+RATE_LIMIT_UPLOAD_MAX: int = int(os.getenv("RATE_LIMIT_UPLOAD_MAX", "10"))
+RATE_LIMIT_WORKFLOW_MAX: int = int(os.getenv("RATE_LIMIT_WORKFLOW_MAX", "5"))
+# Redis key 前缀：ratelimit:{scope}:{identity}
+RATE_LIMIT_KEY_PREFIX: str = os.getenv("RATE_LIMIT_KEY_PREFIX", "ratelimit")
+# 计数后端：redis（多实例共享）| memory（仅进程内，测试 / 单机调试）
+RATE_LIMIT_BACKEND: str = os.getenv("RATE_LIMIT_BACKEND", "redis").strip().lower()
+# Redis 故障降级日志的最小间隔（秒），避免每次请求都刷屏
+RATE_LIMIT_FALLBACK_LOG_INTERVAL: int = int(
+    os.getenv("RATE_LIMIT_FALLBACK_LOG_INTERVAL", "30")
+)
+
+
 # ---- RAG 知识库向量化配置（DashScope 向量化 + Qdrant 持久化）----
 # 密钥只走环境变量；Qdrant 默认本机 6333，部署时按实际地址覆盖。
 DASHSCOPE_API_KEY: str | None = os.getenv("DASHSCOPE_API_KEY")

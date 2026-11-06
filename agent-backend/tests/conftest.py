@@ -11,6 +11,8 @@ from pathlib import Path
 # 在导入 app（进而导入 config）之前，为测试兜底一个 JWT 密钥：
 # 这样即使本地 .env 未配置 JWT_SECRET，测试也能跑；真实环境仍要求显式配置。
 os.environ.setdefault("JWT_SECRET", "test-only-secret")
+# 限流默认走 Redis；测试统一用进程内后端，避免依赖外部 Redis 与跨用例计数残留。
+os.environ.setdefault("RATE_LIMIT_BACKEND", "memory")
 
 import httpx
 import pytest

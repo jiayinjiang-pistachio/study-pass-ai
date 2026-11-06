@@ -77,7 +77,7 @@ agent-backend/
 │   │   ├── handlers.py      #   全局异常处理器（统一转错误响应信封）
 │   │   ├── minio_client.py  #   MinIO 客户端：建桶、对象读写、storage_path 转换
 │   │   ├── redis_client.py  #   Redis 客户端：懒加载单例（提示词缓存 + 工作记忆，不可用不阻断启动）
-│   │   └── rate_limit.py    #   进程内固定窗口限流（IP 维度），注册接口依赖
+│   │   └── rate_limit.py    #   分布式固定窗口限流：Redis + Lua 原子计数，故障降级进程内
 │   ├── routers/             # ① 路由层，按业务模块拆分
 │   │   ├── deps.py          #   路由层共享依赖：get_current_user（Bearer 鉴权）
 │   │   ├── user.py          #   用户 CRUD（整组需登录）
@@ -322,7 +322,14 @@ agent-backend/
   > 统一信封下成功一律 `200`：删除不用 `204`（无响应体，前端无法解析信封）；新增不用 `201`（避免 body.code 与 HTTP 状态码不一致）。
 
 - **鉴权约定**：除注册 / 登录 / 刷新 / 健康检查外，接口需携带 `Authorization: Bearer <access_token>`；令牌缺失 / 过期 / 非法 / 类型不符一律返回 `401`（由 `core/security.decode_token` 与 `routers/deps.get_current_user` 抛 `BusinessException(401)`）。**刷新令牌只能用于 `/api/auth/refresh`**，不能访问受保护接口（`type` 声明区分）；访问令牌过期时由前端调 `/api/auth/refresh` 换新令牌后重试原请求。令牌为无状态 JWT，**暂不支持主动吊销 / 登出**（后续需要再引入黑名单或落库）。
-- **注册接口安全约定**（`POST /api/auth/register`）：复用 `user_service.create_user`（bcrypt 哈希，禁止明文入库）；弱密码（黑名单 / 缺字母 / 缺数字 / 含用户名）由**校验层** `schemas/auth.py` 拦截 → `422`；接口限流由 `core/rate_limit.py` 的依赖实现（固定窗口 + IP 维度，默认 5 次/min），超限抛 `BusinessException(429)`。限流为**进程内内存**实现，仅单机有效，多实例部署需换共享存储。
+- **注册接口安全约定**（`POST /api/auth/register`）：复用 `user_service.create_user`（bcrypt 哈希，禁止明文入库）；弱密码（黑名单 / 缺字母 / 缺数字 / 含用户名）由**校验层** `schemas/auth.py` 拦截 → `422`；接口限流由 `core/rate_limit.py` 的依赖实现（固定窗口 + IP 维度，默认 5 次/min），超限抛 `BusinessException(429)`。
+- **接口限流约定**（`app/core/rate_limit.py`）：
+  - **计数集中**：默认走 Redis（`RATE_LIMIT_BACKEND=redis`），所有实例共享同一窗口配额；key 为 `ratelimit:{scope}:{identity}`。**Lua 脚本把 `INCR` 与首次 `EXPIRE` 绑成一次原子操作**，杜绝「计数已加、过期未设」的永久 key。
+  - **身份维度**：Bearer 访问令牌有效 → `user:{user_id}`（同账号跨设备共享配额）；游客 / 令牌非法 → `ip:{真实IP}`。令牌非法时降级为 IP 计数，**不代替鉴权**（401 仍由 `get_current_user` 给出）。
+  - **真实 IP**：`X-Forwarded-For` 取**最右侧**一项（由最近受信代理追加，客户端伪造左侧无效），校验并归一化 IPv4 / IPv6 与端口；最右非法或无 XFF 时回落到 `request.client.host`，**不回退读左侧**。部署必须保证边缘代理追加 / 覆盖 XFF。
+  - **故障降级**：任何 Redis 异常自动改用进程内固定窗口，接口保持可用；WARNING 日志按 `RATE_LIMIT_FALLBACK_LOG_INTERVAL`（默认 30s）节流，避免刷屏。降级期间配额按实例独立，属于可用性优先的取舍。
+  - **配额**（`RATE_LIMIT_*`，均可环境变量覆盖）：注册 5/min、AI 聊天 20/min、任务启动 10/min、文件上传 10/min、学习测评工作流启动 5/min。
+  - 测试通过 `RATE_LIMIT_BACKEND=memory` 与 `rate_limit.reset()` 隔离，不依赖外部 Redis。原理、时序图与逐条验证见 [`docs/rate-limit-guide.md`](docs/rate-limit-guide.md)。
 - **通用文件上传约定**（`POST /api/files`）：`multipart/form-data`，字段 `file`，**需登录**；可选表单字段 `upload_purpose`（0=普通资源 / 1=用户头像，默认 0）与 `storage_scene`（0=长期 30 天 / 1=短期 2 小时 / 2=只提取内容不存原文件，默认 0）。**文档支持 PDF / DOC / DOCX / TXT，音频支持 MP3 / WAV / OGG / OPUS / M4A / AAC / FLAC / WebM**（均按扩展名白名单 + 文件头校验）；图片（JPG / PNG / WebP / GIF）仅用于头像（`upload_purpose=1`），普通上传不接受图片；其他类型或文件头不符一律 `422`，图片超 2MB（`AVATAR_MAX_BYTES`）或文档 / 音频超 10MB（`FILE_MAX_BYTES`）返回 `413`。**元数据写 `resources` 表，原文件落 MinIO**：对象 key 为 `users/{user_id}/{MD5}{ext}`，`storage_path` 格式 `minio:/{bucket}/{object_key}`；`(file_hash, user_id)` 唯一键实现用户级去重（先查库，数据库唯一键兜底）。仅 `upload_purpose=1` 且为图片时更新 `users.avatar`（库里存 `storage_path`）。对外响应中的 `avatar` 由校验层转成公开读取地址 `/api/files/avatar/{user_id}?v={md5}`（`v` 用于头像更新后失效缓存）。`storage_scene=2` 只写元数据、不上传对象（`storage_path` 为空串）。**文档必传表单字段 `doc_category`（`resume` / `study_material` / `general`），缺失或非法一律 `422`；音频 / 头像忽略该字段并存 `NULL`。** 文档落库后经 `BackgroundTasks` **异步**执行 RAG（解析 → 清洗 → 分块 → DashScope 向量化 → Qdrant 存向量 + MySQL `knowledge_chunks` 存原文），失败只记日志、不影响上传结果。PDF 解析用 PDFium 逐页取文本层，按「图片覆盖率 ≥ 0.5 且有效字符 < 200」判定扫描页，仅对这些页渲染 200 DPI 调火山引擎 `OCRNormal`，再与文本层按页序合并；方案说明见 [`docs/scanned-pdf-ocr.md`](docs/scanned-pdf-ocr.md)。同用户同内容重复上传时若分类相同则直接复用、不重复入库；分类变化则更新 `doc_category`，并以 `replace=True` 先按 `resource_id` 删除旧向量再重灌。响应返回 `{url, md5, size, kind, resource_id, storage_path, expire_time, doc_category, reused}`，`reused` 表示是否复用了已有资源。过期资源由 `resource_cleanup` 每天 03:00 先删 MinIO 对象、再删元数据。
 - **会话与聊天消息约定**：
   - 会话整组接口（`/api/sessions`、`/api/sessions/{id}/messages`）需登录，所有查询按令牌中的 `user_id` 隔离；资源不存在或不属于当前用户一律 `404`（不区分「不存在」与「无权限」，避免泄露）。

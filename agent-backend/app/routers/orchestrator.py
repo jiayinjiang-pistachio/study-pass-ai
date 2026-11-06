@@ -8,6 +8,7 @@ SSE 契约通过 responses 参数在文档中声明。
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from ..core.rate_limit import enforce_task_limit
 from ..schemas.orchestrator import AgentTaskStartIn, AgentTaskWorkflowOut
 from ..schemas.response import ResponseModel, ok
 from ..services import chat_service
@@ -32,6 +33,7 @@ router = APIRouter(
         }
     },
     summary="智能体任务总控入口（工作流 / 通用聊天）",
+    dependencies=[Depends(enforce_task_limit)],
 )
 def start_agent_task(
     payload: AgentTaskStartIn,

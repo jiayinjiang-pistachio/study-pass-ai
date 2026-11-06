@@ -279,6 +279,7 @@ data: {"message_id":12,"status":1}
 > 技术方案与业务流程（数据模型、版本链、缓存一致性、接口契约）见 **[docs/prompt-template-guide.md](./docs/prompt-template-guide.md)**。
 > **初始化与逐步验证（模板 + 用户资料 + 注入 + 回滚）见 [docs/prompt-injection-guide.md](./docs/prompt-injection-guide.md)**。
 > Redis 安装、缓存结构与排错完整上手流程见 **[docs/redis-guide.md](./docs/redis-guide.md)**（环境准备、缓存结构、常用命令、常见问题）。
+> 接口限流（真实 IP 提取、用户 / 游客维度、Lua 原子计数、Redis 故障降级与验证命令）见 **[docs/rate-limit-guide.md](./docs/rate-limit-guide.md)**。
 >
 > 初始化数据：`python scripts/init_prompt.py`（8 作用域 × v1/v2，v2 生效；同时创建演示账号 `prompt_demo / abc12345` 并写入背景资料）。可重复执行，不产生 v3。
 

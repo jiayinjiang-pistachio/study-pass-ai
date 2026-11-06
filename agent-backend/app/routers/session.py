@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from ..core.rate_limit import enforce_chat_limit
 from ..schemas.chat import StreamChatIn
 from ..schemas.message import MessageListOut
 from ..schemas.response import ResponseModel, ok
@@ -95,6 +96,7 @@ def delete_session(
     "/{session_id}/stream-chat",
     response_class=StreamingResponse,
     summary="流式对话（SSE）",
+    dependencies=[Depends(enforce_chat_limit)],
 )
 async def stream_chat(
     session_id: int,
