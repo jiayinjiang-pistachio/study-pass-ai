@@ -4,7 +4,7 @@
 > **范围**：学习室 / 面试间的聊天发送（统一走总控）、智能体按钮、学习测评入口与答题弹窗
 > **前置文档**：后端接口契约见 [`learning-workflow-api-guide.md`](../../agent-backend/docs/learning-workflow-api-guide.md)、
 > 总控设计见 [`orchestrator-workflow-design.md`](../../agent-backend/docs/orchestrator-workflow-design.md)
-> **最后更新**：2026-10-29
+> **最后更新**：2026-11-10
 
 本文只描述**如何通过前端页面操作**验证功能，不重复接口细节。
 
@@ -51,23 +51,23 @@ API_PROXY_TARGET=http://127.0.0.1:18000 pnpm dev
 | # | 操作 | 预期 |
 | --- | --- | --- |
 | 1 | 进入「学习室」，查看输入框上方 | 显示 3 个按钮：出题测评 / 难点学习 / 笔记归档 |
-| 2 | 进入「面试间」，查看输入框上方 | 显示 4 个按钮：面试主考官 / 面试评测 / 难点学习 / 笔记归档 |
+| 2 | 进入「面试间」，查看输入框上方 | 显示 4 个按钮：面试主考官 / 面试复盘 / 难点学习 / 笔记归档 |
 | 3 | 点击「笔记归档」 | 按钮高亮（金色底），表示已选中 |
 | 4 | 再次点击同一按钮 | 取消选中，回到房间默认智能体 |
 | 5 | 切换到另一个房间 | 两个房间的选择互不影响（按房间各记一份） |
 | 6 | 发送过程中观察按钮 | 发送期间按钮置灰禁用 |
 
-> 未选中任何按钮时使用房间默认智能体：学习室 → `quiz_generate_workflow`，面试间 → `interview_host`。
-> 学习室默认智能体只负责路由判断：普通问题在关键词 / 语义未命中时仍走聊天分支。
+> 不选按钮时没有「默认智能体」：由后端三层路由（关键词 / 语义 / 规划）决定能力；未命中任务意图时走聊天分支。
+> 按钮只是**一次性提示**，发送后自动清空，不会影响下一轮。
 
 ### 2.2 聊天统一走总控（SSE 分支）
 
 | # | 操作 | 预期 |
 | --- | --- | --- |
 | 7 | 学习室选中「笔记归档」，发送「用三句话总结一下 REST 的核心约束」 | AI 逐字流式回复，无 404 |
-| 8 | 同一操作下查看 DevTools → Network | `POST /api/agent/tasks/start`，响应 `Content-Type: text/event-stream`，事件顺序 `meta → delta* → done` |
+| 8 | 同一操作下查看 DevTools → Network | `POST /api/agent/chat`，响应 `Content-Type: text/event-stream`，事件顺序 `meta → agent(start) → delta* → agent(done) → done` |
 | 9 | 选中「出题测评」但发送普通问题（如「你好」） | 仍为流式聊天（关键词与语义均未命中，回落聊天分支） |
-| 10 | 面试间不选按钮，发送「帮我做一次后端面试开场」 | 默认 `interview_host`，流式回复 |
+| 10 | 面试间不选按钮，发送一句普通问题 | 普通聊天（`delta`），不会自动触发面试准备 |
 | 11 | 刷新页面后查看历史 | 上述问答正常回显，无重复消息 |
 
 ### 2.3 学习测评：出题
@@ -75,7 +75,7 @@ API_PROXY_TARGET=http://127.0.0.1:18000 pnpm dev
 | # | 操作 | 预期 |
 | --- | --- | --- |
 | 12 | 学习室（不选或选中「出题测评」）发送「帮我出 3 道 Python 基础题」 | 输入框占位提示变为「正在处理，请稍候…」；消息区先显示「正在生成…」 |
-| 13 | 等待出题完成 | Network 中该请求返回 `application/json`（统一信封，`data.route = "workflow"`，含 `run_id` 与 `quiz`）；会话自动刷新 |
+| 13 | 等待出题完成 | SSE 中出现 `task(kind=quiz)`，`payload` 含 `run_id` 与 `quiz`；会话自动刷新 |
 | 14 | 出题消息渲染 | 出现「查看并填写测评题目」入口卡片，并**自动弹出**「学习测评」弹窗 |
 | 15 | 弹窗内容 | 题目数量与请求一致（3 道）；单选为 radio、多选为 checkbox、简答为 textarea；简答题无选项 |
 | 16 | 关闭弹窗，再点击入口卡片 | 弹窗重新打开，入口按钮始终可用 |
@@ -110,7 +110,7 @@ DevTools 中查看 `GET /api/sessions/{session_id}/messages?page=1&page_size=20`
 
 | 场景 | 请求 | 响应 |
 | --- | --- | --- |
-| 任意发送 | `POST /api/agent/tasks/start`，body `{agent_name, session_id, request_text}` | 聊天：`text/event-stream`；工作流：JSON 信封 |
+| 任意发送 | `POST /api/agent/chat`，body `{session_id, request_text, preferred_agent?}` | 统一 `text/event-stream`：聊天走 `delta`，任务走 `task(kind=...)` |
 | 工作流完成后刷新 | `GET /api/sessions/{id}/messages?page=1&page_size=20` → 最后一页 | 用服务端消息替换本地临时行 |
 | 提交测评 | `POST /api/learning-workflows/{run_id}/submit`，body `{answers:[{question_id, value}]}` | 统一信封，含 `score / evaluation / weaknesses / review` |
 | 提交后刷新 | 同「工作流完成后刷新」 | 原消息更新为点评文本、载荷清空 |
@@ -145,7 +145,7 @@ ORDER BY id DESC;
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| 发送后提示「智能体不存在」（404） | 前端智能体常量与后端 `CHAT_AGENT_NAMES` 不一致 | 核对 `src/types/agent.ts` 与 `orchestrator_service.py` |
+| 快捷按钮未出现 / 与后端不一致 | 能力接口失败，前端回退静态配置 | 核对 `src/types/agent.ts` 的兜底配置与后端 `app/agent/registry.py` 的能力名 |
 | 出题请求 503 | 未配置 LLM Key | 补齐 `.env` 中的 `LLM_*` 后重启后端 |
 | 出题请求 502 | 模型输出非 JSON / 模型异常 | 查看 `logs/app.log` 与 `workflow_runs.error_message` |
 | 提交提示「测评流程已失效」 | 后端重启导致 MemorySaver checkpoint 丢失 | 重新发起测评（旧记录已置 failed） |
@@ -158,7 +158,7 @@ ORDER BY id DESC;
 ## 6. 通过标准
 
 - 两个房间的智能体按钮数量、选中 / 取消、发送中禁用符合 2.1。
-- 聊天请求统一发往 `/api/agent/tasks/start`，聊天分支流式输出、工作流分支自动刷新会话。
+- 聊天请求统一发往 `/api/agent/chat`，聊天分支流式输出、任务分支通过 `task` 事件自动刷新会话。
 - 学习测评可完成「出题 → 自动弹窗 → 必答校验 → 提交 loading → 评分回显 → 入口消失」闭环。
 - 刷新页面后消息状态与评分文本保持一致，历史测评入口可重新打开。
 - 控制台无报错，`pnpm build` 通过。

@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { Service, User } from '@element-plus/icons-vue'
 import ChatSourceList from './ChatSourceList.vue'
 import InterviewCard from './InterviewCard.vue'
+import InterviewEvaluationCard from './InterviewEvaluationCard.vue'
 import KnowledgeCard from './KnowledgeCard.vue'
 import MsgFile from './MsgFile.vue'
 import QuizEntryCard from './QuizEntryCard.vue'
@@ -57,6 +58,13 @@ const isKnowledgePending = computed(
   () => props.message.status === 0 && Boolean(props.message.loadingHint),
 )
 
+/** 面试复盘消息：本地渲染与历史消息都靠 payloadType + 结构化载荷识别 */
+const isInterviewEvaluation = computed(
+  () =>
+    props.message.payloadType === 'interview_evaluation' &&
+    props.message.interviewEvaluation !== null,
+)
+
 /** 生成中 / 失败的状态提示，正文为空时展示 */
 const responsePlaceholder = computed(() => {
   if (props.message.responseText.trim().length > 0) return ''
@@ -74,6 +82,7 @@ const hasResponse = computed(
     props.message.responseSegments.length > 0 ||
     props.message.sources.length > 0 ||
     isKnowledgeCard.value ||
+    isInterviewEvaluation.value ||
     showInterviewCard.value ||
     showQuizEntry.value ||
     responsePlaceholder.value.length > 0,
@@ -132,6 +141,10 @@ const timeLabel = computed(() => {
           :title="knowledgeTitle"
           :image-url="knowledgeImage"
           :audio-url="knowledgeAudio"
+        />
+        <InterviewEvaluationCard
+          v-else-if="isInterviewEvaluation && message.interviewEvaluation"
+          :evaluation="message.interviewEvaluation"
         />
         <template v-else>
           <div

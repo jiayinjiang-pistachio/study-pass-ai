@@ -40,6 +40,39 @@ def get_for_user(interview_id: int, user_id: int) -> dict | None:
         return _to_dict(obj) if obj else None
 
 
+def get_latest_for_session(user_id: int, session_id: int) -> dict | None:
+    """按会话取最近一次面试记录；用于解析「这次面试」等指代。"""
+    with SessionLocal() as session:
+        obj = session.scalar(
+            select(Interview)
+            .where(
+                Interview.user_id == user_id,
+                Interview.session_id == session_id,
+            )
+            .order_by(Interview.created_at.desc(), Interview.id.desc())
+            .limit(1)
+        )
+        return _to_dict(obj) if obj else None
+
+
+def get_latest_completed_for_session(
+    user_id: int, session_id: int
+) -> dict | None:
+    """按会话取最近一次已结束面试（status=1），供复盘与笔记归档使用。"""
+    with SessionLocal() as session:
+        obj = session.scalar(
+            select(Interview)
+            .where(
+                Interview.user_id == user_id,
+                Interview.session_id == session_id,
+                Interview.status == 1,
+            )
+            .order_by(Interview.created_at.desc(), Interview.id.desc())
+            .limit(1)
+        )
+        return _to_dict(obj) if obj else None
+
+
 def finish(
     interview_id: int,
     user_id: int,

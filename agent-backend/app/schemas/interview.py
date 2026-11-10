@@ -54,6 +54,7 @@ class InterviewVoiceFinishOut(BaseModel):
     """挂断语音面试出参：面试已结束。"""
 
     interview_id: int = Field(..., description="面试记录 ID")
+    session_id: int = Field(..., description="所属会话 ID")
     status: int = Field(..., description="面试状态：1=已结束")
     interview_duration: int = Field(..., description="累计面试时长（秒）")
     qa_count: int = Field(..., description="保存的问答条数")

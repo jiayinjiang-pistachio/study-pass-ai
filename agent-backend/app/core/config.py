@@ -212,6 +212,13 @@ LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "60"))
 LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "1"))
 
+# 面试复盘：结束语音面试后是否自动在后台生成评估
+# 关闭后仍可通过总控「面试复盘」能力按需生成；默认开启
+INTERVIEW_EVAL_AUTO: bool = (
+    os.getenv("INTERVIEW_EVAL_AUTO", "true").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
 # 记忆层：取最近 N 轮（一问一答为一轮）已完成消息作为上下文
 MEMORY_MAX_TURNS: int = int(os.getenv("MEMORY_MAX_TURNS", "8"))
 # 单条历史消息注入上下文的最大字符数：附件提取文本可能很长，超限截断避免撑爆上下文
@@ -305,7 +312,6 @@ RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"
 # 各高危接口的单窗口配额。注册沿用原有 5 次/分钟；其余按调用成本与风险设定。
 RATE_LIMIT_REGISTER_MAX: int = int(os.getenv("RATE_LIMIT_REGISTER_MAX", "5"))
 RATE_LIMIT_CHAT_MAX: int = int(os.getenv("RATE_LIMIT_CHAT_MAX", "20"))
-RATE_LIMIT_TASK_MAX: int = int(os.getenv("RATE_LIMIT_TASK_MAX", "10"))
 RATE_LIMIT_UPLOAD_MAX: int = int(os.getenv("RATE_LIMIT_UPLOAD_MAX", "10"))
 RATE_LIMIT_WORKFLOW_MAX: int = int(os.getenv("RATE_LIMIT_WORKFLOW_MAX", "5"))
 # Redis key 前缀：ratelimit:{scope}:{identity}

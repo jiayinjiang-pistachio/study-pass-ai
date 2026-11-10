@@ -4,6 +4,8 @@
 """
 
 MIN_CONFIDENCE = 0.6
+# 单条接力链路允许的最大跳数，防止下游互相派发形成死循环
+MAX_HOPS = 2
 
 # from_agent -> 允许接力到的下一跳；未登记的来源或目标一律不放行
 HANDOFF_RULES: dict[str, tuple[str, ...]] = {

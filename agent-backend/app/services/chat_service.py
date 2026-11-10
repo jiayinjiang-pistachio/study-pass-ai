@@ -5,7 +5,7 @@
 模型层流式输出 → 回写回复正文、状态与来源索引。
 
 SSE 事件约定（每条 data 均为 JSON）：
-- meta : {session_id, message_id, request_id}        流开始，告知落库后的消息 ID
+- meta : {session_id, message_id, request_id, trace_id} 流开始，告知落库后的消息 ID
 - delta: {content}                                   增量文本
 - done : {message_id, status, sources}               生成完成，sources 为本轮参考资料
 - error: {code, message}                             生成失败（仍可保留部分内容）
@@ -57,6 +57,8 @@ class StreamState(NamedTuple):
     reference_sources: list[dict]
     # 本轮成功后是否触发后台画像抽取：意图命中，或必填资料缺失时的补充抽取
     profile_update: bool
+    # 总控链路贯穿本轮的追踪标识；独立聊天入口为 None
+    trace_id: str | None = None
 
 
 def _get_owned_session(user_id: int, session_id: int) -> dict:
@@ -165,7 +167,11 @@ def _recent_context(
 
 
 def prepare_stream(
-    user_id: int, session_id: int, payload: StreamChatIn
+    user_id: int,
+    session_id: int,
+    payload: StreamChatIn,
+    *,
+    trace_id: str | None = None,
 ) -> StreamState:
     """校验会话与附件、落库用户消息、构建上下文。
 
@@ -224,12 +230,20 @@ def prepare_stream(
         sources=[_to_source(chunk) for chunk in retrieved],
         reference_sources=[_to_reference(chunk) for chunk in retrieved],
         profile_update=profile_update,
+        trace_id=trace_id,
     )
 
 
-def _sse(event: str, data: dict) -> str:
-    """编码一条 SSE 消息；JSON 序列化保证正文中的换行不会破坏事件边界。"""
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+def sse_event(event: str, data: dict) -> str:
+    """编码一条 SSE 消息；JSON 序列化保证正文中的换行不会破坏事件边界。
+
+    `default=str` 兜底任务载荷中的 datetime / Decimal 等非 JSON 原生类型
+    （例如简历 create_time），避免总控 task 事件因序列化失败中断流程。
+    """
+    return (
+        f"event: {event}\n"
+        f"data: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+    )
 
 
 def _persist_failed(message_id: int, text: str) -> None:
@@ -243,17 +257,24 @@ def _persist_failed(message_id: int, text: str) -> None:
         logger.exception("流式对话失败状态落库失败 | message_id=%s", message_id)
 
 
-async def stream_reply(state: StreamState) -> AsyncIterator[str]:
-    """生成 SSE 事件流；成功回写 status=1，失败 / 断开回写 status=2。"""
+async def stream_reply(
+    state: StreamState, *, emit_meta: bool = True
+) -> AsyncIterator[str]:
+    """生成 SSE 事件流；成功回写 status=1，失败 / 断开回写 status=2。
+
+    总控链路需要先发统一的 meta / agent 事件，因此传 emit_meta=False。
+    """
     message_id = state.message["id"]
-    yield _sse(
-        EVENT_META,
-        {
-            "session_id": state.session["id"],
-            "message_id": message_id,
-            "request_id": state.message["request_id"],
-        },
-    )
+    if emit_meta:
+        yield sse_event(
+            EVENT_META,
+            {
+                "session_id": state.session["id"],
+                "message_id": message_id,
+                "request_id": state.message["request_id"],
+                "trace_id": state.trace_id,
+            },
+        )
 
     chunks: list[str] = []
     persisted = False
@@ -262,7 +283,7 @@ async def stream_reply(state: StreamState) -> AsyncIterator[str]:
             if not chunk:
                 continue
             chunks.append(chunk)
-            yield _sse(EVENT_DELTA, {"content": chunk})
+            yield sse_event(EVENT_DELTA, {"content": chunk})
 
         text = "".join(chunks)
         await run_in_threadpool(
@@ -298,7 +319,7 @@ async def stream_reply(state: StreamState) -> AsyncIterator[str]:
                 logger.warning(
                     "触发长期记忆更新失败 | message_id=%s", message_id, exc_info=True
                 )
-        yield _sse(
+        yield sse_event(
             EVENT_DONE,
             {
                 "message_id": message_id,
@@ -311,7 +332,7 @@ async def stream_reply(state: StreamState) -> AsyncIterator[str]:
         raise
     except Exception:
         logger.exception("流式对话生成失败 | message_id=%s", message_id)
-        yield _sse(EVENT_ERROR, {"code": 502, "message": "AI 服务暂时不可用，请稍后重试"})
+        yield sse_event(EVENT_ERROR, {"code": 502, "message": "AI 服务暂时不可用，请稍后重试"})
     finally:
         if not persisted:
             _persist_failed(message_id, "".join(chunks))

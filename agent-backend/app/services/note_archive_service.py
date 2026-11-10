@@ -23,7 +23,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from ..agent.a2a import A2AEnvelope
 from ..core.exceptions import BusinessException, SystemException
 from ..core.retry import run_with_retry
-from ..db import user_profile_repo, workflow_run_repo
+from ..db import interview_repo, user_profile_repo, workflow_run_repo
 from . import prompt_injection_service, prompt_template_service
 from .a2a_handoff_service import register_handler
 from .ai.llm import get_chat_model
@@ -35,10 +35,15 @@ AGENT_NAME = "note_archiver"
 PROMPT_AGENT = "note_archiver"
 PROMPT_SCENE = "note"
 NOTE_TAG = "学习测评"
+NOTE_TAG_INTERVIEW = "模拟面试"
 TITLE_MAX_CHARS = 60
 WORKFLOW_TYPE = "learning_quiz"
+WORKFLOW_TYPE_INTERVIEW = "interview"
 
 SECTION_TITLES = frozenset({"测评概览", "薄弱点总结", "错题复盘", "复习建议"})
+INTERVIEW_SECTION_TITLES = frozenset(
+    {"面试概览", "亮点表现", "问题复盘", "改进建议"}
+)
 # 与 prompt_injection_service 的占位符语法保持一致，仅用于检测正文残留
 _LEFTOVER_PLACEHOLDER = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
 _HEADING_PATTERN = re.compile(r"^#{1,6}\s+(.+)$")
@@ -51,6 +56,12 @@ NOTE_OUTPUT_RULES = """输出要求（优先于上方模板中的冲突规则）
 2. 第一行用一级标题给出笔记标题；
 3. 正文必须包含四个二级标题：## 测评概览、## 薄弱点总结、## 错题复盘、## 复习建议；
 4. 不要编造测评中没有的信息；不确定的内容标记「待确认」。"""
+
+INTERVIEW_NOTE_OUTPUT_RULES = """输出要求（优先于上方模板中的冲突规则）：
+1. 只输出 Markdown 正文，不要 JSON、代码块包裹或额外解释；
+2. 第一行用一级标题给出笔记标题；
+3. 正文必须包含四个二级标题：## 面试概览、## 亮点表现、## 问题复盘、## 改进建议；
+4. 只依据面试问答记录整理，不要编造候选人没有说过的内容；不确定的内容标记「待确认」。"""
 
 
 def _clean_text(value: Any, limit: int | None = None) -> str:
@@ -92,8 +103,12 @@ def _strip_code_fence(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _extract_title(content: str, fallback: str) -> str:
-    """从 Markdown 标题提取笔记标题；跳过四个固定章节标题。"""
+def _extract_title(
+    content: str,
+    fallback: str,
+    section_titles: frozenset[str] = SECTION_TITLES,
+) -> str:
+    """从 Markdown 标题提取笔记标题；跳过来源对应的固定章节标题。"""
     for line in content.splitlines():
         text = line.strip()
         if not text:
@@ -101,7 +116,7 @@ def _extract_title(content: str, fallback: str) -> str:
         heading = _HEADING_PATTERN.match(text)
         if heading:
             title = _clean_text(heading.group(1), TITLE_MAX_CHARS)
-            if title and title not in SECTION_TITLES:
+            if title and title not in section_titles:
                 return title
             continue
         label = _TITLE_LABEL_PATTERN.match(text)
@@ -128,8 +143,12 @@ def _prompt_variables(
     }
 
 
-def _build_system_prompt(user_id: int, variables: dict[str, str]) -> str:
-    """公共 + 私有模板 + 用户画像 + 本次测评变量；模板不可用时降级为内置角色。"""
+def _build_system_prompt(
+    user_id: int,
+    variables: dict[str, str],
+    output_rules: str = NOTE_OUTPUT_RULES,
+) -> str:
+    """公共 + 私有模板 + 用户画像 + 本次来源变量；模板不可用时降级为内置角色。"""
     try:
         combined = prompt_template_service.get_combined_template(
             PROMPT_AGENT, PROMPT_SCENE, user_id
@@ -154,34 +173,29 @@ def _build_system_prompt(user_id: int, variables: dict[str, str]) -> str:
             exc_info=True,
         )
         rendered = DEFAULT_NOTE_ROLE
-    return f"{rendered}\n\n{NOTE_OUTPUT_RULES}"
+    return f"{rendered}\n\n{output_rules}"
 
 
 def _generate_markdown(
-    user_id: int, state: dict[str, Any], variables: dict[str, str]
+    user_id: int,
+    payload: dict[str, Any],
+    variables: dict[str, str],
+    *,
+    output_rules: str = NOTE_OUTPUT_RULES,
+    instruction: str = "以下是本次学习测评的完整结果，请生成 Markdown 笔记：\n{payload}",
 ) -> str:
     """调用模型生成 Markdown 正文；瞬时故障走统一重试。"""
     prompt = ChatPromptTemplate.from_messages(
         [
-            SystemMessage(content=_build_system_prompt(user_id, variables)),
-            ("human", "以下是本次学习测评的完整结果，请生成 Markdown 笔记：\n{payload}"),
+            SystemMessage(
+                content=_build_system_prompt(user_id, variables, output_rules)
+            ),
+            ("human", instruction),
         ]
-    )
-    payload = json.dumps(
-        {
-            "request_text": _clean_text(state.get("request_text")),
-            "score": state.get("score", 0),
-            "weaknesses": _string_list(state.get("weaknesses")),
-            "review": state.get("review"),
-            "quiz": state.get("quiz") or [],
-            "answers": state.get("answers") or [],
-            "evaluation": state.get("evaluation") or [],
-        },
-        ensure_ascii=False,
     )
     raw = run_with_retry(
         lambda: (prompt | get_chat_model() | StrOutputParser()).invoke(
-            {"payload": payload}
+            {"payload": json.dumps(payload, ensure_ascii=False)}
         )
         or "",
         node=AGENT_NAME,
@@ -215,7 +229,15 @@ class NoteArchiveService:
 
         content = _generate_markdown(
             user_id,
-            state,
+            {
+                "request_text": _clean_text(state.get("request_text")),
+                "score": state.get("score", 0),
+                "weaknesses": weaknesses,
+                "review": state.get("review"),
+                "quiz": quiz,
+                "answers": state.get("answers") or [],
+                "evaluation": evaluations,
+            },
             _prompt_variables(
                 state, weaknesses, len(quiz), correct_count, wrong_count
             ),
@@ -269,6 +291,85 @@ class NoteArchiveService:
                 detail=f"run_id={run_id} user_id={user_id}",
             )
         return self.archive_from_state(user_id, row.get("state_json") or {})
+
+    def archive_from_interview(
+        self, user_id: int, interview_id: int
+    ) -> dict[str, Any]:
+        """基于已结束的模拟面试问答生成笔记；未结束或无问答时拒绝归档。"""
+        interview = interview_repo.get_for_user(interview_id, user_id)
+        if interview is None:
+            raise BusinessException(
+                "面试记录不存在",
+                http_status=status.HTTP_404_NOT_FOUND,
+                detail=f"interview_id={interview_id} user_id={user_id}",
+            )
+        if interview["status"] != 1:
+            raise BusinessException(
+                "面试尚未结束，暂时无法生成笔记",
+                http_status=status.HTTP_409_CONFLICT,
+                detail=f"interview_id={interview_id} status={interview['status']}",
+            )
+
+        qa_object = [
+            item for item in interview.get("qa_object") or [] if isinstance(item, dict)
+        ]
+        if not qa_object:
+            raise BusinessException(
+                "本次面试没有问答记录，暂时无法生成笔记",
+                http_status=status.HTTP_409_CONFLICT,
+                detail=f"interview_id={interview_id}",
+            )
+
+        content = _generate_markdown(
+            user_id,
+            {
+                "interview_id": interview["id"],
+                "interview_duration": interview.get("interview_duration") or 0,
+                "qa_count": len(qa_object),
+                "qa_object": qa_object,
+            },
+            {
+                "interview_duration": str(interview.get("interview_duration") or 0),
+                "qa_count": str(len(qa_object)),
+            },
+            output_rules=INTERVIEW_NOTE_OUTPUT_RULES,
+            instruction=(
+                "以下是本次模拟面试的完整问答记录，请生成 Markdown 笔记：\n{payload}"
+            ),
+        )
+        if not content:
+            raise SystemException(
+                "笔记生成失败：模型返回空内容",
+                http_status=status.HTTP_502_BAD_GATEWAY,
+                detail=f"interview_id={interview_id}",
+            )
+
+        leftovers = sorted(set(_LEFTOVER_PLACEHOLDER.findall(content)))
+        if leftovers:
+            raise SystemException(
+                "笔记正文存在未替换的模板占位符，已取消保存",
+                http_status=status.HTTP_502_BAD_GATEWAY,
+                detail=f"interview_id={interview_id} placeholders={leftovers}",
+            )
+
+        title = _extract_title(
+            content, "模拟面试复盘笔记", INTERVIEW_SECTION_TITLES
+        )
+
+        return {
+            "title": title,
+            "content": content,
+            "tags": [NOTE_TAG_INTERVIEW],
+            "metadata": {
+                "interview_id": interview["id"],
+                "user_id": user_id,
+                "session_id": interview["session_id"],
+                "workflow_type": WORKFLOW_TYPE_INTERVIEW,
+                "interview_duration": interview.get("interview_duration") or 0,
+                "qa_count": len(qa_object),
+                "generated_at": int(time.time()),
+            },
+        }
 
 
 def archive_note_handler(

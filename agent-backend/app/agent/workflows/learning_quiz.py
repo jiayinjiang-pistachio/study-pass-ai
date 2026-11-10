@@ -533,6 +533,9 @@ def finalize_result(state: LearningWorkflowState) -> dict:
         payload={"score": state.get("score", 0), "weaknesses": weaknesses},
         next_agent="note_archiver" if has_weakness else None,
         confidence=0.9 if has_weakness else 0.4,
+        trace_id=state.get("run_id"),
+        intent="note_archive",
+        hops=0,
     )
     return {"status": STATUS_COMPLETED, "a2a_envelope": envelope.model_dump()}
 

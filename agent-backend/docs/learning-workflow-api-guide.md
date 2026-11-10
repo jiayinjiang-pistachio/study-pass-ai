@@ -191,41 +191,62 @@ LIMIT 5;
 - 失败时 `status=failed` 且 `error_message` 记录原因
 - 删除会话后对应 `workflow_runs` 记录随外键级联清理
 
-## 8. 总控入口（可选）
+## 8. 总控入口
 
-前端也可以用统一入口 `POST /api/agent/tasks/start`：同一个接口按意图返回两种响应。
+前端统一走 `POST /api/agent/chat`（SSE），不再有按 `agent_name` 分叉的 JSON 入口。
 
 ```json
 {
-  "agent_name": "quiz_generate_workflow",
   "session_id": 123,
   "request_text": "帮我出 3 道 Python 基础题",
-  "question_count": 3
+  "question_count": 3,
+  "preferred_agent": "quiz_generate_workflow"
 }
 ```
 
-判断规则：`agent_name` 未登记 → `404`；问题命中出题关键词（出题 / 刷题 / 练习题 / 测验 …）→ 直接启动工作流；否则用语义相似度对比规则示例句；仍不命中 → 通用流式聊天。
+`preferred_agent` 是快捷按钮的一次性提示，可省略；省略时由关键词 / 语义快筛决定，仍不命中则交给规划器或普通聊天。
 
 | `request_text` | 预期响应 |
 | --- | --- |
-| `帮我出 3 道 Python 基础题` | `application/json`，`data.route=workflow`，含 `run_id` / `quiz` |
-| `检验一下我对数据库索引的掌握程度` | `application/json`（关键词未命中，语义兜底命中） |
-| `你好，介绍一下你自己` | `text/event-stream`，事件 `meta → delta* → done` |
+| `帮我出 3 道 Python 基础题` | `task(kind=quiz)`，`payload` 含 `run_id` / `quiz` / `message_id` |
+| `检验一下我对数据库索引的掌握程度` | `task(kind=quiz)`（关键词未命中，语义快筛命中） |
+| `你好，介绍一下你自己` | `meta → agent(start) → delta* → done`，无 `task` |
 
-工作流分支返回的 `run_id` 可直接用于 `POST /api/learning-workflows/{run_id}/submit`。
+事件顺序与 `task.payload` 形状见 [`orchestrator-workflow-design.md`](orchestrator-workflow-design.md)。`task.payload.run_id` 可直接用于 `POST /api/learning-workflows/{run_id}/submit`。
 
-> 工作流分支忽略 `select_mode` / `request_segments`；聊天分支忽略 `question_count` / `provider`。
+> 聊天分支忽略 `question_count` / `provider`；出题分支忽略 `select_mode` / `request_segments`。
+
+### 8.1 工作流内部状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> created
+    created --> waiting_answer: generate_quiz 出题后 interrupt
+    waiting_answer --> grading: submit 提交并 resume
+    grading --> completed: evaluate_answer / finalize_result
+    created --> failed: 出题失败
+    waiting_answer --> failed: 提交时 checkpoint 丢失
+    grading --> failed: 评分失败
+    completed --> [*]
+    failed --> [*]
+```
+
+`created / waiting_answer / grading / completed / failed` 同时是 `workflow_runs.status`。
+`waiting_answer` 期间可刷新页面，题目与作答入口由会话消息 `{run_id}:quiz` 还原；
+总控只负责触发 `start`，答题提交直接调用本节接口。总控与工作流的协作时序、
+通信通道与跨 Agent 接力见
+[`orchestrator-workflow-design.md`](orchestrator-workflow-design.md) §5.5–§5.7。
 
 
 
 ```
- 语义兜底只在「agent_name 合法 + 关键词全部未命中」时触发，位于 app/services/orchestrator_service.py:96：         
- 
-  1. 把用户问题向量化一次（fastembed BAAI/bge-small-zh-v1.5，模型启动时已预热）                                                       
-  2. 与该规则的 intent_examples 向量逐一算余弦相似度（示例向量按规则缓存，只算一次）                                                  
-  3. 取最大值 >= 0.6 → 判定为出题意图，走 learning_quiz 工作流；否则返回 None，走通用聊天                                             
-  所以它解决的是「说法不同但意思一样」的问题，例如「检验一下我对数据库索引的掌握程度」不含任何关键词，但语义上接近「测测我对这个知识点
-  的掌握程度」而命中。模型/向量化异常只记 WARNING 并返回 False，不会阻断请求，也不会凭空升级成工作流。
+ 语义快筛位于 Tier 1（app/services/orchestrator_service.py 的 _fast_match）：
+  1. 先遍历注册表关键词，任一命中即分发，不加载向量模型；
+  2. 关键词全部落空后，才把用户问题向量化一次（fastembed BAAI/bge-small-zh-v1.5，启动时预热）；
+  3. 与各能力登记的 examples 逐一算余弦相似度（示例向量缓存），达到阈值即命中；
+  4. 仍未命中且原文 >= 10 字时，才调用一次 FlowControllerAgent 规划；模型异常 / 低置信度一律降级聊天。
+ 所以它解决的是「说法不同但意思一样」的问题，例如「检验一下我对数据库索引的掌握程度」不含任何关键词，
+ 但语义上接近「测测我对这个知识点的掌握程度」而命中。模型 / 向量化异常只记 WARNING，不阻断请求。
 ```
 
 
@@ -243,5 +264,6 @@ LIMIT 5;
 | 模型 JSON 解析 | `app/services/ai/json_utils.py` |
 | 状态持久化 | `app/db/workflow_run_repo.py`、`workflow_runs` 表 |
 | 会话消息（表单 / 点评） | `app/db/message_repo.py`、`chat_messages` 表 |
-| 流程总控 | `app/routers/orchestrator.py`、`app/services/orchestrator_service.py` |
-| 语义意图兜底 | `app/services/semantic_intent.py`、`app/services/embedding.py` |
+| 流程总控 | `app/routers/agent.py`、`app/services/orchestrator_service.py` |
+| LLM 规划器 | `app/agent/agents/flow_controller.py` |
+| 语义快筛 | `app/services/semantic_intent.py`、`app/services/embedding.py` |

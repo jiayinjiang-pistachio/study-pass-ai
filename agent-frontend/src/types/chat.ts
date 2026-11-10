@@ -91,6 +91,15 @@ export interface InterviewConfirmResult {
   voice: VoiceRoom | null
 }
 
+/** 面试复盘结构化结果：由 task 事件本地渲染，历史消息从 response_payload 还原 */
+export interface InterviewEvaluation {
+  interviewId: number
+  score: number
+  strengths: string[]
+  weaknesses: string[]
+  review: string
+}
+
 export interface ChatMessage {
   id: number
   /** 后端 request_id：测评题目为 "{run_id}:quiz"，普通聊天可为 null */
@@ -105,8 +114,10 @@ export interface ChatMessage {
   status: 0 | 1 | 2
   /** 测评题目数组（后端已归一化）；非测评消息或评分后为 null */
   responsePayload: QuizQuestion[] | null
-  /** 结构化载荷类型：知识卡为 knowledge_card，其余为 null */
-  payloadType: 'knowledge_card' | null
+  /** 结构化载荷类型：知识卡 / 面试复盘，其余为 null */
+  payloadType: 'knowledge_card' | 'interview_evaluation' | null
+  /** 面试复盘结构化结果；非复盘消息为 null */
+  interviewEvaluation: InterviewEvaluation | null
   /** 仅本地临时消息使用：生成中的文案提示（如知识卡 + 播客） */
   loadingHint?: string
   interviewId: number | null

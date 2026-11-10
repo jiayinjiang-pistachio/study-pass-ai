@@ -18,6 +18,7 @@ from ..schemas.note import NoteCreate, NoteUpdate
 logger = logging.getLogger(__name__)
 
 NOTE_TYPE_LEARNING_QUIZ = "learning_quiz"
+NOTE_TYPE_INTERVIEW = "interview"
 NOTE_STATUS_SAVED = "saved"
 NOTE_STATUS_EXISTING = "existing"
 
@@ -33,13 +34,50 @@ class NoteService:
         archive: dict[str, Any],
     ) -> dict[str, Any]:
         """保存测评笔记；同一用户同一运行重复调用返回已有笔记。"""
+        saved = self._save(
+            user_id,
+            session_id,
+            source_run_id,
+            NOTE_TYPE_LEARNING_QUIZ,
+            archive,
+        )
+        self._write_back_run_state(
+            user_id, source_run_id, saved["note_id"], saved["note_status"]
+        )
+        return saved
+
+    def save_interview_note(
+        self,
+        user_id: int,
+        session_id: int,
+        interview_id: int,
+        archive: dict[str, Any],
+    ) -> dict[str, Any]:
+        """保存面试笔记；同一用户同一面试重复调用返回已有笔记。"""
+        return self._save(
+            user_id,
+            session_id,
+            f"interview:{interview_id}",
+            NOTE_TYPE_INTERVIEW,
+            archive,
+        )
+
+    def _save(
+        self,
+        user_id: int,
+        session_id: int,
+        source_run_id: str,
+        note_type: str,
+        archive: dict[str, Any],
+    ) -> dict[str, Any]:
+        """按 (user_id, source_run_id) 幂等落库，不区分具体来源类型。"""
         title = str(archive.get("title") or "").strip()
         content = str(archive.get("content") or "").strip()
         if not title or not content:
             raise BusinessException(
                 "笔记标题或正文为空，无法保存",
                 http_status=status.HTTP_400_BAD_REQUEST,
-                detail=f"run_id={source_run_id}",
+                detail=f"source_id={source_run_id}",
             )
 
         note = note_repo.get_by_user_and_run(user_id, source_run_id)
@@ -52,7 +90,7 @@ class NoteService:
                         "user_id": user_id,
                         "session_id": session_id,
                         "source_run_id": source_run_id,
-                        "note_type": NOTE_TYPE_LEARNING_QUIZ,
+                        "note_type": note_type,
                         "title": title,
                         "content": content,
                         "tags": archive.get("tags") or [],
@@ -61,13 +99,12 @@ class NoteService:
                 )
                 note_status = NOTE_STATUS_SAVED
             except IntegrityError:
-                # 并发保存同一运行时由唯一约束兜底：回查已写入的那一条
+                # 并发保存同一来源时由唯一约束兜底：回查已写入的那一条
                 note = note_repo.get_by_user_and_run(user_id, source_run_id)
                 if note is None:
                     raise
                 note_status = NOTE_STATUS_EXISTING
 
-        self._write_back_run_state(user_id, source_run_id, note["id"], note_status)
         return {"note_id": note["id"], "note_status": note_status}
 
     def _write_back_run_state(

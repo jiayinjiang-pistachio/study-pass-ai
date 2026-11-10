@@ -361,6 +361,7 @@ class VoiceInterviewService:
         )
         return {
             "interview_id": updated["id"],
+            "session_id": updated["session_id"],
             "status": updated["status"],
             "interview_duration": updated["interview_duration"],
             "qa_count": len(qa_object),

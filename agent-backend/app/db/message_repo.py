@@ -144,6 +144,24 @@ def update_workflow_result(message_id: int, response_text: str) -> bool:
         return True
 
 
+def update_task_result(
+    message_id: int,
+    response_text: str,
+    response_payload: dict | list | None,
+    status: int,
+) -> bool:
+    """任务消息生成完成后回写正文、结构化载荷与状态（如面试复盘）。"""
+    with SessionLocal() as session:
+        obj = session.get(ChatMessage, message_id)
+        if obj is None:
+            return False
+        obj.response_text = response_text
+        obj.response_payload = response_payload
+        obj.status = status
+        session.commit()
+        return True
+
+
 def count_by_session(session_id: int) -> int:
     """统计会话消息总数（分页用）。"""
     with SessionLocal() as session:

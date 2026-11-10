@@ -36,6 +36,35 @@ def get_for_user(run_id: str, user_id: int) -> dict | None:
         return _to_dict(obj) if obj else None
 
 
+def get_latest_for_session(
+    user_id: int,
+    session_id: int,
+    *,
+    workflow_type: str | None = None,
+    status: str | None = None,
+) -> dict | None:
+    """按会话取最近一次运行；可选按流程类型 / 状态收窄。
+
+    调度上下文用它解析「刚才那套题」「最近一次测评」等指代。
+    """
+    conditions = [
+        WorkflowRun.user_id == user_id,
+        WorkflowRun.session_id == session_id,
+    ]
+    if workflow_type is not None:
+        conditions.append(WorkflowRun.workflow_type == workflow_type)
+    if status is not None:
+        conditions.append(WorkflowRun.status == status)
+    with SessionLocal() as session:
+        obj = session.scalar(
+            select(WorkflowRun)
+            .where(*conditions)
+            .order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc())
+            .limit(1)
+        )
+        return _to_dict(obj) if obj else None
+
+
 def claim_status(
     run_id: str, user_id: int, expected_status: str, new_status: str
 ) -> bool:

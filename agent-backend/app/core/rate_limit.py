@@ -27,7 +27,6 @@ from .config import (
     RATE_LIMIT_FALLBACK_LOG_INTERVAL,
     RATE_LIMIT_KEY_PREFIX,
     RATE_LIMIT_REGISTER_MAX,
-    RATE_LIMIT_TASK_MAX,
     RATE_LIMIT_UPLOAD_MAX,
     RATE_LIMIT_WINDOW_SECONDS,
     RATE_LIMIT_WORKFLOW_MAX,
@@ -172,9 +171,6 @@ enforce_register_limit = _limit_dependency(
 )
 enforce_chat_limit = _limit_dependency(
     "chat", RATE_LIMIT_CHAT_MAX, "对话请求过于频繁，请稍后再试"
-)
-enforce_task_limit = _limit_dependency(
-    "task", RATE_LIMIT_TASK_MAX, "任务提交过于频繁，请稍后再试"
 )
 enforce_upload_limit = _limit_dependency(
     "upload", RATE_LIMIT_UPLOAD_MAX, "文件上传过于频繁，请稍后再试"

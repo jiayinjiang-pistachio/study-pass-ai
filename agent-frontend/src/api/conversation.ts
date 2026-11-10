@@ -3,6 +3,7 @@ import type { PageResult } from '@/types/api'
 import type {
   ChatMessage,
   InterviewBackground,
+  InterviewEvaluation,
   InterviewPrepareData,
   MessageSegment,
   MessageSource,
@@ -132,10 +133,33 @@ function toSources(value: unknown): MessageSource[] {
     .filter((source): source is MessageSource => source !== null)
 }
 
-function toPayloadType(value: unknown): 'knowledge_card' | null {
-  return isRecord(value) && value.type === 'knowledge_card'
-    ? 'knowledge_card'
-    : null
+function toPayloadType(
+  value: unknown,
+): ChatMessage['payloadType'] {
+  if (!isRecord(value)) return null
+  if (value.type === 'knowledge_card') return 'knowledge_card'
+  if (value.type === 'interview_evaluation') return 'interview_evaluation'
+  return null
+}
+
+function toStringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter(
+        (item): item is string => typeof item === 'string' && item.length > 0,
+      )
+    : []
+}
+
+/** 面试复盘载荷：只接受契约字段，缺失评分视为无效载荷 */
+function toInterviewEvaluation(value: unknown): InterviewEvaluation | null {
+  if (!isRecord(value) || value.type !== 'interview_evaluation') return null
+  return {
+    interviewId: toNumber(value.interview_id),
+    score: toNumber(value.score),
+    strengths: toStringList(value.strengths),
+    weaknesses: toStringList(value.weaknesses),
+    review: toText(value.review),
+  }
 }
 
 function toMessage(raw: RawMessage): ChatMessage {
@@ -158,6 +182,7 @@ function toMessage(raw: RawMessage): ChatMessage {
     status,
     responsePayload: quiz.length ? quiz : null,
     payloadType: toPayloadType(raw.response_payload),
+    interviewEvaluation: toInterviewEvaluation(raw.response_payload),
     interviewId: toNumber(raw.interview_id) || null,
     createdAt: createdSeconds > 0 ? createdSeconds * 1000 : Date.now(),
   }
@@ -344,7 +369,7 @@ async function consumeChatStream(
 /**
  * 发起流式对话：POST /sessions/{id}/stream-chat。
  *
- * @deprecated 聊天已统一走总控接口 startAgentTask；保留此函数便于回滚。
+ * @deprecated 聊天已统一走总控接口 agentChat；保留此函数便于回滚。
  */
 export async function streamChat(
   sessionId: number,
@@ -359,9 +384,11 @@ export async function streamChat(
   await consumeChatStream(response, handlers)
 }
 
-export interface AgentTaskInput {
+export interface AgentChatInput {
   text: string
-  agentName: string
+  /** 一次性快捷指令提示；未选择或后端不适用时由总控自行判断 */
+  preferredAgent?: string
+  selectMode?: number
 }
 
 export interface AgentWorkflowData {
@@ -380,12 +407,49 @@ export interface KnowledgeCardData {
   audioUrl: string | null
 }
 
-/** 总控响应：SSE 表示通用聊天，JSON 表示已启动工作流 */
+/** 笔记归档结果：同时写入会话消息，前端刷新后可见入口文案 */
+export interface NoteTaskData {
+  runId: string
+  noteId: number
+  title: string
+}
+
+/** 面试复盘结果：后端已落库为会话消息，前端先本地渲染再刷新对账 */
+export interface InterviewEvaluationData extends InterviewEvaluation {
+  runId: string
+}
+
+/** task 事件的任务类型，与后端 orchestrator 的 kind 保持一致 */
+export const AgentTaskKind = {
+  Quiz: 'quiz',
+  KnowledgeCard: 'knowledge_card',
+  InterviewPrepare: 'interview_prepare',
+  InterviewEvaluation: 'interview_evaluation',
+  Note: 'note',
+} as const
+export type AgentTaskKind = (typeof AgentTaskKind)[keyof typeof AgentTaskKind]
+
+/** 总控任务事件归一后的结果；聊天分支不会产生 task 事件 */
 export type AgentTaskResult =
-  | { kind: 'chat' }
-  | { kind: 'workflow'; data: AgentWorkflowData }
-  | { kind: 'difficulty_card'; data: KnowledgeCardData }
-  | { kind: 'interview_prepare'; data: InterviewPrepareData }
+  | { kind: typeof AgentTaskKind.Quiz; data: AgentWorkflowData }
+  | { kind: typeof AgentTaskKind.KnowledgeCard; data: KnowledgeCardData }
+  | { kind: typeof AgentTaskKind.InterviewPrepare; data: InterviewPrepareData }
+  | { kind: typeof AgentTaskKind.InterviewEvaluation; data: InterviewEvaluationData }
+  | { kind: typeof AgentTaskKind.Note; data: NoteTaskData }
+
+/** 调度可观测信息：前端可据此展示「正在调用 xx 智能体」 */
+export interface AgentStepInfo {
+  traceId: string
+  from: string
+  to: string
+  phase: string
+  reason: string
+}
+
+export interface AgentStreamHandlers extends StreamChatHandlers {
+  onAgent?: (step: AgentStepInfo) => void
+  onTask?: (task: AgentTaskResult) => void
+}
 
 function toText(value: unknown): string {
   return typeof value === 'string' ? value : ''
@@ -415,7 +479,7 @@ function toInterviewPrepare(
   }
   const resume = isRecord(data.resume) ? data.resume : {}
   return {
-    kind: 'interview_prepare',
+    kind: AgentTaskKind.InterviewPrepare,
     data: {
       runId,
       sessionId: toNumber(data.session_id),
@@ -435,7 +499,7 @@ function toKnowledgeCard(
 
   const audioResourceId = toNumber(data.audio_resource_id) || null
   return {
-    kind: 'difficulty_card',
+    kind: AgentTaskKind.KnowledgeCard,
     data: {
       runId,
       title: toText(data.title) || '知识卡',
@@ -447,61 +511,148 @@ function toKnowledgeCard(
   }
 }
 
-/** 解析工作流分支的统一信封，出参做防御性校验 */
-function toWorkflowResult(payload: unknown): AgentTaskResult {
-  if (!isRecord(payload) || payload.code !== 200 || !isRecord(payload.data)) {
-    throw new ApiError('工作流响应格式异常', 502)
-  }
-  const data = payload.data
-  if (data.route !== 'workflow') {
-    throw new ApiError('工作流响应格式异常', 502)
-  }
-  const runId = typeof data.run_id === 'string' ? data.run_id : ''
-  if (!runId) throw new ApiError('工作流响应缺少 run_id', 502)
-
-  if (data.workflow_type === 'interview_prepare') {
-    return toInterviewPrepare(runId, data)
-  }
-
-  if (data.workflow_type === 'difficulty_card') {
-    return toKnowledgeCard(runId, data)
-  }
-
+function toQuizTask(data: Record<string, unknown>): AgentTaskResult {
   return {
-    kind: 'workflow',
+    kind: AgentTaskKind.Quiz,
     data: {
-      runId,
-      status: typeof data.status === 'string' ? data.status : '',
+      runId: toText(data.run_id),
+      status: toText(data.status),
       quiz: normalizeQuizPayload(data.quiz),
     },
   }
 }
 
+function toNoteTask(runId: string, data: Record<string, unknown>): AgentTaskResult {
+  const noteId = toNumber(data.note_id)
+  if (!noteId) throw new ApiError('笔记任务缺少 note_id', 502)
+  return {
+    kind: AgentTaskKind.Note,
+    data: {
+      runId: runId || toText(data.run_id),
+      noteId,
+      title: toText(data.title) || '笔记',
+    },
+  }
+}
+
+function toInterviewEvaluationTask(
+  runId: string,
+  data: Record<string, unknown>,
+): AgentTaskResult {
+  const interviewId = toNumber(data.interview_id)
+  if (!interviewId) throw new ApiError('面试复盘响应缺少 interview_id', 502)
+  return {
+    kind: AgentTaskKind.InterviewEvaluation,
+    data: {
+      runId: runId || toText(data.run_id),
+      interviewId,
+      score: toNumber(data.score),
+      strengths: toStringList(data.strengths),
+      weaknesses: toStringList(data.weaknesses),
+      review: toText(data.review),
+    },
+  }
+}
+
+/** task 事件载荷按 kind 归一；未知类型说明前后端契约不一致 */
+function toTaskResult(
+  kind: string,
+  runId: string,
+  payload: unknown,
+): AgentTaskResult {
+  const data = isRecord(payload) ? payload : {}
+  switch (kind) {
+    case AgentTaskKind.Quiz:
+      return toQuizTask(data)
+    case AgentTaskKind.KnowledgeCard:
+      return toKnowledgeCard(runId || toText(data.run_id), data)
+    case AgentTaskKind.InterviewPrepare:
+      return toInterviewPrepare(runId || toText(data.run_id), data)
+    case AgentTaskKind.InterviewEvaluation:
+      return toInterviewEvaluationTask(runId || toText(data.run_id), data)
+    case AgentTaskKind.Note:
+      return toNoteTask(runId, data)
+    default:
+      throw new ApiError('未知的任务类型，请稍后重试', 502)
+  }
+}
+
+/** 消费总控 SSE：meta → agent → delta / task → done，error 抛 ApiError */
+async function consumeAgentStream(
+  response: Response,
+  handlers: AgentStreamHandlers,
+): Promise<void> {
+  let errorMessage = ''
+  let finished = false
+
+  await readSse(response, ({ event, data }) => {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(data)
+    } catch {
+      return
+    }
+    if (!isRecord(parsed)) return
+
+    if (event === 'meta') {
+      handlers.onMeta?.({
+        sessionId: toNumber(parsed.session_id),
+        messageId: toNumber(parsed.message_id),
+        requestId: typeof parsed.request_id === 'string' ? parsed.request_id : '',
+      })
+    } else if (event === 'agent') {
+      handlers.onAgent?.({
+        traceId: toText(parsed.trace_id),
+        from: toText(parsed.from),
+        to: toText(parsed.to),
+        phase: toText(parsed.phase),
+        reason: toText(parsed.reason),
+      })
+    } else if (event === 'delta') {
+      if (typeof parsed.content === 'string' && parsed.content) {
+        handlers.onDelta?.(parsed.content)
+      }
+    } else if (event === 'task') {
+      const kind = toText(parsed.kind)
+      const runId = toText(parsed.run_id)
+      const task = toTaskResult(kind, runId, parsed.payload)
+      handlers.onTask?.(task)
+    } else if (event === 'done') {
+      finished = true
+      handlers.onDone?.({
+        messageId: toNumber(parsed.message_id),
+        status: toNumber(parsed.status),
+        sources: toSources(parsed.sources),
+      })
+    } else if (event === 'error') {
+      errorMessage =
+        typeof parsed.message === 'string'
+          ? parsed.message
+          : 'AI 服务暂时不可用，请稍后重试'
+    }
+  })
+
+  if (errorMessage) throw new ApiError(errorMessage, 502)
+  if (!finished) throw new ApiError('连接中断，请稍后重试', -1)
+}
+
 /**
- * 智能体任务总控：POST /agent/tasks/start。
+ * 总控聊天：POST /agent/chat，始终返回 SSE。
  *
- * content-type 为 text/event-stream 时按聊天消费（事件与旧接口一致）；
- * 为 JSON 时表示工作流已启动，返回 run_id 与题目，由调用方刷新会话。
+ * 普通聊天逐条下发 delta；任务分支在完成时下发 task 事件，
+ * 调用方按 kind 刷新会话或接管页面（如面试背景确认弹窗）。
  */
-export async function startAgentTask(
+export async function agentChat(
   sessionId: number,
-  input: AgentTaskInput,
-  handlers: StreamChatHandlers = {},
-): Promise<AgentTaskResult> {
-  const response = await postStream(`${API_PREFIX}/agent/tasks/start`, {
-    agent_name: input.agentName,
+  input: AgentChatInput,
+  handlers: AgentStreamHandlers = {},
+): Promise<void> {
+  const response = await postStream(`${API_PREFIX}/agent/chat`, {
     session_id: sessionId,
     request_text: input.text,
+    preferred_agent: input.preferredAgent,
+    select_mode: input.selectMode ?? 0,
   })
   if (!response.ok) throw await toStreamError(response)
-
-  const contentType = response.headers.get('content-type') ?? ''
-  if (contentType.includes('text/event-stream')) {
-    await consumeChatStream(response, handlers)
-    return { kind: 'chat' }
-  }
-  if (!contentType.includes('application/json')) {
-    throw new ApiError('服务响应格式异常，请稍后重试', 502)
-  }
-  return toWorkflowResult(await response.json())
+  await consumeAgentStream(response, handlers)
 }

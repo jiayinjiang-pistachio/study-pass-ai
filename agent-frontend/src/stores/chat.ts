@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import type { ChatMessage, MessageSegment } from '@/types/chat'
 import type { QuizAnswer } from '@/types/quiz'
 import { AgentName } from '@/types/agent'
+import { AgentTaskKind } from '@/api/conversation'
 import type { AgentTaskResult, KnowledgeCardData } from '@/api/conversation'
 import * as conversationApi from '@/api/conversation'
 import { submitLearningQuiz } from '@/api/learningWorkflow'
@@ -10,11 +11,13 @@ import { buildEvaluationText, quizRunId } from '@/utils/quiz'
 
 const PAGE_SIZE = 20
 const KNOWLEDGE_LOADING_HINT = '正在生成知识卡和播客，请稍等…'
+/** 普通聊天能力名：由后端总控下发，不需要「执行任务」等待提示 */
+const CHAT_AGENT_NAME = 'chat_answer'
 
 export interface SendMessageOptions {
   /**
-   * 工作流 JSON 结果回调：页面可在此接管特殊任务（如面试背景确认弹窗）。
-   * 返回 true 表示已接管，跳过默认的会话刷新逻辑。
+   * 任务事件回调：页面可在此接管特殊任务（如面试背景确认弹窗）。
+   * 返回 true 表示已接管，跳过默认的本地渲染与会话刷新逻辑。
    */
   onTaskResult?: (result: AgentTaskResult) => boolean
 }
@@ -199,16 +202,17 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 发送一条消息：统一走总控接口。
+   * 发送一条消息：统一走总控接口 /agent/chat（始终 SSE）。
    *
    * 本地先插入一条「生成中」消息；聊天分支由 meta/delta/done 增量更新，
-   * 工作流分支由 JSON 响应触发会话刷新，用落库消息替换临时行。
+   * 任务分支在 task 事件到达后先本地渲染，再刷新会话用落库消息对账。
+   * `preferredAgent` 只是一次性提示，未选择时由后端总控自行判断。
    * 失败时标记 status=2 并把错误抛给调用方提示。
    */
   async function sendMessage(
     sessionId: number,
     text: string,
-    agentName: string,
+    preferredAgent: string | null,
     options: SendMessageOptions = {},
   ): Promise<void> {
     const content = text.trim()
@@ -227,8 +231,11 @@ export const useChatStore = defineStore('chat', () => {
       status: 0,
       responsePayload: null,
       payloadType: null,
+      interviewEvaluation: null,
       loadingHint:
-        agentName === AgentName.Difficulty ? KNOWLEDGE_LOADING_HINT : undefined,
+        preferredAgent === AgentName.Difficulty
+          ? KNOWLEDGE_LOADING_HINT
+          : undefined,
       interviewId: null,
       createdAt,
     })
@@ -238,10 +245,11 @@ export const useChatStore = defineStore('chat', () => {
 
     sendingBySession.value[sessionId] = true
     let received = ''
+    const tasks: AgentTaskResult[] = []
     try {
-      const result = await conversationApi.startAgentTask(
+      await conversationApi.agentChat(
         sessionId,
-        { text: content, agentName },
+        { text: content, preferredAgent: preferredAgent ?? undefined },
         {
           onMeta: (meta) => {
             if (meta.requestId) item.requestId = meta.requestId
@@ -253,36 +261,73 @@ export const useChatStore = defineStore('chat', () => {
             if (duplicate) state.items.splice(state.items.indexOf(duplicate), 1)
             item.id = meta.messageId
           },
+          onAgent: (step) => {
+            // 任务能力耗时较长，受理时先给出等待提示；聊天已有默认「正在生成…」
+            if (step.phase !== 'start' || step.to === CHAT_AGENT_NAME) return
+            item.loadingHint =
+              step.to === AgentName.Difficulty
+                ? KNOWLEDGE_LOADING_HINT
+                : '正在执行任务，请稍等…'
+          },
           onDelta: (delta) => {
+            item.loadingHint = undefined
             received += delta
             item.responseText = received
+          },
+          onTask: (task) => {
+            tasks.push(task)
           },
           onDone: (done) => {
             // 来源只挂在消息结构上展示，不拼进 responseText
             item.sources = done.sources
+            if (done.messageId > 0) item.id = done.messageId
           },
         },
       )
       item.status = 1
 
-      // 页面接管特殊任务（面试背景确认）时跳过默认刷新，保留本轮临时行
-      const handled = options.onTaskResult?.(result) ?? false
-      if (!handled && result.kind === 'difficulty_card') {
-        // 先按接口结果渲染，再用历史消息对账；刷新失败也保留已渲染的知识卡
-        applyKnowledgeCard(item, result.data)
-        try {
-          await refresh(sessionId)
-        } catch {
-          // 重进会话时会重新拉取历史消息
-        }
-      } else if (!handled && result.kind === 'workflow') {
-        try {
-          await refresh(sessionId)
-        } catch {
-          // 刷新失败保留临时行：测评入口仍可用，下次刷新 / 重进会话自动对账
-          item.requestId = `${result.data.runId}:quiz`
-          item.responsePayload = result.data.quiz
-          item.responseText = '已完成出题，请完成后提交答案。'
+      // 任务分支：页面可接管（面试背景确认），否则本地渲染后刷新对账
+      for (const task of tasks) {
+        const handled = options.onTaskResult?.(task) ?? false
+        if (handled) continue
+
+        if (task.kind === AgentTaskKind.KnowledgeCard) {
+          // 先按事件结果渲染，再用历史消息对账；刷新失败也保留已渲染的知识卡
+          applyKnowledgeCard(item, task.data)
+          try {
+            await refresh(sessionId)
+          } catch {
+            // 重进会话时会重新拉取历史消息
+          }
+        } else if (task.kind === AgentTaskKind.Quiz) {
+          try {
+            await refresh(sessionId)
+          } catch {
+            // 刷新失败保留临时行：测评入口仍可用，下次刷新 / 重进会话自动对账
+            item.requestId = `${task.data.runId}:quiz`
+            item.responsePayload = task.data.quiz
+            item.responseText = '已完成出题，请完成后提交答案。'
+          }
+        } else if (task.kind === AgentTaskKind.InterviewEvaluation) {
+          // 复盘消息已由后端落库：先本地渲染，再用刷新结果对账
+          item.payloadType = 'interview_evaluation'
+          item.interviewEvaluation = task.data
+          item.responseText = `本次面试复盘评分：${task.data.score}/100。`
+          try {
+            await refresh(sessionId)
+          } catch {
+            // 刷新失败保留本地复盘卡片，重进会话后可看到落库消息
+          }
+        } else if (task.kind === AgentTaskKind.Note) {
+          item.responseText = `已生成笔记「${task.data.title}」，可在笔记本中查看。`
+          try {
+            await refresh(sessionId)
+          } catch {
+            // 刷新失败保留本地提示，重进会话后可看到落库消息
+          }
+        } else {
+          // 面试准备未被页面接管：保留用户消息并给出提示，等待二次确认
+          item.responseText = '已生成面试背景，请确认后开始面试。'
         }
       }
     } catch (error) {

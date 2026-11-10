@@ -19,7 +19,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import delete as sa_delete, select
 
-from app.core import minio_client, rate_limit
+from app.core import config, minio_client, rate_limit
 from app.core.security import hash_password
 from app.db import (
     interview_repo,
@@ -49,6 +49,16 @@ def reset_limiter() -> None:
     导致后续用例被误限流。
     """
     rate_limit.reset()
+
+
+@pytest.fixture(autouse=True)
+def disable_interview_auto_eval(monkeypatch) -> None:
+    """结束面试后的自动复盘是后台模型调用，测试默认关闭。
+
+    ASGITransport 会在响应返回前执行 BackgroundTasks，不关闭会触发真实模型请求；
+    需要的用例自行 monkeypatch 打开并替换后台函数。
+    """
+    monkeypatch.setattr(config, "INTERVIEW_EVAL_AUTO", False)
 
 
 @pytest.fixture(autouse=True)

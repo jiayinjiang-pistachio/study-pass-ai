@@ -399,6 +399,11 @@ def test_finalize_result_builds_a2a_envelope(
         "payload": {"score": 67, "weaknesses": weaknesses},
         "next_agent": next_agent,
         "confidence": confidence,
+        "trace_id": None,
+        "intent": "note_archive",
+        "hops": 0,
+        "result_ref": None,
+        "alternatives": [],
     }
 
 

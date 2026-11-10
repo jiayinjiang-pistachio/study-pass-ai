@@ -23,14 +23,14 @@
 
 ## 0. 这条线从哪开始、到哪结束
 
-**起点**：前端调用 `POST /api/agent/tasks/start`，`agent_name=difficulty_learner`。
+**起点**：前端调用 `POST /api/agent/chat`（SSE），`request_text` 命中知识卡触发词（或快捷按钮传 `preferred_agent=difficulty_learner`）。
 
-**终点**：接口返回 `status=completed` 与 `resource_id`；前端刷新会话消息后，通过 `response_segments[].url` 展示知识卡图片。之后每次读取历史消息，都会按 `resource_id` 重新预签名，图片链接不会因过期而失效。
+**终点**：流中下发 `task(kind=knowledge_card)`，`payload` 含 `run_id / status / title / resource_id / image_url / audio_resource_id / audio_url`；前端刷新会话消息后，通过 `response_segments[].url` 展示知识卡图片。之后每次读取历史消息，都会按 `resource_id` 重新预签名，图片链接不会因过期而失效。
 
 ```mermaid
 flowchart LR
-    F[前端<br/>agent_name=difficulty_learner] --> R[routers/orchestrator.py]
-    R --> O[services/orchestrator_service.py<br/>direct 分发]
+    F[前端<br/>POST /api/agent/chat] --> R[routers/agent.py<br/>统一 SSE]
+    R --> O[services/orchestrator_service.py<br/>能力分发]
     O --> W[services/difficulty_card_workflow.py<br/>编排 / 重试 / 落库]
     W --> A[agent/agents/difficulty_learner.py<br/>prepare_card + build_image_prompt + build_podcast_topic]
     A --> L[LLM<br/>整理卡片原料]
@@ -53,7 +53,7 @@ generating ──成功──> completed
      └──────失败──> failed（workflow_runs.error_message 记录原因）
 ```
 
-失败时不写会话消息，只保留失败 run 供排查；配置缺失返回 `503`，外部服务 / 模型输出异常返回 `502`。
+失败时不写会话消息，只保留失败 run 供排查；配置缺失以 SSE `error(code=503)` 收尾，外部服务 / 模型输出异常以 `error(code=502)` 收尾。
 
 ---
 
@@ -275,42 +275,54 @@ uvicorn app.main:app --reload --reload-exclude 'logs/*' --port 8000
 
 ### 3.2 发起知识卡
 
-**POST `/api/agent/tasks/start`**：
+**POST `/api/agent/chat`**（SSE，建议用 `curl -N`）：
 
 ```json
 {
-  "agent_name": "difficulty_learner",
   "session_id": 123,
   "request_text": "解释一下 Python GIL，以及它对多线程的影响"
 }
 ```
 
-`difficulty_learner` 规则为 `direct=True`，`agent_name` 命中即启动，不经过关键词 / 语义判断。
+命中「解释一下 / 讲解 / 知识卡 …」等触发词即分发；也可带一次性提示 `"preferred_agent": "difficulty_learner"`。该能力没有前置数据要求，学习和面试会话都可用。
 
 ### 3.3 校验响应
 
-预期 `HTTP 200`：
+预期 `HTTP 200`、`Content-Type: text/event-stream`；出图与播客并行，整轮约 1～3 分钟：
+
+```text
+event: meta
+data: {"session_id":123,"message_id":0,"request_id":"","trace_id":"..."}
+
+event: agent
+data: {"trace_id":"...","from":"flow_controller","to":"difficulty_learner","phase":"start","reason":"难点学习触发"}
+
+event: task
+data: {"trace_id":"...","kind":"knowledge_card","run_id":"...","payload":{...}}
+
+event: agent
+data: {"trace_id":"...","from":"flow_controller","to":"difficulty_learner","phase":"done","reason":"..."}
+
+event: done
+data: {"message_id":9001,"status":1,"sources":[],"trace_id":"..."}
+```
+
+`task.payload`：
 
 ```json
 {
-  "code": 200,
-  "message": "ok",
-  "data": {
-    "route": "workflow",
-    "agent_name": "difficulty_learner",
-    "workflow_type": "difficulty_card",
-    "session_id": 123,
-    "run_id": "5b0f2c1e-5f0e-4d7f-9f5e-0f7d1c2a3b4c",
-    "status": "completed",
-    "title": "Python GIL",
-    "resource_id": 45,
-    "image_url": "http://127.0.0.1:9000/ai-resource/users/1/<md5>.png?X-Amz-...",
-    "audio_resource_id": 46,
-    "audio_url": "http://127.0.0.1:9000/ai-resource/users/1/<md5>.mp3?X-Amz-..."
-  }
+  "run_id": "5b0f2c1e-5f0e-4d7f-9f5e-0f7d1c2a3b4c",
+  "status": "completed",
+  "title": "Python GIL",
+  "resource_id": 45,
+  "image_url": "http://127.0.0.1:9000/ai-resource/users/1/<md5>.png?X-Amz-...",
+  "audio_resource_id": 46,
+  "audio_url": "http://127.0.0.1:9000/ai-resource/users/1/<md5>.mp3?X-Amz-...",
+  "message_id": 9001
 }
 ```
 
+- `meta.message_id` 在任务分支固定为 `0`，对账以 `task.payload.message_id` 为准；
 - `image_url` 是 MinIO 预签名地址，默认 7 天有效；
 - 预签名失败时 `image_url` 为空串，图片本身已落库，可通过历史消息接口重新续签；
 - 音频未配置 / 生成失败时 `audio_resource_id` 与 `audio_url` 均为 `null`，知识卡仍为 `completed`；
@@ -392,12 +404,15 @@ SESSION_ID=$(curl -s -X POST "$BASE/api/sessions" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"title":"知识卡联调","session_mode":0}' | jq -r '.data.id')
 
-RESP=$(curl -s -X POST "$BASE/api/agent/tasks/start" \
+RESP=$(curl -sN -X POST "$BASE/api/agent/chat" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d "{\"agent_name\":\"difficulty_learner\",\"session_id\":$SESSION_ID,\"request_text\":\"解释一下 Python GIL\"}")
-echo "$RESP" | jq
+  -d "{\"session_id\":$SESSION_ID,\"request_text\":\"解释一下 Python GIL\"}")
 
-RESOURCE_ID=$(echo "$RESP" | jq -r '.data.resource_id')
+# SSE 流里取 task 事件的数据行
+TASK=$(echo "$RESP" | awk '/^event: task/{found=1; next} found && /^data: /{sub(/^data: /,\"\"); print; exit}')
+echo "$TASK" | jq
+
+RESOURCE_ID=$(echo "$TASK" | jq -r '.payload.resource_id')
 curl -s "$BASE/api/sessions/$SESSION_ID/messages?page=1&page_size=20" \
   -H "Authorization: Bearer $TOKEN" | jq --argjson rid "$RESOURCE_ID" \
   '.data.items[] | select(.response_segments[0].resource_id == $rid)'
@@ -418,8 +433,8 @@ sequenceDiagram
     participant M as MinIO
     participant DB as MySQL
 
-    F->>O: POST /api/agent/tasks/start<br/>agent_name=difficulty_learner
-    O->>O: 命中 direct 规则
+    F->>O: POST /api/agent/chat<br/>命中知识卡触发词 / preferred_agent
+    O->>O: 三层路由命中 difficulty_learner
     O->>W: start_difficulty_card(user_id, session_id, request_text)
     W->>DB: 校验会话归属（不存在 → 404）
     W->>DB: workflow_runs 写入 status=generating
@@ -441,7 +456,7 @@ sequenceDiagram
     W->>DB: workflow_runs 置 completed（state_json）
     W->>M: 预签名 image_url
     W-->>O: run_id / title / resource_id / image_url
-    O-->>F: 200 {route=workflow, status=completed, ...}
+    O-->>F: SSE task(kind=knowledge_card) + done
     F->>F: 刷新会话消息
     F->>DB: GET /api/sessions/{id}/messages
     DB-->>F: response_segments[].url（按 resource_id 重新预签名）
@@ -453,8 +468,8 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A[前端 POST /api/agent/tasks/start<br/>agent_name=difficulty_learner] --> B{会话属于当前用户?}
-    B -- 否 --> B1[404 会话不存在]
+    A[前端 POST /api/agent/chat<br/>命中知识卡意图] --> B{会话属于当前用户?}
+    B -- 否 --> B1[建流前 404 会话不存在]
     B -- 是 --> C[workflow_runs 写入 generating]
     C --> D[读取最近面试问答<br/>仅 session_mode=1]
     D --> E[prepare_card<br/>大模型整理卡片原料]
@@ -468,7 +483,7 @@ flowchart TD
     I --> J[MinIO put_object<br/>按用户 + MD5 去重]
     J --> K[写入 chat_messages<br/>response_segments=image + resource_id]
     K --> L[run=completed<br/>预签名 image_url]
-    L --> M[返回 run_id / title / resource_id / image_url]
+    L --> M[SSE task<br/>run_id / title / resource_id / image_url]
     M --> N[前端刷新消息列表]
     N --> O[message_service 按 resource_id 续签 URL]
     O --> P[图片展示]
@@ -480,11 +495,11 @@ flowchart TD
 
 | 检查项 | 预期 |
 | --- | --- |
-| 分发方式 | `difficulty_learner` 命中 `direct=True`，不触发关键词 / 语义判断 |
+| 分发方式 | 关键词 / 语义快筛或 Tier 2 规划命中 `difficulty_learner`；无前置数据要求 |
 | 卡片原料 | `title / topic / summary / points` 齐全，`points` 为 1..3 条且每条含 `title + tip` |
 | 提示词 | 绘图与播客话题都由同一份卡片原料确定性拼接；播客要求双人口语化、不念稿 |
 | 并行 | 出图与出音频并行执行，总耗时接近较慢的一路 |
-| 出参 | `route=workflow`、`workflow_type=difficulty_card`、`status=completed`，含 `run_id / title / resource_id / image_url`，音频可额外含 `audio_resource_id / audio_url` |
+| 出参 | SSE `task(kind=knowledge_card)`，`status=completed`，含 `run_id / title / resource_id / image_url`，音频可额外含 `audio_resource_id / audio_url` |
 | 运行记录 | `workflow_runs.status=completed`，`state_json` 含 `card / image_prompt / resource_id / message_id / audio_resource_id` |
 | 资源 | 图片 `resource_type=1`、音频 `resource_type=2`，均 `expire_time IS NULL`，`storage_path` 为 `minio:/{bucket}/users/{user_id}/{md5}.ext` |
 | 会话消息 | `select_mode=1`、`request_id={run_id}:card`、`status=1`、`response_payload={"type":"knowledge_card"}`，附件段只存 `resource_id` |
@@ -498,17 +513,17 @@ flowchart TD
 | 场景 | 操作 | 预期 |
 | --- | --- | --- |
 | 他人会话 | 用其他用户的 `session_id` | `404 会话不存在` |
-| 未配置 Seedream Key | 注释 `SEEDREAM_API_KEY` 后调用 | `503 知识卡服务暂不可用`，run 置 `failed` |
-| 尺寸非法 | `SEEDREAM_IMAGE_SIZE=abc` | `503`，detail 提示合法值 |
-| Ark 鉴权失败 / 参数错误 | 错误的 Key 或模型 ID | `502 知识卡生成失败，请稍后重试`，重试 1 次后失败 |
-| 出图超时 / 网络异常 | 断开网络或调小 `SEEDREAM_TIMEOUT` | `502`，run 置 `failed` |
-| 返回非图片内容 | 假接口返回纯文本 | `502 模型返回的图片格式不受支持` |
-| 图片超过 20MB | 使用超清尺寸 | `502 生成图片过大，已取消保存` |
-| LLM 配置缺失 | 注释 `LLM_API_KEY` | `503 知识卡服务暂不可用` |
-| 未配置播客 TTS | 注释 `PODCAST_TTS_*` | 知识卡照常 `200`，`audio_resource_id / audio_url` 为 `null` |
+| 未配置 Seedream Key | 注释 `SEEDREAM_API_KEY` 后调用 | SSE `error(code=503)`「知识卡服务暂不可用」，run 置 `failed` |
+| 尺寸非法 | `SEEDREAM_IMAGE_SIZE=abc` | SSE `error(code=503)`，detail 提示合法值 |
+| Ark 鉴权失败 / 参数错误 | 错误的 Key 或模型 ID | SSE `error(code=502)`「知识卡生成失败，请稍后重试」，重试 1 次后失败 |
+| 出图超时 / 网络异常 | 断开网络或调小 `SEEDREAM_TIMEOUT` | SSE `error(code=502)`，run 置 `failed` |
+| 返回非图片内容 | 假接口返回纯文本 | SSE `error(code=502)`「模型返回的图片格式不受支持」 |
+| 图片超过 20MB | 使用超清尺寸 | SSE `error(code=502)`「生成图片过大，已取消保存」 |
+| LLM 配置缺失 | 注释 `LLM_API_KEY` | SSE `error(code=503)`「知识卡服务暂不可用」 |
+| 未配置播客 TTS | 注释 `PODCAST_TTS_*` | 知识卡照常 `task(kind=knowledge_card)`，`audio_resource_id / audio_url` 为 `null` |
 | 播客接口失败 / 超时 | 错误凭证或断开网络 | 只记 WARNING，知识卡照常返回，消息无 `audio` 段 |
 | 音频落库失败 | MinIO 写入异常（仅音频） | 同上，不阻断图片 |
-| 模型输出非 JSON | 模型持续返回普通文本 | 重试耗尽后 `502 知识卡生成失败，请稍后重试` |
+| 模型输出非 JSON | 模型持续返回普通文本 | 重试耗尽后 SSE `error(code=502)`「知识卡生成失败，请稍后重试」 |
 | 提示词模板未初始化 | 未执行 `init_prompt.py` | 不报错，自动降级为内置角色提示词并继续出图 |
 
 ---
@@ -519,4 +534,4 @@ flowchart TD
 .venv/bin/python -m pytest tests/test_difficulty_card.py -v
 ```
 
-覆盖：直接分发、绘图 / 播客提示词确定性、图片与音频消息落库、音频软失败、历史 URL 续签、会话越权、Seedream 缺 Key `503`。
+覆盖：能力分发、绘图 / 播客提示词确定性、图片与音频消息落库、音频软失败、历史 URL 续签、会话越权、Seedream 缺 Key `503`。

@@ -197,7 +197,6 @@ flowchart LR
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | 固定窗口长度（秒） |
 | `RATE_LIMIT_REGISTER_MAX` | `5` | 注册接口配额 / 窗口 |
 | `RATE_LIMIT_CHAT_MAX` | `20` | AI 聊天配额 / 窗口 |
-| `RATE_LIMIT_TASK_MAX` | `10` | 任务总控启动配额 / 窗口 |
 | `RATE_LIMIT_UPLOAD_MAX` | `10` | 文件上传配额 / 窗口 |
 | `RATE_LIMIT_WORKFLOW_MAX` | `5` | 学习测评工作流启动配额 / 窗口 |
 | `RATE_LIMIT_KEY_PREFIX` | `ratelimit` | Redis key 前缀 |
@@ -214,7 +213,7 @@ Redis 连接沿用既有配置：`REDIS_HOST` / `REDIS_PORT` / `REDIS_DB`（默�
 | --- | --- | --- | --- |
 | `POST /api/auth/register` | `register` | IP（注册前无令牌） | 5 / 分钟 |
 | `POST /api/sessions/{id}/stream-chat` | `chat` | 用户 / IP | 20 / 分钟 |
-| `POST /api/agent/tasks/start` | `task` | 用户 / IP | 10 / 分钟 |
+| `POST /api/agent/chat` | `chat` | 用户 / IP | 20 / 分钟 |
 | `POST /api/files` | `upload` | 用户 / IP | 10 / 分钟 |
 | `POST /api/learning-workflows/start` | `workflow` | 用户 / IP | 5 / 分钟 |
 

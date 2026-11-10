@@ -61,9 +61,9 @@ src/
 ├── layouts/          # 布局组件（AppShell.vue）
 ├── mock/             # 接口 Mock（仅开发环境加载，见 §7.2；index.ts / notes.ts，会话已接真实后端）
 ├── router/           # 路由配置
-├── stores/           # Pinia 状态（auth / conversation / chat / note / profile）
+├── stores/           # Pinia 状态（auth / conversation / chat / note / profile / agent）
 ├── styles/           # 全局样式与设计 token（_tokens.scss / index.scss）
-├── types/            # 全局类型定义（api / conversation / chat / note）
+├── types/            # 全局类型定义（api / conversation / chat / note / agent）
 ├── utils/            # 纯工具函数（token.ts：令牌读写；sse.ts：SSE 响应解析；markdownUtil.ts：Markdown 渲染）
 ├── views/            # 页面级组件（与路由一一对应：LoginView / StudyRoom / InterviewRoom / NoteRoom）
 ├── App.vue
@@ -208,7 +208,9 @@ src/
 - **错误提示**：请求层统一弹出后端 `message`（短时间去重，可用 `silent` 关闭），调用方不要重复提示同一错误。
 - **用户画像**：`src/api/profile.ts` 封装资料 CRUD（`GET /api/profiles/me` 未创建时 404 归一为 `null` 并用 `silent` 关闭提示；`POST /api/profiles` 创建；`PUT /api/profiles/me` 更新）。出参归一并去掉 `user_id`，请求体使用后端 snake_case 字段名。`stores/profile.ts` 维护 `profile` / `needsOnboarding`：新会话空聊天区由 `components/chat/ProfileWelcomeCard.vue` 展示开场白表单（前三项必填、技能 / 薄弱点选填、可跳过），保存成功后卡片随 `needsOnboarding=false` 消失；进入空会话时重新拉取画像，避免对话自动回填后卡片仍展示。
 - 每个接口在 `src/api/xxx.ts` 中定义明确的请求 / 响应类型，并按业务域拆分文件（如 `conversation.ts` / `interview.ts` / `note.ts`）。
-- 流式接口（AI 对话、语音播报等）需封装为独立的 SSE / 流式工具，并处理中断与错误重连。当前实现：`src/utils/sse.ts` 只做协议解析，`src/api/conversation.ts` 的 `streamChat` 负责鉴权（fetch 不经过 axios 拦截器，401 时手动续期一次）、错误与业务事件分发；`stores/chat.ts` 的 `sendMessage` 负责本地乐观消息与增量渲染。
+- 流式接口（AI 对话、语音播报等）需封装为独立的 SSE / 流式工具，并处理中断与错误重连。当前实现：`src/utils/sse.ts` 只做协议解析，`src/api/conversation.ts` 的 `agentChat` 负责鉴权（fetch 不经过 axios 拦截器，401 时手动续期一次）、错误与业务事件分发；`stores/chat.ts` 的 `sendMessage` 负责本地乐观消息与增量渲染。
+- **总控聊天**：会话消息统一走 `POST /api/agent/chat`（SSE），入参 `session_id + text`，可选 `preferredAgent`。快捷按钮只是**一次性提示**：发送时由 `useAgentStore.consume()` 取出并清空，未选择时由后端总控决定能力。按钮列表由 `src/api/agent.ts` 的 `fetchAgentCapabilities()` 读取 `GET /api/agent/capabilities?session_mode=`，过滤 `kind=chat` 后渲染；接口失败或尚未加载时回退 `AGENTS_BY_MODULE` 静态配置，两处标识须与后端 `app/agent/registry.py` 能力名一致。
+- **事件分发**：后端事件固定为 `meta / agent / delta / task / done / error`。`stores/chat.ts` 按 `task.kind` 处理产物：`knowledge_card` 刷新消息卡片、`quiz` 刷新并渲染测评表单、`note` 刷新笔记列表与消息、`interview_prepare` 展示面试确认卡片、`interview_evaluation` 本地渲染面试复盘卡片（`InterviewEvaluationCard.vue`）后刷新对账；任务分支 `meta.message_id=0`，以 `task.payload.message_id` 对账。历史消息的复盘卡片从 `response_payload.type=interview_evaluation` 还原为 `ChatMessage.interviewEvaluation`。
 
 ### 7.2 Mock 层（`src/mock/`，仅开发环境）
 

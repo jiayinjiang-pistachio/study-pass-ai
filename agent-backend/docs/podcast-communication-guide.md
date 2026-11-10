@@ -310,13 +310,13 @@ with ThreadPoolExecutor(max_workers=2) as pool:
 
 ### 8.4 前端链路
 
-1. `POST /api/agent/tasks/start` 返回 **JSON**（不是 SSE）。工作流分支要等出图 + 播客都完成，所以整单约 1～3 分钟。
+1. 知识卡统一走 `POST /api/agent/chat`（**SSE**）。出图与播客并行，整轮约 1～3 分钟，期间保持连接。
 2. 前端先显示 loading 提示：“正在生成知识卡和播客，请稍等…”。
-3. 收到 JSON 后**立即**用返回的 `image_url` / `audio_url` 渲染 `KnowledgeCard`，再刷新历史消息对账。
-4. `payload.type = knowledge_card` 用于历史消息识别；标题从正文 `「…」` 中提取。
-5. 没音频时 `audio_url` 为 `null`，只展示图片，不出现播放器。
+3. 收到 `task(kind=knowledge_card)` 后**立即**用 `payload.image_url` / `payload.audio_url` 渲染 `KnowledgeCard`，再刷新历史消息对账。
+4. 会话消息的 `response_payload.type = knowledge_card` 用于历史识别；标题从正文 `「…」` 中提取。
+5. 没音频时 `audio_resource_id` / `audio_url` 为 `null`，只展示图片，不出现播放器；失败以 SSE `error` 收尾。
 
-**SSE**（Server-Sent Events）在这里只用于普通聊天流式回复；知识卡是同步工作流，走 JSON 分支，两者由响应头 `Content-Type` 区分。
+任务分支 `meta.message_id=0`，消息对账以 `task.payload.message_id` 为准。
 
 ---
 

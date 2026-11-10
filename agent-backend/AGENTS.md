@@ -86,7 +86,7 @@ agent-backend/
 │   │   ├── interview.py     #   面试详情（按 interview_id + user_id）
 │   │   ├── learning_workflow.py # 学习测评工作流：发起 / 提交 / 详情（整组需登录）
 │   │   ├── note.py          #   笔记管理：列表 / 创建 / 详情 / 更新 / 删除（整组需登录）
-│   │   ├── orchestrator.py  #   流程总控：工作流 / 通用聊天统一入口（整组需登录）
+│   │   ├── agent.py         #   流程总控：聊天 / 任务统一 SSE 入口 + 能力下发（整组需登录）
 │   │   ├── file.py          #   通用文件上传 / 头像读取（上传需登录，头像公开）
 │   │   ├── profile.py       #   用户背景资料 CRUD（仅当前用户，整组需登录）
 │   │   ├── prompt.py        #   提示词版本管理（读取 / 回滚 / 智能体配置）
@@ -101,7 +101,7 @@ agent-backend/
 │   │   ├── learning_workflow.py # 测评入参 / 出参（Start / Submit / Detail）
 │   │   ├── interview_host.py # 面试前准备出参（ResumeInfoOut / InterviewVariablesOut / InterviewPrepareOut）
 │   │   ├── note.py          #   笔记 CRUD 入参 / 分页出参（NoteCreate / NoteUpdate / NoteOut / NoteListOut）
-│   │   ├── orchestrator.py  #   总控入参 / 工作流分支出参
+│   │   ├── agent.py         #   总控聊天入参（AgentChatIn）/ 能力下发（AgentCapabilityOut）
 │   │   ├── profile.py       #   背景资料入参 / 出参（ProfileCreate / ProfileUpdate / ProfileOut）
 │   │   ├── prompt.py        #   提示词出参（PromptTemplateOut / ActivePromptOut / AgentConfigOut）
 │   │   ├── file.py          #   文件上传出参（FileOut：url / md5 / size / kind / resource_id 等）
@@ -123,9 +123,14 @@ agent-backend/
 │   │   ├── voice_interview_service.py # 火山 RTC 语音面试：启动 / 停止 AI、结果落库
 │   │   ├── learning_workflow.py # 学习测评：checkpoint 校验 + interrupt 恢复 + 状态持久化
 │   │   ├── interview_host_workflow.py # 面试前准备：会话 / 简历校验 + 变量提取 + 提示词注入
+│   │   ├── difficulty_card_workflow.py # 难点知识卡：卡片原料 → 并行出图 / 播客 → 落库与会话消息
+│   │   ├── seedream_service.py # Seedream 出图：提示词 → PNG 字节
+│   │   ├── podcast_service.py # 火山语音播客：卡片文本 → 双人对话 MP3（WebSocket 二进制协议）
 │   │   ├── note_archive_service.py # 笔记归档：Markdown 生成 + 占位符校验 + A2A handler
 │   │   ├── note_service.py  #   笔记：学习测评幂等保存 + CRUD（按 user_id 隔离）
-│   │   ├── orchestrator_service.py # 流程总控：规则表 + 关键词 / 语义路由 + 入参映射
+│   │   ├── orchestrator_service.py # 流程总控：三层路由 + 能力分发 + 统一 SSE 事件流
+│   │   ├── session_agent_state.py # 会话级调度上下文（Redis 优先 / MySQL 兜底）
+│   │   ├── a2a_handoff_service.py # A2A 派发：按 next_agent 路由到下游 handler
 │   │   ├── semantic_intent.py # 语义意图判断：示例向量 + 余弦阈值 + 失败降级
 │   │   ├── embedding.py     #   本地向量模型共享实例（长期记忆 / 语义意图）
 │   │   ├── file_type.py     #   上传文件类型识别（文件头 / 扩展名）与大小上限
@@ -134,9 +139,12 @@ agent-backend/
 │   │   ├── avatar_service.py #   用户头像读取：resources/用户头像路径 → MinIO 字节流
 │   │   ├── resource_cleanup.py # 每天 03:00 清理过期资源（先删对象再删元数据）
 │   │   └── health_service.py#   健康检查：数据库探活，异常转 SystemException(503)
-│   ├── agent/               # Agent 编排层：智能体能力 + LangGraph 工作流图 + 跨请求执行现场
+│   ├── agent/               # Agent 编排层：能力注册表 + 智能体能力 + LangGraph 工作流图
+│   │   ├── registry.py      #   能力注册表：房间 / 触发词与语义示例 / 前置数据 / 产物类型
 │   │   ├── agents/
-│   │   │   └── interview_host.py # 面试主考官 Agent：只调用大模型从简历提取准备变量
+│   │   │   ├── flow_controller.py # 总控规划器：歧义时调用一次模型输出调度 JSON
+│   │   │   ├── interview_host.py # 面试主考官 Agent：从简历提取准备变量
+│   │   │   └── difficulty_learner.py # 难点学习 Agent：把提问整理成知识卡原料
 │   │   └── workflows/
 │   │       ├── checkpoint.py #   全局 MemorySaver 单例 + thread 配置（thread_id = run_id）
 │   │       └── learning_quiz.py # 学习测评单图：出题 → interrupt 等待作答 → 评分 → 完成
@@ -184,8 +192,11 @@ agent-backend/
 │   ├── test_learning_workflow.py # 学习测评：interrupt 暂停 / 恢复评分 / checkpoint 失效 / 作答校验
 │   ├── test_notes.py        # 笔记 CRUD：分页 / 过滤 / 检索 / 用户隔离 / 校验
 │   ├── test_note_archive.py # 笔记归档：Markdown 生成 / 占位符 / 落库 / A2A 集成
-│   ├── test_interview_host.py # 面试前准备：直接分发 / 会话模式 / 简历切片 / 提示词注入
-│   ├── test_orchestrator.py #   流程总控：路由策略 / 混合响应 / 越权隔离
+│   ├── test_interview_host.py # 面试前准备：快捷指令分发 / 前置降级 / 简历切片 / 提示词注入
+│   ├── test_difficulty_card.py # 难点知识卡：出图 / 播客 / 会话消息 / 音频软失败 / 503
+│   ├── test_a2a_handoff.py  #   A2A 派发、跳数限制与幂等
+│   ├── test_interview_evaluation.py # 面试复盘 / 自动触发 / 面试笔记归档
+│   ├── test_orchestrator.py #   流程总控：三层路由 / 统一 SSE 事件 / 前置过滤 / 越权隔离
 │   ├── test_semantic_intent.py # 语义意图：阈值 / 多示例 / 缓存 / 失败降级
 │   └── test_resources.py    #   过期资源清理用例
 ├── alembic.ini              # Alembic 配置（连接串留空，由 env.py 注入）
@@ -309,7 +320,8 @@ agent-backend/
   | 笔记详情 | `GET /api/notes/{note_id}` | `200` |
   | 更新笔记 | `PUT /api/notes/{note_id}` | `200` |
   | 删除笔记 | `DELETE /api/notes/{note_id}` | `200` |
-  | 智能体任务总控 | `POST /api/agent/tasks/start` | `200` |
+  | 总控聊天（SSE） | `POST /api/agent/chat` | `200` |
+  | 可用能力列表 | `GET /api/agent/capabilities?session_mode=` | `200` |
   | 创建背景资料 | `POST /api/profiles` | `200` |
   | 查询背景资料 | `GET /api/profiles/me` | `200` |
   | 更新背景资料 | `PUT /api/profiles/me` | `200` |
@@ -328,7 +340,7 @@ agent-backend/
   - **身份维度**：Bearer 访问令牌有效 → `user:{user_id}`（同账号跨设备共享配额）；游客 / 令牌非法 → `ip:{真实IP}`。令牌非法时降级为 IP 计数，**不代替鉴权**（401 仍由 `get_current_user` 给出）。
   - **真实 IP**：`X-Forwarded-For` 取**最右侧**一项（由最近受信代理追加，客户端伪造左侧无效），校验并归一化 IPv4 / IPv6 与端口；最右非法或无 XFF 时回落到 `request.client.host`，**不回退读左侧**。部署必须保证边缘代理追加 / 覆盖 XFF。
   - **故障降级**：任何 Redis 异常自动改用进程内固定窗口，接口保持可用；WARNING 日志按 `RATE_LIMIT_FALLBACK_LOG_INTERVAL`（默认 30s）节流，避免刷屏。降级期间配额按实例独立，属于可用性优先的取舍。
-  - **配额**（`RATE_LIMIT_*`，均可环境变量覆盖）：注册 5/min、AI 聊天 20/min、任务启动 10/min、文件上传 10/min、学习测评工作流启动 5/min。
+  - **配额**（`RATE_LIMIT_*`，均可环境变量覆盖）：注册 5/min、AI 聊天（含总控 `/api/agent/chat`）20/min、文件上传 10/min、学习测评工作流启动 5/min。
   - 测试通过 `RATE_LIMIT_BACKEND=memory` 与 `rate_limit.reset()` 隔离，不依赖外部 Redis。原理、时序图与逐条验证见 [`docs/rate-limit-guide.md`](docs/rate-limit-guide.md)。
 - **通用文件上传约定**（`POST /api/files`）：`multipart/form-data`，字段 `file`，**需登录**；可选表单字段 `upload_purpose`（0=普通资源 / 1=用户头像，默认 0）与 `storage_scene`（0=长期 30 天 / 1=短期 2 小时 / 2=只提取内容不存原文件，默认 0）。**文档支持 PDF / DOC / DOCX / TXT，音频支持 MP3 / WAV / OGG / OPUS / M4A / AAC / FLAC / WebM**（均按扩展名白名单 + 文件头校验）；图片（JPG / PNG / WebP / GIF）仅用于头像（`upload_purpose=1`），普通上传不接受图片；其他类型或文件头不符一律 `422`，图片超 2MB（`AVATAR_MAX_BYTES`）或文档 / 音频超 10MB（`FILE_MAX_BYTES`）返回 `413`。**元数据写 `resources` 表，原文件落 MinIO**：对象 key 为 `users/{user_id}/{MD5}{ext}`，`storage_path` 格式 `minio:/{bucket}/{object_key}`；`(file_hash, user_id)` 唯一键实现用户级去重（先查库，数据库唯一键兜底）。仅 `upload_purpose=1` 且为图片时更新 `users.avatar`（库里存 `storage_path`）。对外响应中的 `avatar` 由校验层转成公开读取地址 `/api/files/avatar/{user_id}?v={md5}`（`v` 用于头像更新后失效缓存）。`storage_scene=2` 只写元数据、不上传对象（`storage_path` 为空串）。**文档必传表单字段 `doc_category`（`resume` / `study_material` / `general`），缺失或非法一律 `422`；音频 / 头像忽略该字段并存 `NULL`。** 文档落库后经 `BackgroundTasks` **异步**执行 RAG（解析 → 清洗 → 分块 → DashScope 向量化 → Qdrant 存向量 + MySQL `knowledge_chunks` 存原文），失败只记日志、不影响上传结果。PDF 解析用 PDFium 逐页取文本层，按「图片覆盖率 ≥ 0.5 且有效字符 < 200」判定扫描页，仅对这些页渲染 200 DPI 调火山引擎 `OCRNormal`，再与文本层按页序合并；方案说明见 [`docs/scanned-pdf-ocr.md`](docs/scanned-pdf-ocr.md)。同用户同内容重复上传时若分类相同则直接复用、不重复入库；分类变化则更新 `doc_category`，并以 `replace=True` 先按 `resource_id` 删除旧向量再重灌。响应返回 `{url, md5, size, kind, resource_id, storage_path, expire_time, doc_category, reused}`，`reused` 表示是否复用了已有资源。过期资源由 `resource_cleanup` 每天 03:00 先删 MinIO 对象、再删元数据。
 - **会话与聊天消息约定**：
@@ -356,7 +368,7 @@ agent-backend/
 - **语音面试约定**（火山 RTC AI 面试官）：
   - 复用 `POST /api/interviews/confirm`：确认背景并创建 Interview 后，`VoiceInterviewService.start_voice_chat()` 生成前端入房参数（`voice`：`room_id / user_id / bot_user_id / task_id / token / expire_at / started`）并调用 `StartVoiceChat`；系统提示词取 `interviews.interview_host_prompt`。
   - 绑定关系固定：`TaskId = RoomId = voiceinterview{interview_id}`、`BotId = aiinterviewer{interview_id}`；RTC 应用凭证与音色等配置项见 `.env.example` 的 `VOLC_RTC_*`。
-  - `POST /api/interviews/{interview_id}/voice/finish`：先尽力调用 `StopVoiceChat`，再由前端提交的 `qa_object` / `interview_duration` 落库并置 `status=1`；停止失败不阻断结果保存。
+  - `POST /api/interviews/{interview_id}/voice/finish`：先尽力调用 `StopVoiceChat`，再由前端提交的 `qa_object` / `interview_duration` 落库并置 `status=1`；停止失败不阻断结果保存。返回体带 `session_id`；`INTERVIEW_EVAL_AUTO=true`（默认）时经 `BackgroundTasks` 自动触发 `interview_evaluation_service.evaluate_session_background()` 生成复盘，失败只记日志、不影响面试结果。
   - RTC 未配置或调用失败只记日志（`started=false` / `token=null`），**不得影响面试确认与结果落库**。
 - **学习测评工作流约定**（`/api/learning-workflows`，整组需登录）：
   - 两次请求闭环：`POST /start` 出题（`waiting_answer`）→ `POST /{run_id}/submit` 评分（`completed`）；`GET /{run_id}` 返回状态与完整 `state`。`run_id` 为 UUID，同时也是 LangGraph `thread_id`，按 `user_id` 隔离，越权 / 不存在统一 `404`。
@@ -371,21 +383,29 @@ agent-backend/
   - 模型输出的 JSON 由 `app/services/ai/json_utils.py` 的 `parse_json_object()` 统一解析（截取首个 `{` 到末个 `}`），提示词中的 JSON 示例必须作为静态 `SystemMessage` 传入。
   - Swagger 联调步骤、反向用例与落库核对见 [`docs/learning-workflow-api-guide.md`](docs/learning-workflow-api-guide.md)。
 - **笔记管理约定**（`/api/notes`，整组需登录）：列表按创建时间倒序分页，支持 `note_type` 精确过滤与 `keyword` 在标题 / 正文模糊检索（`%` / `_` 自动转义）；详情 / 更新 / 删除按 `note_id + user_id` 查询，越权统一 `404`。手动创建需指定当前用户的 `session_id`（别人的会话 → `404`），`source_run_id` 由后端生成 UUID 满足唯一约束；更新为局部更新（`exclude_unset`），列表不返回正文 `content`。出参不暴露 `user_id`。
-- **流程总控约定**（`POST /api/agent/tasks/start`，需登录）：
-  - 前端统一入口：传 `agent_name` + `session_id` + `request_text`，由后端决定走工作流还是通用聊天。入参还包含 `select_mode` / `question_count` / `provider` / `request_id` / `request_segments`，按分支各取所需。
-  - 路由策略（`app/services/orchestrator_service.py`）：未登记的 `agent_name` → `404`；`direct=True` 的规则直接启动工作流；否则 `required_keywords` 任一命中 → 直接启动工作流；否则用 fastembed 语义相似度对比规则的 `intent_examples`，最大相似度 `>= intent_threshold` 也启动；仍未命中 → 通用聊天。关键词为双字词，避免「问题 / 话题 / 标题」误命中。
-  - 已登记聊天智能体（`CHAT_AGENT_NAMES`：`note_archiver / interview_evaluator`）没有工作流规则时**直接走通用聊天**，不触发关键词 / 语义判断，仍使用统一聊天提示词；只有既无规则又不在名单内的 `agent_name` 才返回 `404`。
-  - 当前规则：`quiz_generate_workflow -> learning_quiz`（关键词 / 语义命中），`interview_host -> interview_prepare`（`direct=True`），`difficulty_learner -> difficulty_card`（`direct=True`）。学习测评分支显式构造 `LearningWorkflowStartIn` 调用 `learning_workflow.start_learning_workflow()`；面试准备分支调用 `interview_host_workflow.start_interview_prepare()`；知识卡分支调用 `difficulty_card_workflow.start_difficulty_card()`。规则指向未实现的 `workflow_type` → `500`（配置错误）。
-  - **面试前准备约定**（`workflow_type=interview_prepare`，两阶段）：会话必须归属当前用户且 `session_mode=1`（否则 `400`）；取该用户最新未过期的 `doc_category='resume'` 资源（无简历 `404`），按 `knowledge_chunks.chunk_index` 升序拼接正文（无切片 `409`）；`InterviewHostAgent` 一次模型调用同时完成两件事：从简历提取 `target_job / target_level / years_experience / target_skills / project_experience / weak_topics / opening_question`，并从本轮 `request_text` 解析用户明确提出的 `user_stated` 字段。**覆盖顺序（最新输入优先）**：本轮 `user_stated` > `user_profiles`（`updated_at`）与简历（`create_time`）中较新的一方；资料或本轮未提及 / 空值的字段由另一方兜底。`opening_question` / `project_experience` 只取简历提取结果。
-    - **第一阶段**：只生成可编辑的 `background`（七个字段全部为字符串，技能 / 薄弱点用「、」连接，年限格式为「N 年 / 应届/无经验」），写入 `workflow_runs.state_json`，状态 `pending_confirmation`，响应返回 `run_id / status=pending_confirmation / background / resume`，**不返回提示词**。
+- **流程总控约定**（`POST /api/agent/chat`，SSE，需登录；能力列表 `GET /api/agent/capabilities`）：
+  - **唯一入口**：前端只发 `session_id + request_text`，可选 `preferred_agent`（快捷按钮的**一次性**提示）/ `select_mode` / `question_count` / `provider` / `request_id` / `request_segments`。旧入口 `POST /api/agent/tasks/start` 已下线。
+  - **能力注册表**（`app/agent/registry.py`）是「能调什么」的唯一事实来源：每个能力登记房间、类型（`chat / workflow / task`）、触发关键词 / 语义示例与阈值、前置数据、产物类型。`GET /api/agent/capabilities?session_mode=` 按房间下发，供前端渲染快捷按钮。
+  - **三层路由**（`app/services/orchestrator_service.py`）：
+    1. **Tier 0**：`preferred_agent` 已登记、房间与前置数据均满足 → 直接分发；未知 / 房间不符 / 前置不足时**静默忽略**，继续后续路由（快捷按钮是提示，不是命令）。
+    2. **Tier 1**：注册表关键词任一命中 → 直接分发，不调用模型；全部落空后逐能力用 fastembed 与 `examples` 比较，相似度 `>= threshold`（0.65~0.68）命中。
+    3. **Tier 2**：去空白后长度 `>= 10` 且快筛未命中时，调用一次 `FlowControllerAgent` 输出结构化计划（`confidence < 0.6` / JSON 非法 / 模型异常 → 降级）；规划结果再按注册表与前置数据过滤。
+    4. **Tier 3**：兜底 `chat_answer`，走普通聊天。
+  - **前置数据不满足即降级**：面试主考官要求 `session_mode=1` + 最新简历（`doc_category='resume'`）；面试复盘要求 `session_mode=1` + 本会话最近一次已结束（`status=1`）的面试（`REQUIRE_COMPLETED_INTERVIEW`）；笔记要求本会话已有 `completed` 学习测评或已结束面试（`REQUIRE_NOTE_SOURCE`）。不满足的能力不参与快筛，也不会被规划器选中，因此不再对「房间 / 简历 / 来源缺失」直接返回 4xx。
+  - **统一 SSE**（不使用 JSON 信封；该路由不声明 `response_model`）：事件顺序 `meta → agent(start) → delta* / task → agent(done) → done`，失败以 `error` 收尾。`meta` / `done` 带 `trace_id`；任务分支 `meta.message_id=0`，前端以 `task.payload.message_id` 对账。`agent` 载荷为 `{trace_id, from, to, phase, reason}`；`task` 载荷为 `{trace_id, kind, run_id, payload}`，`kind` 取 `quiz / interview_prepare / knowledge_card / interview_evaluation / note`。
+  - 会话校验与路由规划在建立流之前完成，404 / 422 / 429 / 503 仍是标准 JSON 错误信封。会话级调度上下文（`app/services/session_agent_state.py`，Redis `agent:session:{user_id}:{session_id}` TTL 8h，MySQL 兜底）记录最近调度与最近运行 / 面试，供规划器解析「刚才那套题」这类指代。
+  - **面试前准备约定**（能力 `interview_host`，产物 `interview_prepare`，两阶段）：路由前置已保证 `session_mode=1` + 有简历；工作流仍会二次校验会话归属与简历切片（无切片 `409`）。按 `knowledge_chunks.chunk_index` 升序拼接正文；`InterviewHostAgent` 一次模型调用同时完成两件事：从简历提取 `target_job / target_level / years_experience / target_skills / project_experience / weak_topics / opening_question`，并从本轮 `request_text` 解析用户明确提出的 `user_stated` 字段。**覆盖顺序（最新输入优先）**：本轮 `user_stated` > `user_profiles`（`updated_at`）与简历（`create_time`）中较新的一方；资料或本轮未提及 / 空值的字段由另一方兜底。`opening_question` / `project_experience` 只取简历提取结果。
+    - **第一阶段**：只生成可编辑的 `background`（七个字段全部为字符串，技能 / 薄弱点用「、」连接，年限格式为「N 年 / 应届/无经验」），写入 `workflow_runs.state_json`，状态 `pending_confirmation`，以 `task.payload` 返回 `run_id / status=pending_confirmation / background / resume`，**不返回提示词**。
     - **第二阶段** `POST /api/interviews/confirm`（需登录）：入参 `run_id + background`。校验 run 归属 / 类型 / 状态 → 按确认后的 background 重新渲染 `interview_host:interview` 提示词 → 原子抢占 `pending_confirmation → confirming`（同一 run_id 只能确认一次，重复确认 `409`）→ 创建入口 `ChatMessage`（`select_mode=4`，`request_id={run_id}:interview`）与 `Interview`（`qa_object=[]`，`interview_host_prompt` 保存最终提示词）→ 回填 `chat_messages.interview_id` → run 置 `confirmed` 并返回 `interview_id / message_id`。落库失败时 run 置 `failed`，并清理未关联面试的入口消息。
     - 变量提取、覆盖（发生覆盖时）、背景待确认、面试已确认各打一条 INFO 日志。
-  - **难点讲解知识卡约定**（`workflow_type=difficulty_card`，一阶段）：`difficulty_learner` 命中即启动。`prepare_card` 一次模型调用把用户原话（面试会话额外带入最近几轮问答）整理为 `title / topic / summary / points(≤3，含 title+tip)`；绘图与播客提示词都由代码确定性拼接（绘图：竖版信息图、短文案、少图标、禁止漫画分镜；播客：双人口语化对话、不念稿、3 分钟内），不交给模型自由发挥。随后 **Seedream 出图与语音播客并行**（`ThreadPoolExecutor` 两线程，总耗时接近较慢一路）：图片失败即整体失败（`SEEDREAM_*`，缺 Key `503`、接口失败 `502`）；音频是加分项，缺 `PODCAST_TTS_*` 或生成 / 落库失败只记 WARNING，不影响图片。播客走火山「语音播客」WebSocket 二进制协议（`wss://openspeech.bytedance.com/api/v3/sami/podcasttts`，`X-Api-App-Id` / `X-Api-Access-Key` / `X-Api-Resource-Id=volc.service_type.10050`），`action=0` 把卡片文本生成双人对话，下行 361 帧拼接为 MP3，不重试。两份字节分别经 `upload_service_minio.save_generated_image()` / `save_generated_audio()` 永久落 MinIO（`expire_time=NULL`，按 `(user_id, MD5)` 去重，音频只接受 MP3），并写入一条会话消息（`select_mode=1`、`request_id={run_id}:card`、`response_payload={"type":"knowledge_card"}`）：`response_segments` 固定含 `{type:"image"}`，有音频时追加 `{type:"audio"}`。消息只存 `resource_id`，历史读取时由 `message_service` 重新预签名 URL，避免链接过期。出参为 `run_id / status=completed / title / resource_id / image_url / audio_resource_id / audio_url`（后两项可空）。
-  - **混合响应例外**：工作流分支返回统一 JSON 信封；聊天分支复用 `chat_service.prepare_stream()` + `stream_reply()`，返回 `text/event-stream`（事件与 `/stream-chat` 一致）。因此该路由**不设置 `response_class`**（否则 JSON 分支跳过 `response_model` 校验），`response_model` 用按 `workflow_type` 区分的联合类型描述工作流分支，SSE 契约通过 `responses` 在 OpenAPI 中声明。
-  - 双契约限制：工作流分支忽略 `select_mode` / `request_segments`（面试准备会读取 `request_text` 中的明确表述），`request_id` 暂未做幂等（重试会新建 `workflow_runs`）；聊天分支忽略 `question_count` / `provider`（聊天模型走全局配置）。
+  - **难点讲解知识卡约定**（能力 `difficulty_learner`，产物 `knowledge_card`，一阶段）：`prepare_card` 一次模型调用把用户原话（面试会话额外带入最近几轮问答）整理为 `title / topic / summary / points(≤3，含 title+tip)`；绘图与播客提示词都由代码确定性拼接（绘图：竖版信息图、短文案、少图标、禁止漫画分镜；播客：双人口语化对话、不念稿、3 分钟内），不交给模型自由发挥。随后 **Seedream 出图与语音播客并行**（`ThreadPoolExecutor` 两线程，总耗时接近较慢一路）：图片失败即整体失败（`SEEDREAM_*`，缺 Key `503`、接口失败 `502`）；音频是加分项，缺 `PODCAST_TTS_*` 或生成 / 落库失败只记 WARNING，不影响图片。播客走火山「语音播客」WebSocket 二进制协议（`wss://openspeech.bytedance.com/api/v3/sami/podcasttts`，`X-Api-App-Id` / `X-Api-Access-Key` / `X-Api-Resource-Id=volc.service_type.10050`），`action=0` 把卡片文本生成双人对话，下行 361 帧拼接为 MP3，不重试。两份字节分别经 `upload_service_minio.save_generated_image()` / `save_generated_audio()` 永久落 MinIO（`expire_time=NULL`，按 `(user_id, MD5)` 去重，音频只接受 MP3），并写入一条会话消息（`select_mode=1`、`request_id={run_id}:card`、`response_payload={"type":"knowledge_card"}`）：`response_segments` 固定含 `{type:"image"}`，有音频时追加 `{type:"audio"}`。消息只存 `resource_id`，历史读取时由 `message_service` 重新预签名 URL，避免链接过期。`task.payload` 为 `run_id / status=completed / title / resource_id / image_url / audio_resource_id / audio_url`（后两项可空）。
+  - **面试复盘约定**（能力 `interview_evaluator`，产物 `interview_evaluation`）：读取本会话最近一次 `status=1` 且 `qa_object` 非空的面试，用 `interview_evaluator/evaluation` 生效模板 + 静态 JSON 契约生成 `{score, strengths, weaknesses, review}`；消息先以 `status=0` 占位再回写结果，按 `request_id="interview:{interview_id}:evaluation"` 幂等，生成中重复触发返回 `409`，失败置 `status=2` 且不影响面试结果。`response_payload` 存 `{"type":"interview_evaluation", interview_id, score, strengths, weaknesses, review}`，`task.payload` 为 `run_id="interview:{id}" / interview_id / status / score / strengths / weaknesses / review / message_id`，前端据此渲染复盘卡片。
+  - **笔记归档约定**（能力 `note_archiver`，产物 `note`）：优先取本会话最近一次 `completed` 的学习测评，没有测评时退到最近一次已结束的面试；前者经 `save_learning_quiz_note()`、后者经 `note_archive_service.archive_from_interview()` + `save_interview_note()`（`source_run_id="interview:{id}"`、`note_type="interview"`）幂等保存。两类来源都没有时返回 `409`。同时写一条会话消息（`request_id="note:{note_id}"`、正文「已生成笔记「标题」，可在笔记本中查看。」，同笔记幂等）。`task.payload` 为 `run_id / note_id / status / title / message_id`（面试来源的 `run_id` 为 `interview:{id}`）。
+  - **A2A 接力约定**（`app/services/a2a_handoff_service.py`）：信封带 `trace_id / intent / hops / result_ref / alternatives`；缺少 `trace_id` 时由派发服务生成，`hops` 达到 `MAX_HOPS`（2）或指向自身时直接拒绝。派发结果统一为 `{status, from_agent, next_agent, trace_id, hops, result_ref, result, reason, idempotent}`；已完成的派发按 `(user_id, trace_id, next_agent)` 做进程内幂等复用（TTL 1 小时、最多 256 条），pending / failed / rejected 不缓存。
+  - **分支差异**：聊天分支复用 `chat_service.prepare_stream()` + `stream_reply(emit_meta=False)`，总控补充 `trace_id` 与 `agent` 事件；任务分支在线程池同步执行子能力，异常转 SSE `error`。`select_mode` / `request_segments` 只供聊天分支，`question_count` / `provider` 只供出题分支，`request_id` 暂未做幂等（重试会新建 run）。
   - 语义模型在 `main.py` 的 `lifespan` 中用守护线程预热，失败只告警、首次判断时重试，不阻塞启动；关键词命中时不会调用向量模型。
-  - 扩展方式：在 `WORKFLOW_ROUTE_RULES` 增加一条 `WorkflowRouteRule`（`workflow_type` / `required_keywords` / `intent_examples` / `intent_threshold` / 可选 `direct`），并在 `start_task` 中补对应 `workflow_type` 分支。
-  - 路由决策、双分支时序、LangGraph 内部结构与语义兜底细节见 [`docs/orchestrator-workflow-design.md`](docs/orchestrator-workflow-design.md)。
+  - **扩展方式**：在 `CAPABILITIES` 追加 `AgentCapability`（名称 / 房间 / `kind` / 触发词 / 示例 / 前置 / 产物），在 `OrchestratorService._execute_agent()` 补同名分支并返回 `(kind, payload)`；需要前置数据时在 `_requires_met()` 补校验。路由层与事件协议无需改动。
+  - 三层路由、事件协议、调度上下文与失败降级见 [`docs/orchestrator-workflow-design.md`](docs/orchestrator-workflow-design.md)。
 - **用户背景资料约定**（`/api/profiles`，整组需登录）：一人一份（`user_profiles.user_id` 唯一），`user_id` 一律取自令牌，不接受客户端传入，因此只能操作自己的资料。`POST /api/profiles` 创建（已存在 → `409`）；`GET/PUT/DELETE /api/profiles/me` 查询 / 局部更新 / 删除（不存在 → `404`）。字段：`target_job`（≤64）、`years_experience`（0..60）、`target_level`（≤32）、`target_skills` / `weak_topics`（字符串数组，≤20 项、单项 ≤50 字）。出参不含 `user_id`。资料供提示词变量注入使用，删除后注入回退为默认值。
 - **提示词版本管理约定**（`/api/prompt`，整组需登录）：
   - 数据表 `prompt_templates`：`agent_name`、`scene`、`template_type`（1=私有，2=公共）、`template_content`、`variables`（JSON 数组字符串）、`version`、`is_active`、`description`、`created_at`。
@@ -417,7 +437,7 @@ agent-backend/
 - `prompt_templates` 的 `(agent_name, scene, version)` 唯一键兜底版本号；公共通用模板固定作用域 `(common, common)`，与私有模板走同一套逻辑，「单一生效」由仓储层 `SELECT ... FOR UPDATE` 事务行锁保证。
 - `user_profiles` 一人一行（`user_id` 唯一，外键 `users.id` + `ON DELETE CASCADE`），存目标岗位 / 工作年限 / 目标等级 / 已掌握技能 / 薄弱点，供提示词变量注入读取；数组字段用 MySQL `JSON`。基础五项可由前端开场白表单（资料 CRUD 接口）写入，也可由对话后台抽取回填；`updated_at`（`BigInteger` epoch 秒，`server_default` / `onupdate` 均为 `UNIX_TIMESTAMP()`）记录最近一次写入时间，面试准备用它和简历 `resources.create_time` 比较，决定冲突字段以哪一方为准；长期字段 `learning_goal` / `learning_style`（`VARCHAR(255)`）、`interview_focus`（`JSON` 数组）、`long_term_summary`（`TEXT`）只由对话后台自动抽取。后台写入经 `profile_service.create_or_update()` 白名单过滤（允许全部 9 个业务字段，拒绝 `user_id` 等非业务列）。上层只经 `app/db/user_profile_repo.py` 读写。
 - `workflow_runs` 是跨请求工作流实例表：`run_id`（UUID）对外唯一标识，`user_id` / `session_id` 外键 `ON DELETE CASCADE`（会话删除即清理流程），`workflow_type` 标识流程类型（当前为 `learning_quiz` / `interview_prepare` / `difficulty_card`），`status` 取学习测评的 `created / waiting_answer / grading / completed / failed`、面试准备的 `pending_confirmation / confirming / confirmed / failed` 或知识卡的 `generating / completed / failed`，业务快照存 `state_json`（`JSON`，执行现场在 LangGraph checkpoint），失败原因存 `error_message`，完成后写 `completed_at`。上层只经 `app/db/workflow_run_repo.py` 读写，所有查询必须同时带 `run_id + user_id`；状态迁移可用 `claim_status()` 做条件更新，保证并发下只成功一次。
-- `notes` 存学习测评产出的可复习笔记：`user_id` / `session_id` 外键 `ON DELETE CASCADE`，`source_run_id` 记录来源运行（手动创建时由后端生成 UUID），`(user_id, source_run_id)` 唯一保证 A2A 重复派发不重复落库；`content` 为 `MEDIUMTEXT` Markdown 正文，`tags` / `metadata` 为 JSON；ORM 属性用 `metadata_json` 映射数据库列 `metadata`，避开 SQLAlchemy 内部的 `metadata`。上层只经 `app/db/note_repo.py` 读写，所有查询与修改必须带 `user_id`。
+- `notes` 存学习测评 / 模拟面试产出的可复习笔记：`user_id` / `session_id` 外键 `ON DELETE CASCADE`，`source_run_id` 记录来源运行（测评用 `run_id`、面试用 `interview:{id}`，手动创建时由后端生成 UUID），`(user_id, source_run_id)` 唯一保证 A2A 重复派发不重复落库；`content` 为 `MEDIUMTEXT` Markdown 正文，`tags` / `metadata` 为 JSON；ORM 属性用 `metadata_json` 映射数据库列 `metadata`，避开 SQLAlchemy 内部的 `metadata`。上层只经 `app/db/note_repo.py` 读写，所有查询与修改必须带 `user_id`。
 - `chat_messages` 的附件段用 MySQL `JSON` 列存储（`request_segments` / `response_segments`，可为 `NULL`），正文不入 JSON；`reference_sources` 同为可空 `JSON`，只存 `[{chunk_id, score}]`（知识块全文不落消息表，历史回显时按 `chunk_id` 回查）；`response_payload` 同为可空 `JSON`：学习测评出题时存 quiz 数组、评分后清空，知识卡存 `{"type":"knowledge_card"}`，普通聊天为 `NULL`，历史消息接口原样返回。`status` 为 `Integer`（0/1/2），`interview_id` 为可空 `BigInteger`（**不建外键**，避免与 `interviews.message_id` 形成循环依赖）。`interviews.user_id` 必填并建索引，所有详情查询必须同时带 `interview_id` 与 `user_id`；`interviews.interview_host_prompt`（可空 `MEDIUMTEXT`）只保存用户确认背景后重新渲染的主考官提示词，未确认的 run 不写该字段。
 - `resources.doc_category` 为可空 `String(32)`，取值 `resume` / `study_material` / `general`，仅 `resource_type=0` 文档有意义，非文档为 `NULL`。同内容去重命中且分类变化时，由 `app/db/resource_repo.py` 的 `update_doc_category()` 更新，并触发该 `resource_id` 的向量重灌。
 - **RAG 双存储**：Qdrant 集合 `knowledge_chunks` 只存向量与过滤字段（`user_id` / `doc_category` / `file_name` / `chunk_index` / `resource_id`），**不存原文**；原文与统计字段落 MySQL `knowledge_chunks`（`vector_id` / `resource_id` / `chunk_index` / `text` / `char_count`），`vector_id` 即 Qdrant Point id，两边一一对应。`resource_id` 外键级联删除，重灌时按 `resource_id` 先删后插；写入顺序为「先 Qdrant、后 MySQL」，MySQL 失败会尽力回删刚写入的向量。检索走 `rag/retriever.py`：按 `user_id` 隔离、可选 `doc_category` 收窄，分数阈值 0.4，命中后按 `vector_id` 回查原文；对话来源只在 `chat_messages.reference_sources` 存 `chunk_id + score`。

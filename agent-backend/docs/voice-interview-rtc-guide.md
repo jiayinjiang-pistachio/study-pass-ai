@@ -78,7 +78,7 @@ sequenceDiagram
 | 接入点 | 请求 | 关键返回 |
 | --- | --- | --- |
 | 确认并创建面试 | `POST /api/interviews/confirm` | `interview_id`、`voice{app_id, room_id, user_id, bot_user_id, task_id, token, expire_at, started}` |
-| 结束并落库 | `POST /api/interviews/{id}/voice/finish` | `status=1`、`interview_duration`、`qa_count` |
+| 结束并落库 | `POST /api/interviews/{id}/voice/finish` | `status=1`、`session_id`、`interview_duration`、`qa_count`；`INTERVIEW_EVAL_AUTO=true` 时后台自动生成复盘 |
 | 查看结果 | `GET /api/interviews/{id}` | `qa_object`、`interview_duration`、`status` |
 
 > **两套令牌别混用**：业务接口用 JWT（`Authorization: Bearer`）；RTC 入房用 AccessToken（`voice.token`）。二者互不通用。
@@ -409,10 +409,10 @@ curl -s -X POST http://127.0.0.1:8000/api/interviews/123/voice/finish \
   -d '{"qa_object":[{"id":1,"question":"请做一下自我介绍","answer":"我有 5 年 Java 经验","created_at":1762000000}],"interview_duration":120}' | jq
 ```
 
-预期：`voice.started=true`；finish 返回 `status=1`、`qa_count=1`。
+预期：`voice.started=true`；finish 返回 `status=1`、`session_id`、`qa_count=1`。默认 `INTERVIEW_EVAL_AUTO=true` 时，后台会为本次面试生成复盘消息（失败只记日志）。
 具体接口测试直接在 `http://127.0.0.1:8000/docs` 里点也可以，但要注意先登录拿 JWT。
 
-> `run_id` 由第一阶段 `POST /api/agent/tasks/start`（`agent_name=interview_host`）产生，要求会话 `session_mode=1` 且已上传简历。详见[面试准备两阶段流程](interview-host-verification-guide.md)。
+> `run_id` 由第一阶段 `POST /api/agent/chat` 命中面试意图后、从 `task(kind=interview_prepare)` 的 `payload.run_id` 取得，要求会话 `session_mode=1` 且已上传简历。详见[面试准备两阶段流程](interview-host-verification-guide.md)。
 
 ---
 

@@ -1,39 +1,90 @@
-"""业务层：流程总控。
+"""业务层：流程总控（规划 → 分发 → 统一 SSE 事件流）。
 
-按 agent_name 决定本轮走工作流还是通用聊天：
+三层路由，延迟与成本可控：
 
-1. 未登记的 agent_name 直接 404（防止前端拼错被静默当成聊天）；
-2. 关键词快筛命中 → 直接启动对应工作流，不调用向量模型；
-3. 关键词未命中 → 用语义相似度兜底确认规则里的 intent_examples；
-4. 仍未命中 → 返回聊天标记，由路由层复用流式聊天服务。
+1. Tier 0：前端快捷指令 `preferred_agent`，校验房间 / 前置数据后直接分发；
+2. Tier 1：注册表关键词 + fastembed 语义示例快筛，命中即分发，不调用大模型；
+3. Tier 2：仅当消息像任务但快筛未命中时，调用一次 FlowControllerAgent 规划；
+   规划失败 / JSON 非法 / 置信度不足一律降级为普通聊天。
 
-扩展方式：在 WORKFLOW_ROUTE_RULES 增加一条规则，并在 start_task 中补上
-对应 workflow_type 的分支。
+执行层按能力类型分流：聊天复用 chat_service；工作流复用既有
+learning_workflow / interview_host_workflow；一次性任务复用
+difficulty_card_workflow 与 note_archive_service。事件顺序统一为
+meta → agent(start) → delta / task → done（失败以 error 收尾）。
 """
 
 import logging
-from dataclasses import dataclass
+import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from typing import Any
 
 from fastapi import BackgroundTasks, status
+from starlette.concurrency import run_in_threadpool
 
+from ..agent.agents.flow_controller import FlowControllerAgent
+from ..agent.registry import (
+    CHAT_AGENT,
+    DIFFICULTY_AGENT,
+    INTERVIEW_EVALUATOR_AGENT,
+    INTERVIEW_HOST_AGENT,
+    NOTE_AGENT,
+    QUIZ_AGENT,
+    REQUIRE_COMPLETED_INTERVIEW,
+    REQUIRE_INTERVIEW_ROOM,
+    REQUIRE_NOTE_SOURCE,
+    REQUIRE_RESUME,
+    ROOM_INTERVIEW,
+    AgentCapability,
+    capabilities_for_room,
+    get_capability,
+    is_room_allowed,
+)
 from ..core.exceptions import BusinessException, SystemException
+from ..db import (
+    interview_repo,
+    message_repo,
+    resource_repo,
+    session_repo,
+    workflow_run_repo,
+)
+from ..schemas.agent import AgentChatIn
 from ..schemas.chat import StreamChatIn
-from ..schemas.learning_workflow import LearningWorkflowStartIn
-from ..schemas.orchestrator import AgentTaskStartIn
+from ..schemas.learning_workflow import (
+    MAX_QUESTION_COUNT,
+    LearningWorkflowStartIn,
+)
 from . import (
+    chat_service,
     difficulty_card_workflow,
+    interview_evaluation_service,
     interview_host_workflow,
     learning_workflow,
+    note_archive_service,
+    session_agent_state,
 )
 from .a2a_handoff_service import A2AHandoffService
+from .note_service import NoteService
 from .semantic_intent import SemanticIntentClassifier
 
 logger = logging.getLogger(__name__)
 
-QUIZ_AGENT_NAME = "quiz_generate_workflow"
-INTERVIEW_HOST_AGENT_NAME = "interview_host"
-DIFFICULTY_AGENT_NAME = "difficulty_learner"
 STATUS_SCHEDULED = "scheduled"
+RESUME_DOC_CATEGORY = "resume"
+WORKFLOW_TYPE_LEARNING_QUIZ = "learning_quiz"
+STATUS_COMPLETED = "completed"
+
+EVENT_META = "meta"
+EVENT_AGENT = "agent"
+EVENT_TASK = "task"
+EVENT_DONE = "done"
+EVENT_ERROR = "error"
+
+STATUS_MESSAGE_DONE = 1
+# 快筛未命中但消息达到该长度时，才值得调用一次规划模型
+TASK_MIN_CHARS = 10
+# 普通聊天 / 无产物任务的占位 message_id：前端据此知道本轮没有可对账的消息
+NO_MESSAGE_ID = 0
 
 
 def _run_a2a_handoff(envelope: dict, context: dict) -> None:
@@ -45,162 +96,562 @@ def _run_a2a_handoff(envelope: dict, context: dict) -> None:
             "后台 A2A 接力执行失败 | from=%s", envelope.get("from_agent"), exc_info=True
         )
 
-# 已登记但暂未接入工作流的智能体：合法，直接走通用聊天（仍用统一聊天提示词）。
-# 不在此集合且没有工作流规则的 agent_name 仍然 404，避免前端拼错被静默降级。
-CHAT_AGENT_NAMES = frozenset(
-    {
-        "note_archiver",
-        "interview_evaluator",
-    }
-)
+
+@dataclass(frozen=True)
+class PlannedAgent:
+    """计划中的一个执行单元；slots 供出题等能力使用。"""
+
+    name: str
+    slots: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
-class WorkflowRouteRule:
-    """一个智能体到工作流的映射规则。
+class AgentPlan:
+    """一次调度的最终决策；chat 走普通聊天，其余进入 task 事件流。"""
 
-    关键词用双字词，避免「问题 / 话题 / 标题」里的单字误命中；
-    intent_examples 只在关键词全部落空时才参与语义比较。
-    """
+    session: dict
+    trace_id: str
+    tier: int
+    intent: str
+    agents: tuple[PlannedAgent, ...]
+    reason: str = ""
+    confidence: float = 1.0
 
-    workflow_type: str
-    required_keywords: tuple[str, ...]
-    intent_examples: tuple[str, ...]
-    intent_threshold: float = 0.6
-    # 直接分发：agent_name 命中即启动工作流，不做关键词 / 语义判断
-    direct: bool = False
+    @property
+    def is_chat(self) -> bool:
+        return bool(self.agents) and self.agents[0].name == CHAT_AGENT
 
 
-WORKFLOW_ROUTE_RULES: dict[str, WorkflowRouteRule] = {
-    QUIZ_AGENT_NAME: WorkflowRouteRule(
-        workflow_type=learning_workflow.WORKFLOW_TYPE_LEARNING_QUIZ,
-        required_keywords=(
-            "出题",
-            "刷题",
-            "题目",
-            "试题",
-            "练习题",
-            "练习",
-            "测验",
-            "测评",
-            "小测",
-            "面试题",
-            "考考",
-        ),
-        intent_examples=(
-            "帮我出几道练习题",
-            "我想刷题巩固一下",
-            "给我来一套小测验",
-            "测测我对这个知识点的掌握程度",
-            "来几道面试题",
-        ),
-        # 0.6 会把「你好，简单介绍一下你自己」这类问候判成出题（实测 0.61），
-        # 真实出题改写句普遍 ≥ 0.68，故取 0.65 留出余量；短句「考考我…」走关键词。
-        intent_threshold=0.65,
-    ),
-    INTERVIEW_HOST_AGENT_NAME: WorkflowRouteRule(
-        workflow_type=interview_host_workflow.WORKFLOW_TYPE_INTERVIEW_PREPARE,
-        required_keywords=(),
-        intent_examples=(),
-        direct=True,
-    ),
-    DIFFICULTY_AGENT_NAME: WorkflowRouteRule(
-        workflow_type=difficulty_card_workflow.WORKFLOW_TYPE_DIFFICULTY_CARD,
-        required_keywords=(),
-        intent_examples=(),
-        direct=True,
-    ),
-}
+def _get_owned_session(user_id: int, session_id: int) -> dict:
+    """取当前用户的会话；不存在或不属于该用户统一 404。"""
+    session = session_repo.get_for_user(session_id, user_id)
+    if session is None:
+        raise BusinessException(
+            "会话不存在",
+            http_status=status.HTTP_404_NOT_FOUND,
+            detail=f"session_id={session_id} user_id={user_id}",
+        )
+    return session
+
+
+def _recent_history(session_id: int, limit: int = 4) -> list[dict]:
+    """最近几轮已完成对话，供规划器区分「继续」与新任务。"""
+    rows = message_repo.list_recent_completed(session_id, limit)
+    history: list[dict] = []
+    for row in rows:
+        history.append({"role": "user", "content": row.get("request_text") or ""})
+        history.append(
+            {"role": "assistant", "content": row.get("response_text") or ""}
+        )
+    return history[-limit:]
 
 
 class OrchestratorService:
-    """总控：判断走哪个流程，并把入参映射到对应服务。"""
+    """总控：决定本轮能力，并按统一事件协议执行。"""
 
-    def route(
-        self, agent_name: str, request_text: str
-    ) -> WorkflowRouteRule | None:
-        """返回命中的规则；None 表示走通用聊天。未知 agent_name 抛 404。"""
-        rule = WORKFLOW_ROUTE_RULES.get(agent_name)
-        if rule is None:
-            if agent_name in CHAT_AGENT_NAMES:
-                return None
-            raise BusinessException(
-                "智能体不存在",
-                http_status=status.HTTP_404_NOT_FOUND,
-                detail=f"agent_name={agent_name}",
-            )
+    def plan(self, user_id: int, payload: AgentChatIn) -> AgentPlan:
+        """三层路由；会话校验在进入流之前完成，404 仍返回标准 JSON 信封。"""
+        session = _get_owned_session(user_id, payload.session_id)
+        session_mode = session["session_mode"]
+        text = payload.request_text
+        trace_id = uuid.uuid4().hex
 
-        if rule.direct:
-            return rule
-
-        text = request_text.strip()
-        if any(keyword in text for keyword in rule.required_keywords):
-            return rule
-
-        if SemanticIntentClassifier.get().classify_intent(
-            text, rule.intent_examples, rule.intent_threshold
-        ):
+        capability = self._explicit_capability(payload.preferred_agent, user_id, session)
+        if capability is not None:
             logger.info(
-                "关键词未命中，语义意图命中工作流 | agent_name=%s", agent_name
+                "Tier0 显式指令命中 | user_id=%s session_id=%s agent=%s",
+                user_id,
+                session["id"],
+                capability.name,
             )
-            return rule
+            return self._single_plan(session, trace_id, 0, capability, text)
+
+        capability = self._fast_match(text, session_mode, user_id, session)
+        if capability is not None:
+            logger.info(
+                "Tier1 快筛命中 | user_id=%s session_id=%s agent=%s",
+                user_id,
+                session["id"],
+                capability.name,
+            )
+            return self._single_plan(session, trace_id, 1, capability, text)
+
+        if len(text.strip()) >= TASK_MIN_CHARS:
+            planned = self._plan_with_model(user_id, session, text)
+            if planned is not None:
+                logger.info(
+                    "Tier2 规划命中 | user_id=%s session_id=%s intent=%s agents=%s "
+                    "confidence=%s",
+                    user_id,
+                    session["id"],
+                    planned["intent"],
+                    ",".join(item["name"] for item in planned["agents"]),
+                    planned["confidence"],
+                )
+                return AgentPlan(
+                    session=session,
+                    trace_id=trace_id,
+                    tier=2,
+                    intent=planned["intent"],
+                    agents=tuple(
+                        PlannedAgent(name=item["name"], slots=item["slots"])
+                        for item in planned["agents"]
+                    ),
+                    reason=planned["reason"] or "由总控规划器判断",
+                    confidence=planned["confidence"],
+                )
+
+        return AgentPlan(
+            session=session,
+            trace_id=trace_id,
+            tier=3,
+            intent="chat",
+            agents=(PlannedAgent(name=CHAT_AGENT),),
+            reason="未命中任务意图，走普通聊天",
+        )
+
+    # ---------- 路由内部 ----------
+
+    def _explicit_capability(
+        self, preferred: str | None, user_id: int, session: dict
+    ) -> AgentCapability | None:
+        """快捷指令只是提示：未知 / 不适用 / 前置不足时静默忽略。"""
+        capability = get_capability(preferred)
+        if capability is None or capability.kind == "chat":
+            return None
+        if not is_room_allowed(capability, session["session_mode"]):
+            return None
+        if not self._requires_met(capability, user_id, session):
+            return None
+        return capability
+
+    def _fast_match(
+        self, text: str, session_mode: int, user_id: int, session: dict
+    ) -> AgentCapability | None:
+        """关键词优先，全部落空后再逐能力做语义比较。"""
+        candidates = capabilities_for_room(session_mode)
+        for capability in candidates:
+            if not self._requires_met(capability, user_id, session):
+                continue
+            if capability.triggers and any(
+                keyword in text for keyword in capability.triggers
+            ):
+                return capability
+
+        for capability in candidates:
+            if not self._requires_met(capability, user_id, session):
+                continue
+            if capability.examples and SemanticIntentClassifier.get().classify_intent(
+                text, capability.examples, capability.threshold
+            ):
+                return capability
         return None
 
-    def start_task(self, user_id: int, payload: AgentTaskStartIn) -> dict:
-        """启动工作流并返回结果；未命中规则时返回 {"route": "chat"}。"""
-        rule = self.route(payload.agent_name, payload.request_text)
-        if rule is None:
-            return {"route": "chat"}
+    def _requires_met(
+        self, capability: AgentCapability, user_id: int, session: dict
+    ) -> bool:
+        """前置数据校验；未满足的能力不参与路由，避免硬调后 404。"""
+        if (
+            REQUIRE_INTERVIEW_ROOM in capability.requires
+            and session["session_mode"] != ROOM_INTERVIEW
+        ):
+            return False
+        if REQUIRE_RESUME in capability.requires and (
+            resource_repo.get_latest_by_category(user_id, RESUME_DOC_CATEGORY)
+            is None
+        ):
+            return False
+        if REQUIRE_COMPLETED_INTERVIEW in capability.requires and (
+            interview_repo.get_latest_completed_for_session(
+                user_id, session["id"]
+            )
+            is None
+        ):
+            return False
+        if REQUIRE_NOTE_SOURCE in capability.requires and (
+            self._completed_run(user_id, session["id"]) is None
+            and interview_repo.get_latest_completed_for_session(
+                user_id, session["id"]
+            )
+            is None
+        ):
+            return False
+        return True
 
-        if rule.workflow_type == learning_workflow.WORKFLOW_TYPE_LEARNING_QUIZ:
-            # 显式构造：总控入参里的聊天字段不应进入工作流，避免契约被悄悄放大
+    @staticmethod
+    def _completed_run(user_id: int, session_id: int) -> dict | None:
+        """本会话最近一次已完成的学习测评；笔记归档的优先来源。"""
+        return workflow_run_repo.get_latest_for_session(
+            user_id,
+            session_id,
+            workflow_type=WORKFLOW_TYPE_LEARNING_QUIZ,
+            status=STATUS_COMPLETED,
+        )
+
+    def _plan_with_model(
+        self, user_id: int, session: dict, text: str
+    ) -> dict[str, Any] | None:
+        """快筛未命中时调用一次规划器，并再次按注册表 / 前置数据过滤。"""
+        candidates = capabilities_for_room(session["session_mode"])
+        result = FlowControllerAgent().plan(
+            user_id=user_id,
+            session_mode=session["session_mode"],
+            request_text=text,
+            capabilities=candidates,
+            history=_recent_history(session["id"]),
+            state=session_agent_state.get_state(user_id, session["id"]),
+        )
+        if not result:
+            return None
+
+        allowed = {capability.name: capability for capability in candidates}
+        agents: list[dict[str, Any]] = []
+        for item in result["agents"]:
+            capability = allowed.get(item["name"])
+            if capability is None:
+                continue
+            if not self._requires_met(capability, user_id, session):
+                continue
+            agents.append(
+                {"name": capability.name, "slots": item.get("slots") or {}}
+            )
+        if not agents:
+            return None
+        return {**result, "agents": agents}
+
+    @staticmethod
+    def _single_plan(
+        session: dict,
+        trace_id: str,
+        tier: int,
+        capability: AgentCapability,
+        text: str,
+    ) -> AgentPlan:
+        """快筛 / 显式指令命中的单能力计划；出题题量从原话提取。"""
+        slots: dict[str, Any] = {}
+        if capability.name == QUIZ_AGENT:
+            count = learning_workflow.infer_question_count(text)
+            if count is not None:
+                slots["question_count"] = count
+        return AgentPlan(
+            session=session,
+            trace_id=trace_id,
+            tier=tier,
+            intent=capability.returns,
+            agents=(PlannedAgent(name=capability.name, slots=slots),),
+            reason=f"{capability.title}触发",
+        )
+
+    # ---------- 事件流 ----------
+
+    async def stream(
+        self, plan: AgentPlan, user_id: int, payload: AgentChatIn
+    ) -> AsyncIterator[str]:
+        """按计划输出统一 SSE；路由层不再区分 JSON / SSE。"""
+        if plan.is_chat:
+            async for event in self._stream_chat(plan, user_id, payload):
+                yield event
+            return
+        async for event in self._stream_tasks(plan, user_id, payload):
+            yield event
+
+    async def _stream_chat(
+        self, plan: AgentPlan, user_id: int, payload: AgentChatIn
+    ) -> AsyncIterator[str]:
+        """聊天分支：复用 chat_service，meta 由总控补充 trace_id。"""
+        state = await run_in_threadpool(
+            chat_service.prepare_stream,
+            user_id,
+            plan.session["id"],
+            self._chat_payload(payload),
+            trace_id=plan.trace_id,
+        )
+        yield chat_service.sse_event(
+            EVENT_META,
+            {
+                "session_id": plan.session["id"],
+                "message_id": state.message["id"],
+                "request_id": state.message["request_id"],
+                "trace_id": plan.trace_id,
+            },
+        )
+        yield self._agent_event(plan, plan.agents[0].name, "start")
+        async for event in chat_service.stream_reply(state, emit_meta=False):
+            yield event
+
+    async def _stream_tasks(
+        self, plan: AgentPlan, user_id: int, payload: AgentChatIn
+    ) -> AsyncIterator[str]:
+        """任务分支：同步执行子能力，依次下发 agent / task / done。
+
+        任务自身的会话消息由子工作流写入（Phase 1 保持现状），
+        meta 的 message_id 先置 0，前端凭 task.payload 对账。
+        """
+        yield chat_service.sse_event(
+            EVENT_META,
+            {
+                "session_id": plan.session["id"],
+                "message_id": NO_MESSAGE_ID,
+                "request_id": payload.request_id or "",
+                "trace_id": plan.trace_id,
+            },
+        )
+
+        last_message_id = NO_MESSAGE_ID
+        for agent in plan.agents:
+            yield self._agent_event(plan, agent.name, "start")
+            try:
+                kind, result = await run_in_threadpool(
+                    self._execute_agent,
+                    plan,
+                    agent,
+                    user_id,
+                    payload,
+                )
+            except Exception as exc:
+                logger.error(
+                    "子 Agent 执行失败 | trace_id=%s agent=%s",
+                    plan.trace_id,
+                    agent.name,
+                    exc_info=True,
+                )
+                yield self._error_event(exc)
+                return
+
+            message_id = result.get("message_id")
+            if isinstance(message_id, int) and message_id > 0:
+                last_message_id = message_id
+            yield chat_service.sse_event(
+                EVENT_TASK,
+                {
+                    "trace_id": plan.trace_id,
+                    "kind": kind,
+                    "run_id": result.get("run_id"),
+                    "payload": result,
+                },
+            )
+            yield self._agent_event(plan, agent.name, "done")
+
+        yield chat_service.sse_event(
+            EVENT_DONE,
+            {
+                "message_id": last_message_id,
+                "status": STATUS_MESSAGE_DONE,
+                "sources": [],
+                "trace_id": plan.trace_id,
+            },
+        )
+
+    def _execute_agent(
+        self,
+        plan: AgentPlan,
+        agent: PlannedAgent,
+        user_id: int,
+        payload: AgentChatIn,
+    ) -> tuple[str, dict[str, Any]]:
+        """按能力名执行；返回 (task.kind, payload)。"""
+        session_id = plan.session["id"]
+        text = payload.request_text
+
+        if agent.name == QUIZ_AGENT:
             start = LearningWorkflowStartIn(
-                session_id=payload.session_id,
-                request_text=payload.request_text,
-                question_count=payload.question_count,
+                session_id=session_id,
+                request_text=text,
+                question_count=self._question_count(agent, payload),
                 provider=payload.provider,
             )
             result = learning_workflow.start_learning_workflow(user_id, start)
-            return {
-                "route": "workflow",
-                "agent_name": payload.agent_name,
-                "workflow_type": rule.workflow_type,
-                **result,
-            }
-
-        if (
-            rule.workflow_type
-            == interview_host_workflow.WORKFLOW_TYPE_INTERVIEW_PREPARE
-        ):
-            result = interview_host_workflow.start_interview_prepare(
-                user_id, payload.session_id, payload.request_text
+            message = message_repo.get_by_request_id(
+                f"{result['run_id']}:quiz", user_id
             )
-            return {
-                "route": "workflow",
-                "agent_name": payload.agent_name,
-                "workflow_type": rule.workflow_type,
-                **result,
-            }
+            result["message_id"] = message["id"] if message else NO_MESSAGE_ID
+            session_agent_state.record_dispatch(
+                user_id,
+                session_id,
+                agent=agent.name,
+                intent=plan.intent,
+                run_id=result["run_id"],
+                message_id=result["message_id"],
+            )
+            return "quiz", result
 
-        if (
-            rule.workflow_type
-            == difficulty_card_workflow.WORKFLOW_TYPE_DIFFICULTY_CARD
-        ):
+        if agent.name == DIFFICULTY_AGENT:
             result = difficulty_card_workflow.start_difficulty_card(
-                user_id, payload.session_id, payload.request_text
+                user_id, session_id, text
             )
-            return {
-                "route": "workflow",
-                "agent_name": payload.agent_name,
-                "workflow_type": rule.workflow_type,
-                **result,
+            message = message_repo.get_by_request_id(
+                f"{result['run_id']}:card", user_id
+            )
+            result["message_id"] = message["id"] if message else NO_MESSAGE_ID
+            session_agent_state.record_dispatch(
+                user_id,
+                session_id,
+                agent=agent.name,
+                intent=plan.intent,
+                run_id=result["run_id"],
+                message_id=result["message_id"],
+            )
+            return "knowledge_card", result
+
+        if agent.name == INTERVIEW_HOST_AGENT:
+            result = interview_host_workflow.start_interview_prepare(
+                user_id, session_id, text
+            )
+            result["message_id"] = NO_MESSAGE_ID
+            session_agent_state.record_dispatch(
+                user_id,
+                session_id,
+                agent=agent.name,
+                intent=plan.intent,
+                run_id=result["run_id"],
+            )
+            return "interview_prepare", result
+
+        if agent.name == INTERVIEW_EVALUATOR_AGENT:
+            result = interview_evaluation_service.InterviewEvaluationService().evaluate_session(
+                user_id, session_id
+            )
+            session_agent_state.record_dispatch(
+                user_id,
+                session_id,
+                agent=agent.name,
+                intent=plan.intent,
+                interview_id=result["interview_id"],
+                message_id=result["message_id"],
+            )
+            return "interview_evaluation", result
+
+        if agent.name == NOTE_AGENT:
+            # 优先用已完成的测评；没有测评时退到最近一次已结束的面试
+            run_row = self._completed_run(user_id, session_id)
+            interview = None
+            if run_row is None:
+                interview = interview_repo.get_latest_completed_for_session(
+                    user_id, session_id
+                )
+            if run_row is None and interview is None:
+                raise BusinessException(
+                    "当前会话还没有已完成的测评或面试，暂时无法生成笔记",
+                    http_status=status.HTTP_409_CONFLICT,
+                    detail=f"session_id={session_id} user_id={user_id}",
+                )
+
+            if run_row is not None:
+                archive = (
+                    note_archive_service.NoteArchiveService().archive_from_run(
+                        user_id, run_row["run_id"]
+                    )
+                )
+                saved = NoteService().save_learning_quiz_note(
+                    user_id, session_id, run_row["run_id"], archive
+                )
+                run_id = run_row["run_id"]
+            else:
+                archive = (
+                    note_archive_service.NoteArchiveService().archive_from_interview(
+                        user_id, interview["id"]
+                    )
+                )
+                saved = NoteService().save_interview_note(
+                    user_id, session_id, interview["id"], archive
+                )
+                run_id = f"interview:{interview['id']}"
+
+            message_id = self._save_note_message(
+                user_id, session_id, text, saved["note_id"], archive["title"]
+            )
+            result = {
+                "run_id": run_id,
+                "note_id": saved["note_id"],
+                "status": saved["note_status"],
+                "title": archive["title"],
+                "message_id": message_id,
             }
+            session_agent_state.record_dispatch(
+                user_id,
+                session_id,
+                agent=agent.name,
+                intent=plan.intent,
+                completed_run_id=run_row["run_id"] if run_row is not None else None,
+                interview_id=interview["id"] if interview is not None else None,
+                message_id=message_id,
+            )
+            return "note", result
 
         raise SystemException(
-            "工作流配置错误，请联系管理员",
+            "智能体配置错误，请联系管理员",
             http_status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"unsupported workflow_type={rule.workflow_type}",
+            detail=f"unsupported agent={agent.name}",
         )
+
+    @staticmethod
+    def _question_count(agent: PlannedAgent, payload: AgentChatIn) -> int | None:
+        """规划槽位优先；非法值丢弃，交给工作流按原话提取。"""
+        value = agent.slots.get("question_count")
+        if isinstance(value, int) and 1 <= value <= MAX_QUESTION_COUNT:
+            return value
+        return payload.question_count
+
+    @staticmethod
+    def _save_note_message(
+        user_id: int,
+        session_id: int,
+        request_text: str,
+        note_id: int,
+        title: str,
+    ) -> int:
+        """把笔记产物写入会话，历史消息刷新后仍能看到入口；同笔记幂等。"""
+        request_id = f"note:{note_id}"
+        existing = message_repo.get_by_request_id(request_id, user_id)
+        if existing is not None:
+            return existing["id"]
+        message = message_repo.insert(
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "select_mode": 0,
+                "request_id": request_id,
+                "request_text": request_text,
+                "response_text": f"已生成笔记「{title}」，可在笔记本中查看。",
+                "status": STATUS_MESSAGE_DONE,
+            }
+        )
+        return message["id"]
+
+    @staticmethod
+    def _agent_event(plan: AgentPlan, to_agent: str, phase: str) -> str:
+        """调度可观测性事件；前端可据此展示「正在调用 xx 智能体」。"""
+        return chat_service.sse_event(
+            EVENT_AGENT,
+            {
+                "trace_id": plan.trace_id,
+                "from": "flow_controller",
+                "to": to_agent,
+                "phase": phase,
+                "reason": plan.reason,
+            },
+        )
+
+    @staticmethod
+    def _error_event(exc: Exception) -> str:
+        """把子能力异常转成 SSE error；业务异常保留可读文案。"""
+        code = getattr(exc, "http_status", None) or status.HTTP_502_BAD_GATEWAY
+        message = getattr(exc, "message", None) or "任务执行失败，请稍后重试"
+        return chat_service.sse_event(
+            EVENT_ERROR, {"code": int(code), "message": str(message)}
+        )
+
+    @staticmethod
+    def _chat_payload(payload: AgentChatIn) -> StreamChatIn:
+        """总控入参 → 聊天入参；题量 / provider 由聊天分支忽略。"""
+        return StreamChatIn(
+            request_text=payload.request_text,
+            select_mode=payload.select_mode,
+            request_id=payload.request_id,
+            request_segments=payload.request_segments,
+        )
+
+    # ---------- A2A ----------
 
     def dispatch_a2a_handoff(
         self,
@@ -212,17 +663,12 @@ class OrchestratorService:
         state: dict | None = None,
         background_tasks: BackgroundTasks | None = None,
     ) -> dict:
-        """统一 A2A 派发入口：只委托派发服务，不写具体下游业务。
-
-        传入 background_tasks 时把有下一跳的接力转入后台，避免下游模型调用
-        拖慢提交接口；未传时保持同步派发。
-        """
+        """统一 A2A 派发入口：只委托派发服务，不写具体下游业务。"""
         context = {
             "user_id": user_id,
             "run_id": run_id,
             "session_id": session_id,
         }
-        # 上游已有完整快照时直接下传，下游无需再回源数据库
         if state is not None:
             context["state"] = state
 
@@ -231,22 +677,21 @@ class OrchestratorService:
             and isinstance(envelope, dict)
             and envelope.get("next_agent")
         ):
+            # 后台执行前补齐 trace_id，保证调度回执与真正的派发链路可对账
+            envelope = dict(envelope)
+            trace_id = envelope.get("trace_id") or uuid.uuid4().hex
+            envelope["trace_id"] = trace_id
             background_tasks.add_task(_run_a2a_handoff, envelope, context)
             return {
                 "status": STATUS_SCHEDULED,
                 "from_agent": envelope.get("from_agent"),
                 "next_agent": envelope.get("next_agent"),
+                "trace_id": trace_id,
+                "hops": int(envelope.get("hops") or 0),
+                "result_ref": None,
                 "result": None,
                 "reason": "A2A 接力已转入后台执行",
+                "idempotent": False,
             }
 
         return A2AHandoffService().dispatch(envelope, context=context)
-
-    def build_chat_payload(self, payload: AgentTaskStartIn) -> StreamChatIn:
-        """把总控入参映射成聊天入参；question_count / provider 由聊天分支忽略。"""
-        return StreamChatIn(
-            request_text=payload.request_text,
-            select_mode=payload.select_mode,
-            request_id=payload.request_id,
-            request_segments=payload.request_segments,
-        )

@@ -85,7 +85,7 @@ sequenceDiagram
     participant LLM as LLM（DeepSeek）
 
     Note over FE,API: 阶段一 · 面试准备（文本，走总控）
-    FE->>API: POST /api/agent/tasks/start（agent_name=interview_host）
+    FE->>API: POST /api/agent/chat（请求文本命中面试意图）
     API->>DB: 读最新简历切片 + 用户资料
     API->>LLM: 提取目标岗位/职级/年限/技能/项目/薄弱点/开场问题
     API->>DB: workflow_runs(status=pending_confirmation)
@@ -107,6 +107,7 @@ sequenceDiagram
     FE->>API: POST /api/interviews/{id}/voice/finish（qa_object + 时长）
     API->>RTC: StopVoiceChat
     API->>DB: interviews.qa_object / interview_duration / status=1
+    API->>API: 后台生成面试复盘（INTERVIEW_EVAL_AUTO=true，失败只记日志）
     API-->>FE: 保存成功，返回面试间
 ```
 
@@ -116,11 +117,11 @@ sequenceDiagram
 
 ## 4. 阶段一：面试准备（只产出可编辑背景）
 
-入口不是健康检查那类 REST 接口，而是流程总控 `POST /api/agent/tasks/start`，规则表里 `interview_host` 是 `direct=True`，命中即启动工作流。
+入口是流程总控 `POST /api/agent/chat`（SSE）。`interview_host` 要求 `session_mode=1` + 简历，命中后以 `task(kind=interview_prepare)` 返回待确认背景；房间或简历不满足时降级为普通聊天。
 
 ```mermaid
 flowchart TD
-    A["POST /api/agent/tasks/start<br/>agent_name=interview_host"] --> B{"会话属于当前用户<br/>且 session_mode=1？"}
+    A["POST /api/agent/chat<br/>命中面试意图"] --> B{"会话属于当前用户<br/>且 session_mode=1？"}
     B -- 否 --> B1["404 / 400"]
     B -- 是 --> C["取最新 resume 资源<br/>按 chunk_index 拼接正文"]
     C --> D{"简历存在且有切片？"}
@@ -129,7 +130,7 @@ flowchart TD
     E --> F["合并优先级：<br/>本轮表述 > 资料/简历中较新的一方"]
     F --> G["background 7 字段（全字符串）"]
     G --> H["workflow_runs.status=pending_confirmation"]
-    H --> I["返回 run_id + resume + background<br/>不返回提示词、不创建面试"]
+    H --> I["SSE task(kind=interview_prepare)<br/>run_id + resume + background<br/>不返回提示词、不创建面试"]
 ```
 
 要点：
@@ -456,7 +457,7 @@ sequenceDiagram
     API->>DB: 校验 interview_id + user_id
     API->>RTC: StopVoiceChat（失败只记日志）
     API->>DB: 写 qa_object / duration / status=1
-    API-->>FE: {interview_id, status, interview_duration, qa_count}
+    API-->>FE: {interview_id, session_id, status, interview_duration, qa_count}
     FE->>FE: 提示「面试已结束」，返回 /interview
 ```
 
@@ -973,6 +974,7 @@ def finish_interview(self, user_id, interview_id, qa_object, interview_duration)
     )
     return {
         "interview_id": updated["id"],
+        "session_id": updated["session_id"],        # 供自动复盘定位会话
         "status": updated["status"],                # 1 = 已结束
         "interview_duration": updated["interview_duration"],
         "qa_count": len(qa_object),

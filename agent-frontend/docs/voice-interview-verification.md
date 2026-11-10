@@ -124,7 +124,7 @@ pnpm dev          # 默认 5173，代理 /api → http://127.0.0.1:8000
 
 | 验证项 | 结果 |
 | --- | --- |
-| 面试间发送准备要求 | `POST /api/agent/tasks/start` 返回 200，自动弹出「确认面试背景」 |
+| 面试间发送准备要求 | `POST /api/agent/chat` 建立 SSE，收到 `task(kind=interview_prepare)` 后自动弹出「确认面试背景」 |
 | 确认弹窗预填 | 7 个字段全部按简历回填，显示简历 `resume.txt` |
 | 确认并跳转 | `POST /api/interviews/confirm` 200；`interview_id=186`；URL `/interview/voice?interview_id=186` |
 | token 位置 | URL 中无 token，`history.state.voice` 保存 RTC 参数 |
@@ -147,9 +147,9 @@ pnpm dev          # 默认 5173，代理 /api → http://127.0.0.1:8000
 
 | 场景 | 请求 | 关键响应 |
 | --- | --- | --- |
-| 第一阶段：面试准备 | `POST /api/agent/tasks/start`，body `{agent_name:"interview_host", session_id, request_text}` | JSON：`run_id / status=pending_confirmation / background / resume` |
+| 第一阶段：面试准备 | `POST /api/agent/chat`（SSE），body `{session_id, request_text, preferred_agent?}` | `task(kind=interview_prepare)`，payload 含 `run_id / status=pending_confirmation / background / resume`；`meta.message_id=0` |
 | 第二阶段：确认背景 | `POST /api/interviews/confirm`，body `{run_id, background:{target_job, …}}` | `interview_id / session_id / message_id / voice{app_id, room_id, user_id, bot_user_id, task_id, token, expire_at, started}` |
-| 挂断保存 | `POST /api/interviews/{id}/voice/finish`，body `{qa_object:[{id, question, answer, created_at}], interview_duration}` | `interview_id / status / interview_duration / qa_count` |
+| 挂断保存 | `POST /api/interviews/{id}/voice/finish`，body `{qa_object:[{id, question, answer, created_at}], interview_duration}` | `interview_id / session_id / status / interview_duration / qa_count`；默认后台自动生成复盘 |
 | 查看结果 | `GET /api/interviews/{id}` | `status=1 / interview_duration / qa_object` |
 
 前端落点：

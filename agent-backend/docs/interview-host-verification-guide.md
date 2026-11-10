@@ -2,8 +2,9 @@
 
 面向本地联调，验证两阶段流程：
 
-1. `POST /api/agent/tasks/start`（`agent_name=interview_host`）只生成**可编辑背景**，
-   保存到 `workflow_runs.state_json`，返回 `status=pending_confirmation` 与 `run_id`；
+1. `POST /api/agent/chat`（SSE，`request_text` 命中面试意图，或带一次性提示
+   `preferred_agent=interview_host`）只生成**可编辑背景**，保存到 `workflow_runs.state_json`，
+   以 `task(kind=interview_prepare)` 返回 `status=pending_confirmation` 与 `run_id`；
 2. 前端确认（可修改）后调用 `POST /api/interviews/confirm`，后端按确认后的背景
    **重新渲染主考官提示词**，创建入口 `ChatMessage` 与正式 `Interview`，返回 `interview_id`。
 
@@ -16,8 +17,9 @@
 - 入参 / 出参：[`app/schemas/interview_host.py`](../app/schemas/interview_host.py)、
   [`app/schemas/interview.py`](../app/schemas/interview.py)
 
-> `interview_host` 规则为 `direct=True`，`agent_name` 命中即启动第一阶段，
-> 路由决策与 `request_text` 内容无关（但会读取其中的明确表述）。
+> `interview_host` 要求 `session_mode=1` 且已上传简历。房间或简历不满足时，
+> 该能力不参与快筛与规划，本轮自动降级为普通聊天（不会返回 400 / 404）。
+> 命中后仍会读取 `request_text` 中的明确表述。
 
 ## 0. 前置条件
 
@@ -30,9 +32,9 @@ uvicorn app.main:app --reload --reload-exclude 'logs/*' --port 8000
 
 - 打开 `http://127.0.0.1:8000/docs`
 - `.env.dev` 必须配置 `LLM_API_KEY` / `LLM_MODEL`，否则变量提取返回 `503`
-- 简历解析依赖 `DASHSCOPE_API_KEY` + Qdrant；未配置时上传成功但切片为空，第一阶段返回 `409`
+- 简历解析依赖 `DASHSCOPE_API_KEY` + Qdrant；未配置时上传成功但切片为空，第一阶段以 SSE `error(code=409)` 收尾
 - 使用国内镜像下载向量模型时保持 `HF_HUB_DISABLE_XET=1`，否则启动预热会因 Xet 401 失败
-- 若第一阶段响应 `404 提示词模板不存在`，说明 `prompt_templates` 未初始化，执行上面的 `init_prompt.py`
+- 若确认阶段响应 `404 提示词模板不存在`，说明 `prompt_templates` 未初始化，执行上面的 `init_prompt.py`
 
 自动化回归：
 
@@ -51,7 +53,7 @@ pytest tests/test_interview_host.py -v
 {"title": "语音面试联调", "session_mode": 1}
 ```
 
-记下 `data.id` 作为 `session_id`；`session_mode` 必须为 `1`，否则第一阶段返回 `400`。
+记下 `data.id` 作为 `session_id`。`session_mode` 必须为 `1`；否则面试能力不参与路由，本轮降级为普通聊天（不会返回 `400`）。
 
 ### 1.1 可选：配置用户资料
 
@@ -93,47 +95,59 @@ WHERE resource_id = <resource_id> ORDER BY chunk_index ASC;
 
 ## 3. 第一阶段：生成待确认背景
 
-**POST `/api/agent/tasks/start`**
+**POST `/api/agent/chat`**（SSE，建议用 `curl -N`）
 
 ```json
 {
-  "agent_name": "interview_host",
   "session_id": 123,
   "request_text": "开始面试，我想面前端，5 年经验"
 }
 ```
 
-`request_text` 中的明确表述优先级最高；没有明确表述时用「开始面试」这类通用话术即可。
+命中「开始面试 / 模拟面试 / 准备面试 …」等触发词即分发；也可带 `"preferred_agent": "interview_host"`。`request_text` 中的明确表述优先级最高；没有明确表述时用「开始面试」这类通用话术即可。
 
-预期响应（`HTTP 200`）：
+预期响应（`HTTP 200`、`Content-Type: text/event-stream`）：
+
+```text
+event: meta
+data: {"session_id":123,"message_id":0,"request_id":"","trace_id":"..."}
+
+event: agent
+data: {"trace_id":"...","from":"flow_controller","to":"interview_host","phase":"start","reason":"面试主考官触发"}
+
+event: task
+data: {"trace_id":"...","kind":"interview_prepare","run_id":"...","payload":{...}}
+
+event: agent
+data: {"trace_id":"...","from":"flow_controller","to":"interview_host","phase":"done","reason":"..."}
+
+event: done
+data: {"message_id":0,"status":1,"sources":[],"trace_id":"..."}
+```
+
+`task.payload`：
 
 ```json
 {
-  "code": 200,
-  "message": "ok",
-  "data": {
-    "route": "workflow",
-    "agent_name": "interview_host",
-    "workflow_type": "interview_prepare",
-    "session_id": 123,
-    "run_id": "1a9b55fa-b52d-4082-bb1b-c7b407946839",
-    "status": "pending_confirmation",
-    "resume": {
-      "resource_id": 45,
-      "file_name": "resume.pdf",
-      "doc_category": "resume",
-      "create_time": "2026-10-31T17:20:00"
-    },
-    "background": {
-      "target_job": "后端开发工程师",
-      "target_level": "P6",
-      "years_experience": "3 年",
-      "target_skills": "Python、MySQL",
-      "project_experience": "负责订单系统开发。",
-      "weak_topics": "分布式事务",
-      "opening_question": "请介绍你最近负责的那个订单系统项目。"
-    }
-  }
+  "session_id": 123,
+  "run_id": "1a9b55fa-b52d-4082-bb1b-c7b407946839",
+  "status": "pending_confirmation",
+  "resume": {
+    "resource_id": 45,
+    "file_name": "resume.pdf",
+    "doc_category": "resume",
+    "create_time": "2026-10-31T17:20:00"
+  },
+  "background": {
+    "target_job": "后端开发工程师",
+    "target_level": "P6",
+    "years_experience": "3 年",
+    "target_skills": "Python、MySQL",
+    "project_experience": "负责订单系统开发。",
+    "weak_topics": "分布式事务",
+    "opening_question": "请介绍你最近负责的那个订单系统项目。"
+  },
+  "message_id": 0
 }
 ```
 
@@ -201,6 +215,8 @@ WHERE resource_id = <resource_id> ORDER BY chunk_index ASC;
 
 | 检查项 | 预期 |
 | --- | --- |
+| 触发方式 | 关键词 / 语义快筛或 Tier 2 规划命中，或 `preferred_agent`；要求 `session_mode=1` + 简历 |
+| 第一阶段事件 | SSE `task(kind=interview_prepare)`，`payload.status=pending_confirmation`，`message_id=0` |
 | 第一阶段状态 | `status=pending_confirmation`，返回 `run_id`，无 `prompt` / `variables` |
 | 背景字段 | 七个字段齐全且均为字符串，技能 / 薄弱点用「、」连接 |
 | 最新输入优先 | 本轮表述 > 较新的资料/简历 > 另一方兜底；`opening_question` 只取简历 |
@@ -240,13 +256,13 @@ grep -E "面试主考官|面试准备变量覆盖|面试背景待确认|面试�
 
 | 场景 | 操作 | 预期 |
 | --- | --- | --- |
-| 非面试会话 | 第一阶段用 `session_mode=0` 的会话 | `400 当前会话不是面试会话` |
-| 他人会话 | 第一阶段用其他用户的 `session_id` | `404 会话不存在` |
-| 没有简历 | 账号未上传 `doc_category=resume` 的资源 | `404 未找到简历，请先上传简历` |
-| 简历未解析 | 资源存在但 `knowledge_chunks` 无行 | `409 简历内容尚未解析完成，请稍后重试` |
-| 模型配置缺失 | 注释掉 `LLM_API_KEY` 后调用 | `503 面试主考官服务暂不可用` |
-| 模型输出非法 | 重试耗尽仍非 JSON | `502 面试准备失败，请稍后重试` |
-| 模板未初始化 | `prompt_templates` 为空后确认 | `404 提示词模板不存在` |
+| 非面试会话 | `session_mode=0` 的会话发「开始面试」 | 面试能力不参与路由，本轮降级聊天（只有 `delta`，无 `task`） |
+| 他人会话 | 用其他用户的 `session_id` | 建流前 `404 会话不存在`（标准 JSON 信封） |
+| 没有简历 | 账号未上传 `doc_category=resume` 的资源 | 面试能力不参与路由，本轮降级聊天（无 `task`） |
+| 简历未解析 | 资源存在但 `knowledge_chunks` 无行 | SSE `error(code=409)`「简历内容尚未解析完成，请稍后重试」 |
+| 模型配置缺失 | 注释掉 `LLM_API_KEY` 后调用 | SSE `error(code=503)`「面试主考官服务暂不可用」 |
+| 模型输出非法 | 重试耗尽仍非 JSON | SSE `error(code=502)`「面试准备失败，请稍后重试」 |
+| 模板未初始化 | `prompt_templates` 为空后确认 | 确认接口 `404 提示词模板不存在`（REST，非 SSE） |
 | 重复确认 | 同一 `run_id` 再调 confirm | `409 该面试已确认，请勿重复确认` |
 | 确认他人 run | 用其他用户的 `run_id` | `404 面试准备不存在` |
 | 未知 run | 随机 UUID 调 confirm | `404 面试准备不存在` |
@@ -273,15 +289,16 @@ curl -s -X POST "$BASE/api/profiles" -H "Authorization: Bearer $TOKEN" \
 curl -s -X POST "$BASE/api/files" -H "Authorization: Bearer $TOKEN" \
   -F "file=@/绝对路径/resume.pdf" -F "doc_category=resume" | jq
 
-# 第一阶段
-PREPARE=$(curl -s -X POST "$BASE/api/agent/tasks/start" \
+# 第一阶段：SSE 流里取 task 事件的数据行
+RESP=$(curl -sN -X POST "$BASE/api/agent/chat" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d "{\"agent_name\":\"interview_host\",\"session_id\":$SESSION_ID,\"request_text\":\"开始面试\"}")
-echo "$PREPARE" | jq
+  -d "{\"session_id\":$SESSION_ID,\"request_text\":\"开始面试\"}")
+TASK=$(echo "$RESP" | awk '/^event: task/{found=1; next} found && /^data: /{sub(/^data: /,\"\"); print; exit}')
+echo "$TASK" | jq
 
 # 第二阶段：修改背景中的岗位与年限后确认
-BODY=$(echo "$PREPARE" | jq \
-  '{run_id: .data.run_id, background: (.data.background
+BODY=$(echo "$TASK" | jq \
+  '{run_id: .payload.run_id, background: (.payload.background
     | .target_job = "前端开发工程师"
     | .years_experience = "5 年")}')
 curl -s -X POST "$BASE/api/interviews/confirm" \
@@ -299,14 +316,15 @@ sequenceDiagram
     participant DB as MySQL
     participant A as InterviewHostAgent
     participant S as InterviewService
-    F->>O: POST /api/agent/tasks/start (interview_host)
+    F->>O: POST /api/agent/chat（命中面试意图）
     O->>W: start_interview_prepare(user_id, session_id, request_text)
     W->>DB: 校验会话 + 最新 resume + 拼接切片
     W->>A: extract_variables(简历正文, request_text)
     A-->>W: 简历变量 + user_stated
     W->>W: 合并优先级（本轮 > 资料/简历较新一方）
     W->>DB: workflow_runs 写入 state_json.background
-    W-->>F: run_id + status=pending_confirmation + background
+    W-->>O: run_id + status=pending_confirmation + background
+    O-->>F: SSE task(kind=interview_prepare) + done
     F->>S: POST /api/interviews/confirm (run_id, background)
     S->>DB: 校验 run 状态，抢占 pending→confirming
     S->>DB: 读取 interview_host:interview 模板并重新渲染

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { Paperclip, Promotion, UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { UploadFile, UploadInstance } from 'element-plus'
@@ -9,8 +9,6 @@ import { useCurrentChatModule } from '@/composables/useCurrentModule'
 import { useAgentStore } from '@/stores/agent'
 import { useChatStore } from '@/stores/chat'
 import { useConversationStore } from '@/stores/conversation'
-import { AGENTS_BY_MODULE } from '@/types/agent'
-import type { AgentName } from '@/types/agent'
 
 const props = defineProps<{
   /** 工作流 JSON 结果回调；返回 true 表示页面已接管，跳过默认会话刷新 */
@@ -47,7 +45,7 @@ const sending = computed(
   () => sessionId.value !== null && chatStore.isSending(sessionId.value),
 )
 const agentOptions = computed(() =>
-  module.value ? AGENTS_BY_MODULE[module.value] : [],
+  module.value ? agentStore.optionsFor(module.value) : [],
 )
 const selectedAgent = computed(() =>
   module.value ? agentStore.selectedByModule[module.value] : null,
@@ -129,10 +127,19 @@ async function handleSubmit(): Promise<void> {
   }
 }
 
-function handleToggleAgent(name: AgentName): void {
+function handleToggleAgent(name: string): void {
   if (!module.value) return
   agentStore.toggle(module.value, name)
 }
+
+// 切换房间时拉取该房间的能力按钮；失败回退静态配置，不阻断聊天
+watch(
+  module,
+  (current) => {
+    if (current) void agentStore.loadCapabilities(current)
+  },
+  { immediate: true },
+)
 
 async function handleSend(): Promise<void> {
   if (!canSend.value || !module.value) return
@@ -148,8 +155,11 @@ async function handleSend(): Promise<void> {
   draft.value = ''
   resize()
 
+  // 快捷按钮只作为本轮的一次性提示，发送后即清除
+  const preferredAgent = agentStore.consume(currentModule)
+
   try {
-    await chatStore.sendMessage(id, text, agentStore.effective(currentModule), {
+    await chatStore.sendMessage(id, text, preferredAgent, {
       onTaskResult: props.onTaskResult,
     })
   } catch (error) {

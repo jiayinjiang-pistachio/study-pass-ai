@@ -5,6 +5,7 @@
 出图配置缺失（503）。模型 / Seedream / 播客 TTS / MinIO 均用替身，不触达外部服务。
 """
 
+import json
 import struct
 import uuid
 
@@ -12,17 +13,13 @@ import httpx
 from sqlalchemy import select
 
 from app.agent.agents import difficulty_learner
+from app.agent.registry import DIFFICULTY_AGENT, get_capability
 from app.db import message_repo, resource_repo, session_repo, workflow_run_repo
 from app.db.models import WorkflowRun
 from app.db.session import SessionLocal
 from app.services import difficulty_card_workflow, podcast_service
-from app.services.orchestrator_service import (
-    DIFFICULTY_AGENT_NAME,
-    WORKFLOW_ROUTE_RULES,
-    OrchestratorService,
-)
 
-BASE = "/api/agent/tasks/start"
+BASE = "/api/agent/chat"
 
 CARD = {
     "title": "Python GIL",
@@ -99,12 +96,26 @@ def _new_session(user_id: int) -> dict:
     )
 
 
-def test_difficulty_learner_routes_directly() -> None:
-    """difficulty_learner 命中即分发，不经过关键词 / 语义判断。"""
-    rule = OrchestratorService().route(DIFFICULTY_AGENT_NAME, "你好")
+def _sse_event(resp: httpx.Response, name: str) -> dict | None:
+    """从 SSE 响应体取指定事件的 JSON 载荷。"""
+    for block in resp.text.split("\n\n"):
+        event = data = None
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                event = line[len("event: ") :]
+            elif line.startswith("data: "):
+                data = line[len("data: ") :]
+        if event == name and data is not None:
+            return json.loads(data)
+    return None
 
-    assert rule is WORKFLOW_ROUTE_RULES[DIFFICULTY_AGENT_NAME]
-    assert rule.direct is True
+
+def test_difficulty_capability_registered() -> None:
+    """难点学习已登记为 task 能力；必须命中关键词 / 语义 / 显式指令才触发。"""
+    capability = get_capability(DIFFICULTY_AGENT)
+
+    assert capability is not None and capability.kind == "task"
+    assert "知识卡" in capability.triggers
 
 
 def test_image_prompt_is_deterministic() -> None:
@@ -188,16 +199,16 @@ async def test_generate_card_creates_image_message(
         BASE,
         headers=auth_headers,
         json={
-            "agent_name": DIFFICULTY_AGENT_NAME,
+            "preferred_agent": DIFFICULTY_AGENT,
             "session_id": session["id"],
             "request_text": "讲讲 Python GIL",
         },
     )
 
     assert resp.status_code == 200, resp.text
-    data = resp.json()["data"]
-    assert data["route"] == "workflow"
-    assert data["workflow_type"] == "difficulty_card"
+    task = _sse_event(resp, "task")
+    assert task is not None and task["kind"] == "knowledge_card"
+    data = task["payload"]
     assert data["status"] == "completed"
     assert data["title"] == CARD["title"]
     assert data["image_url"] == "http://minio.local/card-asset"
@@ -241,14 +252,14 @@ async def test_podcast_failure_keeps_card_message(
         BASE,
         headers=auth_headers,
         json={
-            "agent_name": DIFFICULTY_AGENT_NAME,
+            "preferred_agent": DIFFICULTY_AGENT,
             "session_id": session["id"],
             "request_text": "讲讲 Python GIL",
         },
     )
 
     assert resp.status_code == 200, resp.text
-    data = resp.json()["data"]
+    data = _sse_event(resp, "task")["payload"]
     assert data["status"] == "completed"
     assert data["audio_resource_id"] is None
     assert data["audio_url"] is None
@@ -273,7 +284,7 @@ async def test_message_history_renews_image_url(
         BASE,
         headers=auth_headers,
         json={
-            "agent_name": DIFFICULTY_AGENT_NAME,
+            "preferred_agent": DIFFICULTY_AGENT,
             "session_id": session["id"],
             "request_text": "讲讲 Python GIL",
         },
@@ -307,7 +318,7 @@ async def test_generate_card_rejects_foreign_session(
         BASE,
         headers=auth_headers,
         json={
-            "agent_name": DIFFICULTY_AGENT_NAME,
+            "preferred_agent": DIFFICULTY_AGENT,
             "session_id": other["id"],
             "request_text": "讲讲 Python GIL",
         },
@@ -337,13 +348,16 @@ async def test_missing_seedream_key_returns_503(
         BASE,
         headers=auth_headers,
         json={
-            "agent_name": DIFFICULTY_AGENT_NAME,
+            "preferred_agent": DIFFICULTY_AGENT,
             "session_id": session["id"],
             "request_text": "讲讲 Python GIL",
         },
     )
 
-    assert resp.status_code == 503, resp.text
+    assert resp.status_code == 200, resp.text
+    error = _sse_event(resp, "error")
+    assert error is not None and error["code"] == 503
+    assert _sse_event(resp, "task") is None
     with SessionLocal() as db:
         runs = db.scalars(
             select(WorkflowRun).where(WorkflowRun.session_id == session["id"])

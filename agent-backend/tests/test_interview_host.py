@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 
 from app.agent.agents import interview_host
+from app.agent.registry import INTERVIEW_HOST_AGENT, get_capability
 from app.db import (
     interview_repo,
     knowledge_chunk_repo,
@@ -26,14 +27,14 @@ from app.db import (
 )
 from app.db.models import KnowledgeChunk
 from app.db.session import SessionLocal
-from app.services import interview_host_workflow, voice_interview_service
-from app.services.orchestrator_service import (
-    INTERVIEW_HOST_AGENT_NAME,
-    WORKFLOW_ROUTE_RULES,
-    OrchestratorService,
+from app.services import (
+    chat_service,
+    interview_host_workflow,
+    orchestrator_service,
+    voice_interview_service,
 )
 
-BASE = "/api/agent/tasks/start"
+BASE = "/api/agent/chat"
 CONFIRM = "/api/interviews/confirm"
 
 EXTRACTED = {
@@ -166,6 +167,48 @@ def _add_chunk(resource_id: int, index: int, text: str) -> None:
         session.commit()
 
 
+def _sse_event(resp: httpx.Response, name: str) -> dict | None:
+    """从 SSE 响应体取指定事件的 JSON 载荷。"""
+    for block in resp.text.split("\n\n"):
+        event = data = None
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                event = line[len("event: ") :]
+            elif line.startswith("data: "):
+                data = line[len("data: ") :]
+        if event == name and data is not None:
+            return json.loads(data)
+    return None
+
+
+def _disable_semantic(monkeypatch) -> None:
+    """快筛语义兜底替身：避免真实 fastembed 把降级用例误判为出题等任务。"""
+
+    class _NoMatch:
+        def classify_intent(self, _text, _examples, _threshold=0.6) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        orchestrator_service.SemanticIntentClassifier,
+        "get",
+        classmethod(lambda _cls: _NoMatch()),
+    )
+
+
+def _patch_chat_chain(monkeypatch, text: str = "好的") -> None:
+    """聊天分支替身：避免降级聊天时触达真实模型。"""
+
+    class _FakeChain:
+        async def astream(self, _context: dict):
+            yield text
+
+    monkeypatch.setattr(
+        chat_service.prompt_layer,
+        "build_chat_chain",
+        lambda *args, **kwargs: _FakeChain(),
+    )
+
+
 async def _prepare(
     client: httpx.AsyncClient,
     headers: dict,
@@ -173,7 +216,7 @@ async def _prepare(
     monkeypatch,
     request_text: str = "开始面试",
 ) -> tuple[dict, dict]:
-    """跑完第一阶段，返回 (会话, 响应 data)。"""
+    """跑完第一阶段，返回 (会话, task 事件载荷)。"""
     _patch_model(monkeypatch)
     session = _interview_session(user_id)
     _add_resume(user_id, ["项目经历：订单系统，技术栈 Python、MySQL。"])
@@ -181,21 +224,23 @@ async def _prepare(
         BASE,
         headers=headers,
         json={
-            "agent_name": INTERVIEW_HOST_AGENT_NAME,
+            "preferred_agent": INTERVIEW_HOST_AGENT,
             "session_id": session["id"],
             "request_text": request_text,
         },
     )
     assert resp.status_code == 200, resp.text
-    return session, resp.json()["data"]
+    task = _sse_event(resp, "task")
+    assert task is not None and task["kind"] == "interview_prepare"
+    return session, task["payload"]
 
 
-def test_interview_host_routes_directly() -> None:
-    """interview_host 命中即分发，不经过关键词 / 语义判断。"""
-    rule = OrchestratorService().route(INTERVIEW_HOST_AGENT_NAME, "你好")
+def test_interview_host_capability_registered() -> None:
+    """面试主考官能力已登记；取消默认触发，必须命中关键词 / 显式指令。"""
+    capability = get_capability(INTERVIEW_HOST_AGENT)
 
-    assert rule is WORKFLOW_ROUTE_RULES[INTERVIEW_HOST_AGENT_NAME]
-    assert rule.direct is True
+    assert capability is not None and capability.kind == "workflow"
+    assert "开始面试" in capability.triggers
 
 
 def test_resume_chunks_joined_in_order(auth_user: dict) -> None:
@@ -225,16 +270,16 @@ async def test_prepare_returns_pending_background(
         BASE,
         headers=auth_headers,
         json={
-            "agent_name": INTERVIEW_HOST_AGENT_NAME,
+            "preferred_agent": INTERVIEW_HOST_AGENT,
             "session_id": session["id"],
             "request_text": "开始面试",
         },
     )
 
     assert resp.status_code == 200, resp.text
-    data = resp.json()["data"]
-    assert data["route"] == "workflow"
-    assert data["workflow_type"] == "interview_prepare"
+    task = _sse_event(resp, "task")
+    assert task is not None and task["kind"] == "interview_prepare"
+    data = task["payload"]
     assert data["session_id"] == session["id"]
     assert data["status"] == "pending_confirmation"
     assert data["run_id"]
@@ -277,14 +322,14 @@ async def test_user_profile_overrides_resume_extraction(
         BASE,
         headers=auth_headers,
         json={
-            "agent_name": INTERVIEW_HOST_AGENT_NAME,
+            "preferred_agent": INTERVIEW_HOST_AGENT,
             "session_id": session["id"],
             "request_text": "开始面试",
         },
     )
 
     assert resp.status_code == 200, resp.text
-    data = resp.json()["data"]
+    data = _sse_event(resp, "task")["payload"]
     assert data["background"] == {
         "target_job": "前端开发工程师",
         "target_level": "P7",
@@ -319,14 +364,14 @@ async def test_empty_profile_fields_fall_back_to_resume(
         BASE,
         headers=auth_headers,
         json={
-            "agent_name": INTERVIEW_HOST_AGENT_NAME,
+            "preferred_agent": INTERVIEW_HOST_AGENT,
             "session_id": session["id"],
             "request_text": "开始面试",
         },
     )
 
     assert resp.status_code == 200, resp.text
-    background = resp.json()["data"]["background"]
+    background = _sse_event(resp, "task")["payload"]["background"]
     assert background["target_job"] == "前端开发工程师"
     assert background["target_level"] == EXTRACTED["target_level"]
     assert background["years_experience"] == "3 年"
@@ -360,14 +405,14 @@ async def test_resume_newer_than_profile_wins(
         BASE,
         headers=auth_headers,
         json={
-            "agent_name": INTERVIEW_HOST_AGENT_NAME,
+            "preferred_agent": INTERVIEW_HOST_AGENT,
             "session_id": session["id"],
             "request_text": "开始面试",
         },
     )
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["data"]["background"] == EXPECTED_BACKGROUND
+    assert _sse_event(resp, "task")["payload"]["background"] == EXPECTED_BACKGROUND
 
 
 async def test_chat_statement_overrides_profile_and_resume(
@@ -396,14 +441,14 @@ async def test_chat_statement_overrides_profile_and_resume(
         BASE,
         headers=auth_headers,
         json={
-            "agent_name": INTERVIEW_HOST_AGENT_NAME,
+            "preferred_agent": INTERVIEW_HOST_AGENT,
             "session_id": session["id"],
             "request_text": "我想面前端，5 年经验，P7，重点考察性能优化",
         },
     )
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["data"]["background"] == {
+    assert _sse_event(resp, "task")["payload"]["background"] == {
         "target_job": STATED["target_job"],
         "target_level": STATED["target_level"],
         "years_experience": "5 年",
@@ -415,22 +460,30 @@ async def test_chat_statement_overrides_profile_and_resume(
 
 
 async def test_prepare_requires_interview_session(
-    client: httpx.AsyncClient, auth_user: dict, auth_headers: dict
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
 ) -> None:
-    """非面试模式会话 → 400。"""
+    """非面试模式会话：能力被前置数据过滤，降级普通聊天且不启动工作流。"""
+    _patch_chat_chain(monkeypatch)
+    _disable_semantic(monkeypatch)
     session = _interview_session(auth_user["id"], session_mode=0)
 
     resp = await client.post(
         BASE,
         headers=auth_headers,
         json={
-            "agent_name": INTERVIEW_HOST_AGENT_NAME,
+            "preferred_agent": INTERVIEW_HOST_AGENT,
             "session_id": session["id"],
             "request_text": "开始面试",
         },
     )
 
-    assert resp.status_code == 400
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert "event: delta" in resp.text
+    assert _sse_event(resp, "task") is None
 
 
 async def test_prepare_rejects_foreign_session(
@@ -446,7 +499,7 @@ async def test_prepare_rejects_foreign_session(
         BASE,
         headers=auth_headers,
         json={
-            "agent_name": INTERVIEW_HOST_AGENT_NAME,
+            "preferred_agent": INTERVIEW_HOST_AGENT,
             "session_id": session["id"],
             "request_text": "开始面试",
         },
@@ -456,28 +509,34 @@ async def test_prepare_rejects_foreign_session(
 
 
 async def test_prepare_requires_resume(
-    client: httpx.AsyncClient, auth_user: dict, auth_headers: dict
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
 ) -> None:
-    """没有简历资源 → 404。"""
+    """没有简历资源：能力被前置数据过滤，降级普通聊天。"""
+    _patch_chat_chain(monkeypatch)
     session = _interview_session(auth_user["id"])
 
     resp = await client.post(
         BASE,
         headers=auth_headers,
         json={
-            "agent_name": INTERVIEW_HOST_AGENT_NAME,
+            "preferred_agent": INTERVIEW_HOST_AGENT,
             "session_id": session["id"],
             "request_text": "开始面试",
         },
     )
 
-    assert resp.status_code == 404
+    assert resp.status_code == 200, resp.text
+    assert "event: delta" in resp.text
+    assert _sse_event(resp, "task") is None
 
 
 async def test_prepare_rejects_unparsed_resume(
     client: httpx.AsyncClient, auth_user: dict, auth_headers: dict
 ) -> None:
-    """简历资源存在但没有切片（尚未解析）→ 409。"""
+    """简历资源存在但没有切片（尚未解析）→ SSE error 409。"""
     session = _interview_session(auth_user["id"])
     _add_resume(auth_user["id"])
 
@@ -485,13 +544,16 @@ async def test_prepare_rejects_unparsed_resume(
         BASE,
         headers=auth_headers,
         json={
-            "agent_name": INTERVIEW_HOST_AGENT_NAME,
+            "preferred_agent": INTERVIEW_HOST_AGENT,
             "session_id": session["id"],
             "request_text": "开始面试",
         },
     )
 
-    assert resp.status_code == 409
+    assert resp.status_code == 200, resp.text
+    error = _sse_event(resp, "error")
+    assert error is not None and error["code"] == 409
+    assert _sse_event(resp, "task") is None
 
 
 async def test_confirm_creates_interview_message_and_prompt(
