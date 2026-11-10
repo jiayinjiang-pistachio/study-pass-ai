@@ -183,25 +183,29 @@ async function handleSend(): Promise<void> {
         @keydown.enter.exact.prevent="handleSend"
       ></textarea>
 
-      <div v-if="agentOptions.length" class="chat-input__agents">
-        <button
-          v-for="option in agentOptions"
-          :key="option.name"
-          type="button"
-          class="chat-input__agent"
-          :class="{ 'is-active': selectedAgent === option.name }"
-          :aria-pressed="selectedAgent === option.name"
-          :disabled="sending"
-          @click="handleToggleAgent(option.name)"
+      <div class="chat-input__toolbar">
+        <el-icon
+          class="chat-input__attach"
+          title="上传附件"
+          @click="handleAttach"
         >
-          {{ option.label }}
-        </button>
-      </div>
-
-      <div class="chat-input__actions">
-        <el-icon class="chat-input__attach" title="上传附件" @click="handleAttach">
           <Paperclip />
         </el-icon>
+
+        <div v-if="agentOptions.length" class="chat-input__agents">
+          <button
+            v-for="option in agentOptions"
+            :key="option.name"
+            type="button"
+            class="chat-input__agent"
+            :class="{ 'is-active': selectedAgent === option.name }"
+            :aria-pressed="selectedAgent === option.name"
+            :disabled="sending"
+            @click="handleToggleAgent(option.name)"
+          >
+            {{ option.label }}
+          </button>
+        </div>
 
         <button
           type="button"
@@ -289,7 +293,7 @@ async function handleSend(): Promise<void> {
   &__box {
     max-width: var(--content-max-width);
     margin: 0 auto;
-    padding: 14px 16px 10px;
+    padding: 12px 16px 8px;
     border: 1px solid #e3e3e3;
     border-radius: 14px;
     background: #fff;
@@ -319,20 +323,37 @@ async function handleSend(): Promise<void> {
     }
   }
 
+  // 附件按钮、能力标签、发送按钮共用一行，压缩输入区高度
+  &__toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+  }
+
+  // 标签横向滚动而不换行，避免能力较多时把输入区撑高
   &__agents {
     display: flex;
-    flex-wrap: wrap;
+    flex: 1;
     gap: 8px;
-    margin-top: 10px;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar {
+      display: none;
+    }
   }
 
   &__agent {
+    flex: none;
     padding: 4px 12px;
     border: 1px solid var(--color-border);
     border-radius: var(--radius-pill);
     background: var(--color-surface);
     font-size: 12px;
     line-height: 1.6;
+    white-space: nowrap;
     color: var(--color-text-secondary);
     cursor: pointer;
     transition:
@@ -357,14 +378,8 @@ async function handleSend(): Promise<void> {
     }
   }
 
-  &__actions {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-top: 8px;
-  }
-
   &__attach {
+    flex: none;
     font-size: 20px;
     color: var(--color-text-muted);
     cursor: pointer;
@@ -375,11 +390,13 @@ async function handleSend(): Promise<void> {
   }
 
   &__send {
+    flex: none;
     display: flex;
     align-items: center;
     justify-content: center;
     width: 36px;
     height: 36px;
+    margin-left: auto;
     border: none;
     border-radius: 50%;
     background: var(--color-brand);

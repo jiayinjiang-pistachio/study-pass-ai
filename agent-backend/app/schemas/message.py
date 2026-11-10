@@ -29,6 +29,17 @@ class SourceOut(BaseModel):
     text: str = Field(..., description="片段原文；片段已删除时为提示文案")
 
 
+class ActivityOut(BaseModel):
+    """总控执行时间轴节点快照（status 已归一为前端展示态）。"""
+
+    agent: str = Field(..., description="执行能力名或 flow_controller")
+    node: str = Field(..., description="节点 ID")
+    title: str = Field(..., description="节点展示文案")
+    status: Literal["running", "done", "failed"] = Field(..., description="节点状态")
+    detail: str | None = Field(None, description="节点补充说明")
+    error: str | None = Field(None, description="失败原因；仅 failed 时有值")
+
+
 class MessageOut(BaseModel):
     """单条聊天记录：一问一答 + 附件 + 状态/面试关联 + 参考来源。"""
 
@@ -54,6 +65,9 @@ class MessageOut(BaseModel):
     sources: list[SourceOut] = Field(
         default_factory=list,
         description="回答参考的知识库片段（按 reference_sources 回查重建）",
+    )
+    activity: list[ActivityOut] = Field(
+        default_factory=list, description="总控执行时间轴节点快照"
     )
     status: int = Field(..., description="消息状态：0=生成中，1=完成，2=失败")
     interview_id: int | None = Field(

@@ -18,7 +18,6 @@ function emptyBackground(): InterviewBackground {
     targetSkills: '',
     projectExperience: '',
     weakTopics: '',
-    openingQuestion: '',
   }
 }
 
@@ -60,6 +59,8 @@ async function handleConfirm(): Promise<void> {
     if (sessionId) {
       try {
         await chatStore.refresh(sessionId)
+        // 刷新会丢弃本地临时行，把面试准备的执行时间轴挂回新入口消息
+        chatStore.attachInterviewActivity(sessionId, runId)
       } catch {
         // 刷新失败不影响面试创建，重新进入会话后可看到入口消息
       }
@@ -173,14 +174,6 @@ function handleCancel(): void {
             :rows="2"
             maxlength="1000"
             placeholder="多个薄弱点用「、」分隔"
-          />
-        </el-form-item>
-        <el-form-item label="面试开场问题">
-          <el-input
-            v-model="background.openingQuestion"
-            type="textarea"
-            :rows="2"
-            maxlength="1000"
           />
         </el-form-item>
       </el-form>

@@ -19,6 +19,7 @@ import type { IRTCEngine } from '@volcengine/rtc'
 import { finishVoiceInterview } from '@/api/interview'
 import type { VoiceRoom } from '@/types/chat'
 import { ModuleKey } from '@/types/conversation'
+import { useChatStore } from '@/stores/chat'
 import { useAutoScroll } from '@/composables/useAutoScroll'
 import {
   applySubtitleItems,
@@ -37,6 +38,7 @@ type VoicePageStatus = 'preparing' | 'joining' | 'connected' | 'finished' | 'err
 
 const route = useRoute()
 const router = useRouter()
+const chatStore = useChatStore()
 
 const interviewId = computed(() => {
   const raw = route.query.interview_id
@@ -303,7 +305,7 @@ async function handleHangUp(): Promise<void> {
 
   try {
     if (currentInterviewId) {
-      await finishVoiceInterview(currentInterviewId, {
+      const result = await finishVoiceInterview(currentInterviewId, {
         qaObject,
         interviewDuration: duration,
       })
@@ -313,6 +315,13 @@ async function handleHangUp(): Promise<void> {
         duration,
       })
       ElMessage.success('面试已结束')
+      // 自动复盘在后台生成，轮询刷新会话直到复盘卡片可用
+      if (result.sessionId) {
+        void chatStore.waitForInterviewEvaluation(
+          result.sessionId,
+          currentInterviewId,
+        )
+      }
     }
   } catch (error) {
     // 请求层已统一提示错误；本地资源已释放，这里只补充说明

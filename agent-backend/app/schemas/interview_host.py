@@ -28,7 +28,6 @@ class InterviewBackground(BaseModel):
     target_skills: EditableText = Field("", description="已掌握技能，用「、」分隔")
     project_experience: EditableText = Field("", description="代表性项目经历")
     weak_topics: EditableText = Field("", description="薄弱点，用「、」分隔")
-    opening_question: EditableText = Field("", description="面试开场问题")
 
 
 class InterviewPrepareOut(BaseModel):

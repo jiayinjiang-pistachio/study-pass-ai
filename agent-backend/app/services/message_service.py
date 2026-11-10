@@ -71,6 +71,13 @@ def _enrich_segments(
     return segments
 
 
+def _activity(value: object) -> list[dict]:
+    """时间轴快照只接受数组；历史脏数据统一按空数组返回。"""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
 def _reference_refs(value: object) -> list[dict]:
     """reference_sources 只接受 [{chunk_id, score}]；无有效 chunk_id 的项跳过。"""
     if not isinstance(value, list):
@@ -136,6 +143,7 @@ def _to_out(
             message.get("response_segments"), resources
         ),
         "response_payload": message.get("response_payload"),
+        "activity": _activity(message.get("activity")),
         "status": message["status"],
         "interview_id": message.get("interview_id"),
         "created_at": message["created_at"],

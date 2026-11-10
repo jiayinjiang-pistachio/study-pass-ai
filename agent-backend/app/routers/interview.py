@@ -52,6 +52,10 @@ def finish_voice_interview(
     )
     # 自动复盘失败只记日志，不影响面试结束结果
     if config.INTERVIEW_EVAL_AUTO:
+        # 先同步落一条占位消息，避免后台任务与前端回聊天页刷新产生竞态
+        interview_evaluation_service.ensure_pending_message(
+            current_user["id"], result["session_id"]
+        )
         background_tasks.add_task(
             interview_evaluation_service.evaluate_session_background,
             current_user["id"],

@@ -1,6 +1,8 @@
 import { ApiError, handleAuthExpired, refreshAccessToken, request } from './request'
 import type { PageResult } from '@/types/api'
+import { AgentActivityStatus } from '@/types/chat'
 import type {
+  AgentActivityNode,
   ChatMessage,
   InterviewBackground,
   InterviewEvaluation,
@@ -40,6 +42,7 @@ interface RawMessage {
   request_segments?: unknown
   response_segments?: unknown
   response_payload?: unknown
+  activity?: unknown
   sources?: unknown
   status?: number | null
   interview_id?: number | string | null
@@ -133,6 +136,43 @@ function toSources(value: unknown): MessageSource[] {
     .filter((source): source is MessageSource => source !== null)
 }
 
+function toActivityStatus(
+  value: unknown,
+): AgentActivityNode['status'] | null {
+  if (
+    value === AgentActivityStatus.Running ||
+    value === AgentActivityStatus.Done ||
+    value === AgentActivityStatus.Failed
+  ) {
+    return value
+  }
+  return null
+}
+
+/** 执行时间轴节点：只接受契约字段，缺 node / agent / status 的脏数据跳过 */
+function toActivityNode(value: unknown): AgentActivityNode | null {
+  if (!isRecord(value)) return null
+  const node = typeof value.node === 'string' ? value.node : ''
+  const agent = typeof value.agent === 'string' ? value.agent : ''
+  const status = toActivityStatus(value.status)
+  if (!node || !agent || !status) return null
+  return {
+    node,
+    agent,
+    title: typeof value.title === 'string' ? value.title : '',
+    status,
+    detail: typeof value.detail === 'string' ? value.detail : null,
+    error: typeof value.error === 'string' ? value.error : null,
+  }
+}
+
+function toActivity(value: unknown): AgentActivityNode[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map(toActivityNode)
+    .filter((node): node is AgentActivityNode => node !== null)
+}
+
 function toPayloadType(
   value: unknown,
 ): ChatMessage['payloadType'] {
@@ -181,6 +221,7 @@ function toMessage(raw: RawMessage): ChatMessage {
     sources: toSources(raw.sources),
     status,
     responsePayload: quiz.length ? quiz : null,
+    activity: toActivity(raw.activity),
     payloadType: toPayloadType(raw.response_payload),
     interviewEvaluation: toInterviewEvaluation(raw.response_payload),
     interviewId: toNumber(raw.interview_id) || null,
@@ -446,9 +487,23 @@ export interface AgentStepInfo {
   reason: string
 }
 
+/** 节点进度事件：后端 step 的原始状态，由 store 映射为时间轴节点 */
+export interface AgentStepEvent {
+  traceId: string
+  agent: string
+  node: string
+  title: string
+  status: 'start' | 'done' | 'failed'
+  detail: string | null
+  error: string | null
+}
+
 export interface AgentStreamHandlers extends StreamChatHandlers {
   onAgent?: (step: AgentStepInfo) => void
+  onStep?: (step: AgentStepEvent) => void
   onTask?: (task: AgentTaskResult) => void
+  /** 流以错误收尾：供调用方标记失败节点与错误文案 */
+  onError?: (message: string) => void
 }
 
 function toText(value: unknown): string {
@@ -465,7 +520,6 @@ function toInterviewBackground(raw: unknown): InterviewBackground {
     targetSkills: toText(source.target_skills),
     projectExperience: toText(source.project_experience),
     weakTopics: toText(source.weak_topics),
-    openingQuestion: toText(source.opening_question),
   }
 }
 
@@ -608,6 +662,21 @@ async function consumeAgentStream(
         phase: toText(parsed.phase),
         reason: toText(parsed.reason),
       })
+    } else if (event === 'step') {
+      handlers.onStep?.({
+        traceId: toText(parsed.trace_id),
+        agent: toText(parsed.agent),
+        node: toText(parsed.node),
+        title: toText(parsed.title),
+        status:
+          parsed.status === 'failed'
+            ? 'failed'
+            : parsed.status === 'done'
+              ? 'done'
+              : 'start',
+        detail: typeof parsed.detail === 'string' ? parsed.detail : null,
+        error: typeof parsed.error === 'string' ? parsed.error : null,
+      })
     } else if (event === 'delta') {
       if (typeof parsed.content === 'string' && parsed.content) {
         handlers.onDelta?.(parsed.content)
@@ -632,8 +701,15 @@ async function consumeAgentStream(
     }
   })
 
-  if (errorMessage) throw new ApiError(errorMessage, 502)
-  if (!finished) throw new ApiError('连接中断，请稍后重试', -1)
+  if (errorMessage) {
+    handlers.onError?.(errorMessage)
+    throw new ApiError(errorMessage, 502)
+  }
+  if (!finished) {
+    const message = '连接中断，请稍后重试'
+    handlers.onError?.(message)
+    throw new ApiError(message, -1)
+  }
 }
 
 /**

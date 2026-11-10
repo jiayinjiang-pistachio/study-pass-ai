@@ -25,6 +25,7 @@ from ..core.exceptions import BusinessException, SystemException
 from ..core.retry import RetryExhaustedError
 from ..db import message_repo, session_repo, workflow_run_repo
 from . import podcast_service, seedream_service, upload_service_minio
+from .agent_progress import STEP_DONE, STEP_START, StepCallback, emit_step
 
 logger = logging.getLogger(__name__)
 
@@ -182,9 +183,14 @@ def _save_card_message(
 
 
 def start_difficulty_card(
-    user_id: int, session_id: int, request_text: str
+    user_id: int,
+    session_id: int,
+    request_text: str,
+    *,
+    on_step: StepCallback | None = None,
 ) -> dict:
     """执行知识卡流水线；返回 run_id、状态与知识卡基础信息。"""
+    emit_step(on_step, "prepare_card", "整理知识卡文案", STEP_START)
     session = session_repo.get_for_user(session_id, user_id)
     if session is None:
         raise BusinessException(
@@ -217,7 +223,12 @@ def start_difficulty_card(
         card = DifficultyLearnerAgent().prepare_card(
             user_id, request_text, qa_context
         )
+        emit_step(
+            on_step, "prepare_card", "整理知识卡文案", STEP_DONE, detail=card["title"]
+        )
         image_prompt = build_image_prompt(card)
+
+        emit_step(on_step, "generate_media", "生成插图与播客", STEP_START)
         # 出图与出音频互不依赖，并行执行；总耗时接近较慢的一路
         with ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="knowledge-card"
@@ -229,7 +240,15 @@ def start_difficulty_card(
             # 图片是主产物：失败直接抛出；音频内部已兜底，不会抛
             image_bytes = image_future.result()
             podcast = audio_future.result()
+        emit_step(
+            on_step,
+            "generate_media",
+            "生成插图与播客",
+            STEP_DONE,
+            detail="插图已生成，播客已生成" if podcast is not None else "插图已生成，播客未生成",
+        )
 
+        emit_step(on_step, "save_card", "保存知识卡", STEP_START)
         saved = upload_service_minio.save_generated_image(
             user_id,
             image_bytes,
@@ -254,6 +273,7 @@ def start_difficulty_card(
     except Exception as exc:
         _mark_failed(run_id, state, exc, node="generate_card")
         raise _as_system_error(exc) from exc
+    emit_step(on_step, "save_card", "保存知识卡", STEP_DONE)
 
     image_url = ""
     try:

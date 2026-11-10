@@ -17,7 +17,6 @@ from ...services.ai.llm import get_chat_model
 from ...services.prompt_injection_service import sanitize_items, sanitize_text
 
 NODE_NAME = "interview_host_extract"
-OPENING_QUESTION_MAX_CHARS = 500
 PROJECT_EXPERIENCE_MAX_CHARS = 1000
 # 工作年限允许范围，与用户资料校验保持一致
 YEARS_MIN = 0
@@ -34,7 +33,6 @@ EXTRACT_SYSTEM_PROMPT = """你是面试主考官的资料分析助手。请阅�
   "target_skills": ["候选人已掌握的技能，优先提取具体技术栈"],
   "project_experience": "用一句话概括候选人最重要的项目经历；未体现时输出空字符串",
   "weak_topics": ["简历中缺失或明显薄弱的面试考察点"],
-  "opening_question": "一句中文开场问题，结合简历项目经历，只问一个问题",
   "user_stated": {
     "target_job": "仅当候选人本次明确说明目标岗位时输出该键",
     "target_level": "仅当候选人本次明确说明目标职级时输出该键",
@@ -104,9 +102,6 @@ class InterviewHostAgent:
                 data.get("project_experience"), PROJECT_EXPERIENCE_MAX_CHARS
             ),
             "weak_topics": sanitize_items(data.get("weak_topics"))[:10],
-            "opening_question": sanitize_text(
-                data.get("opening_question"), OPENING_QUESTION_MAX_CHARS
-            ),
         }
 
     @staticmethod

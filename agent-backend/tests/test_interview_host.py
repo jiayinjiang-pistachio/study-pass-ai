@@ -44,7 +44,6 @@ EXTRACTED = {
     "target_skills": ["Python", "MySQL"],
     "project_experience": "负责订单系统开发。",
     "weak_topics": ["分布式事务"],
-    "opening_question": "请介绍你最近负责的那个订单系统项目。",
 }
 EXTRACTION_JSON = json.dumps(EXTRACTED, ensure_ascii=False)
 
@@ -66,7 +65,6 @@ EXPECTED_BACKGROUND = {
     "target_skills": "Python、MySQL",
     "project_experience": "负责订单系统开发。",
     "weak_topics": "分布式事务",
-    "opening_question": "请介绍你最近负责的那个订单系统项目。",
 }
 
 # 资料写入时间需要相对简历上传时间可控：未来一秒即「资料更新」，过去一秒反之
@@ -302,7 +300,7 @@ async def test_user_profile_overrides_resume_extraction(
     auth_headers: dict,
     monkeypatch,
 ) -> None:
-    """资料晚于简历上传时，岗位 / 职级 / 技能 / 薄弱点 / 年限优先，开场问题仍取简历。"""
+    """资料晚于简历上传时，岗位 / 职级 / 技能 / 薄弱点 / 年限优先，项目经历仍取简历。"""
     _patch_model(monkeypatch)
     session = _interview_session(auth_user["id"])
     _add_resume(auth_user["id"], ["项目经历：订单系统，技术栈 Python、MySQL。"])
@@ -337,7 +335,6 @@ async def test_user_profile_overrides_resume_extraction(
         "target_skills": "Vue、TypeScript",
         "project_experience": EXTRACTED["project_experience"],
         "weak_topics": "性能优化",
-        "opening_question": EXTRACTED["opening_question"],
     }
 
 
@@ -455,7 +452,6 @@ async def test_chat_statement_overrides_profile_and_resume(
         "target_skills": "Vue、TypeScript",
         "project_experience": EXTRACTED["project_experience"],
         "weak_topics": STATED["weak_topics"][0],
-        "opening_question": EXTRACTED["opening_question"],
     }
 
 
@@ -575,7 +571,6 @@ async def test_confirm_creates_interview_message_and_prompt(
         "target_skills": "Vue、TypeScript",
         "project_experience": "负责电商前端重构。",
         "weak_topics": "性能优化",
-        "opening_question": "请介绍你负责的前端项目。",
     }
 
     resp = await client.post(
@@ -611,7 +606,7 @@ async def test_confirm_creates_interview_message_and_prompt(
     assert message["select_mode"] == 4
     assert message["request_id"] == f"{prepared['run_id']}:interview"
     assert message["request_text"] == "开始面试"
-    assert message["response_text"] == background["opening_question"]
+    assert message["response_text"] == "面试已准备好，请开始回答。"
     assert message["status"] == 1
     assert message["interview_id"] == data["interview_id"]
 

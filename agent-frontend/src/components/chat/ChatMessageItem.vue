@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Service, User } from '@element-plus/icons-vue'
+import AgentActivityTimeline from './AgentActivityTimeline.vue'
 import ChatSourceList from './ChatSourceList.vue'
 import InterviewCard from './InterviewCard.vue'
 import InterviewEvaluationCard from './InterviewEvaluationCard.vue'
@@ -8,7 +9,7 @@ import KnowledgeCard from './KnowledgeCard.vue'
 import MsgFile from './MsgFile.vue'
 import QuizEntryCard from './QuizEntryCard.vue'
 import LoadingDots from '@/components/common/LoadingDots.vue'
-import { SegmentType, type ChatMessage } from '@/types/chat'
+import { AgentActivityStatus, SegmentType, type ChatMessage } from '@/types/chat'
 
 import { renderMarkdown } from '@/utils/markdownUtil'
 
@@ -53,9 +54,21 @@ const knowledgeAudio = computed(
       (segment) => segment.type === SegmentType.Audio,
     )?.url || null,
 )
+/** 总控执行时间轴：step 事件实时写入，历史消息从 activity 字段还原 */
+const hasActivity = computed(() => (props.message.activity?.length ?? 0) > 0)
+const hasFailedActivity = computed(
+  () =>
+    props.message.activity?.some(
+      (node) => node.status === AgentActivityStatus.Failed,
+    ) ?? false,
+)
+
 /** 知识卡生成中：知识卡 + 播客耗时较长，展示专门的等待提示 */
 const isKnowledgePending = computed(
-  () => props.message.status === 0 && Boolean(props.message.loadingHint),
+  () =>
+    !hasActivity.value &&
+    props.message.status === 0 &&
+    Boolean(props.message.loadingHint),
 )
 
 /** 面试复盘消息：本地渲染与历史消息都靠 payloadType + 结构化载荷识别 */
@@ -65,11 +78,16 @@ const isInterviewEvaluation = computed(
     props.message.interviewEvaluation !== null,
 )
 
-/** 生成中 / 失败的状态提示，正文为空时展示 */
+/** 生成中 / 失败的状态提示，正文为空时展示；时间轴已承载进度与错误 */
 const responsePlaceholder = computed(() => {
   if (props.message.responseText.trim().length > 0) return ''
-  if (props.message.status === 0) return props.message.loadingHint ?? '正在生成…'
-  if (props.message.status === 2) return '生成失败'
+  if (props.message.status === 0) {
+    return hasActivity.value ? '' : (props.message.loadingHint ?? '正在生成…')
+  }
+  if (props.message.status === 2) {
+    if (hasFailedActivity.value) return ''
+    return props.message.errorText ?? '生成失败'
+  }
   return ''
 })
 
@@ -81,6 +99,7 @@ const hasResponse = computed(
     props.message.responseText.trim().length > 0 ||
     props.message.responseSegments.length > 0 ||
     props.message.sources.length > 0 ||
+    hasActivity.value ||
     isKnowledgeCard.value ||
     isInterviewEvaluation.value ||
     showInterviewCard.value ||
@@ -129,6 +148,11 @@ const timeLabel = computed(() => {
       </span>
 
       <div class="msg__body">
+        <AgentActivityTimeline
+          v-if="hasActivity"
+          :nodes="message.activity ?? []"
+          :active="message.status === 0"
+        />
         <div
           v-if="isKnowledgePending"
           class="msg__bubble msg__bubble--muted msg__loading"

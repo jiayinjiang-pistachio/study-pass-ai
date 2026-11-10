@@ -47,7 +47,9 @@ class AgentCapability:
     enabled: bool = True
 
 
-# 登记顺序即快筛优先级：先命中哪个就调度哪个
+# 登记顺序即快筛优先级：先命中哪个就调度哪个。
+# 例外：多个「追加型」能力（难点学习 / 笔记归档）同时命中且归档是明确动作时，
+# 总控会把它们按原话提及顺序组合调度（见 orchestrator_service.COMPOSABLE_AGENTS）。
 CAPABILITIES: tuple[AgentCapability, ...] = (
     AgentCapability(
         name=CHAT_AGENT,

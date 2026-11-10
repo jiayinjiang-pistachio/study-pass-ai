@@ -61,7 +61,7 @@ pnpm dev          # 默认 5173，代理 /api → http://127.0.0.1:8000
 | # | 操作 | 预期 |
 | --- | --- | --- |
 | 1 | 面试间进入一个已有简历的会话，发送「帮我准备高级后端开发工程师的模拟面试」 | 总控返回 `interview_prepare`，弹出「确认面试背景」弹窗 |
-| 2 | 查看弹窗 | 7 个字段（目标岗位 / 职级 / 年限 / 技能 / 项目 / 薄弱点 / 开场问题）已按简历与用户画像预填，顶部显示简历文件名 |
+| 2 | 查看弹窗 | 6 个字段（目标岗位 / 职级 / 年限 / 技能 / 项目 / 薄弱点）已按简历与用户画像预填，顶部显示简历文件名 |
 | 3 | 修改任意字段后点击「确认并开始面试」 | `POST /api/interviews/confirm` 返回 200，页面跳转语音面试页 |
 | 4 | 查看地址栏 | `…/interview/voice?interview_id={id}`；**`rtc_token` 不出现在 URL** |
 | 5 | DevTools → Network 查看 confirm 响应 | `data.voice` 含 `app_id / room_id / user_id / bot_user_id / task_id / token / expire_at / started=true` |

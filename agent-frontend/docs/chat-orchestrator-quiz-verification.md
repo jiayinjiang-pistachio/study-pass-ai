@@ -65,7 +65,7 @@ API_PROXY_TARGET=http://127.0.0.1:18000 pnpm dev
 | # | 操作 | 预期 |
 | --- | --- | --- |
 | 7 | 学习室选中「笔记归档」，发送「用三句话总结一下 REST 的核心约束」 | AI 逐字流式回复，无 404 |
-| 8 | 同一操作下查看 DevTools → Network | `POST /api/agent/chat`，响应 `Content-Type: text/event-stream`，事件顺序 `meta → agent(start) → delta* → agent(done) → done` |
+| 8 | 同一操作下查看 DevTools → Network | `POST /api/agent/chat`，响应 `Content-Type: text/event-stream`，事件顺序 `meta → step(route, done) → agent(start) → step(generate_reply, start) → delta* → step(generate_reply, done) → agent(done) → done`；页面上时间轴逐节点增长，完成后收起为「已完成 N 个步骤」 |
 | 9 | 选中「出题测评」但发送普通问题（如「你好」） | 仍为流式聊天（关键词与语义均未命中，回落聊天分支） |
 | 10 | 面试间不选按钮，发送一句普通问题 | 普通聊天（`delta`），不会自动触发面试准备 |
 | 11 | 刷新页面后查看历史 | 上述问答正常回显，无重复消息 |
@@ -74,13 +74,13 @@ API_PROXY_TARGET=http://127.0.0.1:18000 pnpm dev
 
 | # | 操作 | 预期 |
 | --- | --- | --- |
-| 12 | 学习室（不选或选中「出题测评」）发送「帮我出 3 道 Python 基础题」 | 输入框占位提示变为「正在处理，请稍候…」；消息区先显示「正在生成…」 |
-| 13 | 等待出题完成 | SSE 中出现 `task(kind=quiz)`，`payload` 含 `run_id` 与 `quiz`；会话自动刷新 |
+| 12 | 学习室（不选或选中「出题测评」）发送「帮我出 3 道 Python 基础题」 | 输入框占位提示变为「正在处理，请稍候…」；消息区出现执行时间轴（「理解请求」→「准备测评」→「生成题目」…） |
+| 13 | 等待出题完成 | SSE 中出现 `step` 逐节点推进，随后 `task(kind=quiz)`（`payload` 含 `run_id` 与 `quiz`）；会话自动刷新，时间轴收起为「已完成 N 个步骤」 |
 | 14 | 出题消息渲染 | 出现「查看并填写测评题目」入口卡片，并**自动弹出**「学习测评」弹窗 |
 | 15 | 弹窗内容 | 题目数量与请求一致（3 道）；单选为 radio、多选为 checkbox、简答为 textarea；简答题无选项 |
 | 16 | 关闭弹窗，再点击入口卡片 | 弹窗重新打开，入口按钮始终可用 |
 
-> 自动弹窗每个测评只触发一次（同一页面生命周期内以 `request_id` 去重）；刷新页面后会重新自动弹出。
+> 只有本次页面生命周期内新生成的测评会自动弹窗（同一 `request_id` 只消费一次）；刷新页面 / 重新进入会话后还原的旧试题只保留入口卡片，需手动点击打开——旧试题可能因 checkpoint 丢失而过期，避免用户白填一遍。
 > 若后端重启导致 checkpoint 丢失，已出题的旧测评在提交时会返回 `409 测评流程已失效`，重新发送出题即可。
 
 ### 2.4 学习测评：答题与评分
@@ -92,7 +92,7 @@ API_PROXY_TARGET=http://127.0.0.1:18000 pnpm dev
 | 19 | 提交成功 | 弹窗关闭，测评入口卡片消失；原消息正文变为评分文本（得分 + 逐题点评 + 薄弱点 + 建议） |
 | 20 | 刷新页面 | 原消息仍为评分文本，无测评入口；**不新增**一条消息 |
 | 21 | 再次提交同一测评（模拟并发 / 旧页面） | 后端返回 `409 已提交`，请求层提示错误，弹窗保持打开 |
-| 22 | 出题后不提交，直接刷新页面 | 测评入口仍在，弹窗再次自动弹出，可继续作答 |
+| 22 | 出题后不提交，直接刷新页面 | 测评入口仍在，但**不再自动弹窗**；点击入口可手动打开继续作答 |
 
 ### 2.5 历史接口字段（可选）
 
@@ -110,7 +110,7 @@ DevTools 中查看 `GET /api/sessions/{session_id}/messages?page=1&page_size=20`
 
 | 场景 | 请求 | 响应 |
 | --- | --- | --- |
-| 任意发送 | `POST /api/agent/chat`，body `{session_id, request_text, preferred_agent?}` | 统一 `text/event-stream`：聊天走 `delta`，任务走 `task(kind=...)` |
+| 任意发送 | `POST /api/agent/chat`，body `{session_id, request_text, preferred_agent?}` | 统一 `text/event-stream`：`step` 实时播报节点进度；聊天走 `delta`，任务走 `task(kind=...)` |
 | 工作流完成后刷新 | `GET /api/sessions/{id}/messages?page=1&page_size=20` → 最后一页 | 用服务端消息替换本地临时行 |
 | 提交测评 | `POST /api/learning-workflows/{run_id}/submit`，body `{answers:[{question_id, value}]}` | 统一信封，含 `score / evaluation / weaknesses / review` |
 | 提交后刷新 | 同「工作流完成后刷新」 | 原消息更新为点评文本、载荷清空 |
@@ -150,7 +150,7 @@ ORDER BY id DESC;
 | 出题请求 502 | 模型输出非 JSON / 模型异常 | 查看 `logs/app.log` 与 `workflow_runs.error_message` |
 | 提交提示「测评流程已失效」 | 后端重启导致 MemorySaver checkpoint 丢失 | 重新发起测评（旧记录已置 failed） |
 | 测评入口不出现 | 历史接口未返回 `request_id` / `response_payload`，或两者不匹配 | 检查历史接口响应与前端是否为最新构建 |
-| 弹窗没有自动打开 | 同一测评本页面已自动打开过一次 | 点击入口卡片手动打开；刷新页面可再次自动弹出 |
+| 弹窗没有自动打开 | 旧试题 / 已自动打开过一次 | 点击入口卡片手动打开；自动弹窗只对新生成的测评生效 |
 | 评分后入口仍存在 | 前端未刷新成功且本地更新未命中目标消息 | 刷新页面重新拉取历史；确认 `response_payload` 已为 `null` |
 
 ---

@@ -22,6 +22,7 @@ from ..core.exceptions import BusinessException, SystemException
 from ..core.retry import RetryExhaustedError, run_with_retry
 from ..db import interview_repo, message_repo
 from . import prompt_template_service
+from .agent_progress import STEP_DONE, STEP_START, StepCallback, emit_step
 from .ai.json_utils import parse_json_object
 from .ai.llm import get_chat_model
 
@@ -193,14 +194,18 @@ def _request_id(interview_id: int) -> str:
 
 
 def _load_or_create_message(
-    user_id: int, session_id: int, interview_id: int
+    user_id: int, session_id: int, interview_id: int, *, allow_pending: bool = False
 ) -> dict:
-    """已有完成 / 失败消息则复用；正在生成时拒绝并发重复请求。"""
+    """已有完成 / 失败消息则复用；正在生成时拒绝并发重复请求。
+
+    自动复盘会先在结束接口同步写入占位消息，后台任务随后复用它生成结果，
+    因此 `allow_pending=True` 时把「生成中」视为可继续执行而非并发冲突。
+    """
     request_id = _request_id(interview_id)
     with _CREATE_LOCK:
         existing = message_repo.get_by_request_id(request_id, user_id)
         if existing is not None:
-            if existing["status"] == MSG_STATUS_GENERATING:
+            if existing["status"] == MSG_STATUS_GENERATING and not allow_pending:
                 raise BusinessException(
                     "面试复盘正在生成，请稍后刷新查看",
                     http_status=status.HTTP_409_CONFLICT,
@@ -240,8 +245,16 @@ def _payload_from_message(message: dict, interview: dict) -> dict[str, Any]:
 class InterviewEvaluationService:
     """面试复盘生成与会话消息落库；不负责触发（由总控 / 结束接口编排）。"""
 
-    def evaluate_session(self, user_id: int, session_id: int) -> dict[str, Any]:
+    def evaluate_session(
+        self,
+        user_id: int,
+        session_id: int,
+        *,
+        on_step: StepCallback | None = None,
+        allow_pending: bool = False,
+    ) -> dict[str, Any]:
         """读取最近一次已结束面试并生成复盘；返回 task.payload 结构。"""
+        emit_step(on_step, "load_interview", "读取面试记录", STEP_START)
         interview = interview_repo.get_latest_completed_for_session(
             user_id, session_id
         )
@@ -262,10 +275,21 @@ class InterviewEvaluationService:
                 detail=f"interview_id={interview['id']}",
             )
 
-        message = _load_or_create_message(user_id, session_id, interview["id"])
+        message = _load_or_create_message(
+            user_id, session_id, interview["id"], allow_pending=allow_pending
+        )
         if message["status"] == MSG_STATUS_DONE:
+            emit_step(on_step, "load_interview", "读取面试记录", STEP_DONE)
             return _payload_from_message(message, interview)
+        emit_step(
+            on_step,
+            "load_interview",
+            "读取面试记录",
+            STEP_DONE,
+            detail=f"{len(qa_object)} 轮问答",
+        )
 
+        emit_step(on_step, "generate_evaluation", "生成复盘", STEP_START)
         try:
             evaluation = _generate_evaluation(user_id, interview, qa_object)
         except Exception:
@@ -276,7 +300,15 @@ class InterviewEvaluationService:
                 MSG_STATUS_FAILED,
             )
             raise
+        emit_step(
+            on_step,
+            "generate_evaluation",
+            "生成复盘",
+            STEP_DONE,
+            detail=f"{evaluation['score']} 分",
+        )
 
+        emit_step(on_step, "save_evaluation", "保存复盘", STEP_START)
         payload = {
             "type": "interview_evaluation",
             "interview_id": interview["id"],
@@ -285,6 +317,7 @@ class InterviewEvaluationService:
         message_repo.update_task_result(
             message["id"], _display_text(evaluation), payload, MSG_STATUS_DONE
         )
+        emit_step(on_step, "save_evaluation", "保存复盘", STEP_DONE)
 
         logger.info(
             "面试复盘已生成 | interview_id=%s user_id=%s session_id=%s score=%s",
@@ -305,10 +338,37 @@ class InterviewEvaluationService:
         }
 
 
+def ensure_pending_message(user_id: int, session_id: int) -> dict | None:
+    """结束接口同步创建复盘占位消息（不触发生成）。
+
+    后台任务在响应之后才执行，前端回到聊天页刷新时可能尚未落库，
+    导致复盘卡片“时有时无”；先同步写入 status=0 的占位消息可消除该竞态。
+    """
+    try:
+        interview = interview_repo.get_latest_completed_for_session(
+            user_id, session_id
+        )
+        if interview is None or not interview.get("qa_object"):
+            return None
+        return _load_or_create_message(
+            user_id, session_id, interview["id"], allow_pending=True
+        )
+    except Exception:
+        logger.warning(
+            "创建面试复盘占位消息失败（不影响面试结果）| user_id=%s session_id=%s",
+            user_id,
+            session_id,
+            exc_info=True,
+        )
+        return None
+
+
 def evaluate_session_background(user_id: int, session_id: int) -> None:
     """结束面试后的后台自动复盘；失败只记日志，不影响面试结果。"""
     try:
-        InterviewEvaluationService().evaluate_session(user_id, session_id)
+        InterviewEvaluationService().evaluate_session(
+            user_id, session_id, allow_pending=True
+        )
     except Exception:
         logger.warning(
             "自动面试复盘失败（不影响面试结果）| user_id=%s session_id=%s",

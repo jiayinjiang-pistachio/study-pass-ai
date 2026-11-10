@@ -55,6 +55,7 @@
 - 关键词至少双字，避免「题 / 讲」这类单字误命中。
 - 各能力同时登记 `examples` 与阈值（0.65~0.68），关键词全部落空后才做语义比较。
 - **登记顺序即快筛优先级**：先命中的能力先调度。
+- **追加型能力可组合**：难点学习与笔记归档同时被关键词命中，且请求里含明确归档动作（归档 / 整理成笔记 / 总结成笔记 / 存成笔记 / 记录下来）时，按原话提及顺序依次调度（如「把这次面试归档，并讲解薄弱点」→ `note` + `knowledge_card`）。出题、面试主考官、复盘仍只取首个命中，避免打断作答或确认流程。
 - `requires` 只在路由阶段判断；不满足的能力既不会被快筛命中，也不会被规划器选中。
 
 ---
@@ -95,13 +96,18 @@ flowchart TD
 | 事件 | 载荷 | 说明 |
 | --- | --- | --- |
 | `meta` | `{session_id, message_id, request_id, trace_id}` | 流开始；`trace_id` 贯穿本轮 |
+| `step` | `{trace_id, agent, node, title, status, detail, error}` | 节点级进度，供前端时间轴；`status` 取 `start / done / failed`，`error` 仅在 `failed` 时出现 |
 | `agent` | `{trace_id, from, to, phase, reason}` | 调度可观测性；`phase` 取 `start / done`，`from` 固定 `flow_controller` |
 | `delta` | `{content}` | 仅聊天分支的增量文本 |
 | `task` | `{trace_id, kind, run_id, payload}` | 任务产物；`kind` 见第 3 节 |
 | `done` | `{message_id, status, sources, trace_id}` | 流结束；`status=1`，任务分支 `sources` 为空 |
 | `error` | `{code, message}` | 失败收尾；`code` 取业务异常状态码或 `502` |
 
-- 事件顺序固定：`meta → agent(start) → delta* / task → agent(done) → done`，失败以 `error` 收尾。
+- 事件顺序（聊天）：`meta → step(route, done) → agent(start) → step(generate_reply, start) → delta* → step(generate_reply, done) → agent(done) → done`。
+- 事件顺序（任务）：`meta → step(route, done) → agent(start) → step*（逐节点 start / done）→ task → agent(done) → done`。
+- 失败统一以 `error` 收尾：任务分支把所有已 `start` 未 `done` 的节点补发 `step(failed)`（`error` 取异常 `message`，不回传 `detail`），聊天分支在转发内部 `error` 前补 `step(generate_reply, failed)`；此后不再下发 `task` / `done`。
+- `step.agent` 为上报方能力名（路由节点固定 `flow_controller`），`node` 为稳定节点 id（见 §5.3.1 的节点表），前端以 `agent:node` 为 key 合并同一节点的 start / done。
+- **时间轴持久化**：总控把节点快照按 `agent:node` 合并后写入产物消息的 `chat_messages.activity`（状态归一为 `running / done / failed`，不保存 `trace_id`）。聊天分支在流结束 / 客户端断开时（`finally`）写入；任务分支在 `task` 事件下发前写入，保证前端刷新即可拿到完整时间轴。`interview_prepare` 没有会话消息，时间轴仍只在前端本地保留。落库失败只记 WARNING，不影响业务结果与事件流。
 - `message_id` 语义：聊天分支为落库后的真实消息 ID；任务分支 `meta.message_id=0`，前端以 `task.payload.message_id` 对账。
 - 编码统一走 `chat_service.sse_event()`，`json.dumps(..., default=str)` 兜底 `datetime / Decimal` 等非 JSON 原生类型。
 
@@ -124,11 +130,14 @@ sequenceDiagram
     C->>DB: chat_messages 插入 status=0
     C->>M: load_context（Redis 优先 / MySQL 兜底）
     R-->>FE: meta（真实 message_id）
+    R-->>FE: step(flow_controller/route, done, reason)
     R-->>FE: agent(start)
+    R-->>FE: step(chat_answer/generate_reply, start)
     C-->>FE: delta*
     C->>DB: 回写 response_text + status=1
     C->>M: append_turn 写入工作记忆
-    C-->>FE: done（含 sources）
+    R-->>FE: step(chat_answer/generate_reply, done)
+    R-->>FE: done（含 sources）
 ```
 
 聊天分支完全复用 `chat_service.prepare_stream()` + `stream_reply()`，与 `/api/sessions/{id}/stream-chat`
@@ -149,23 +158,51 @@ sequenceDiagram
     S-->>R: AgentPlan(quiz / interview / difficulty / note)
     R-->>FE: 200 text/event-stream
     R-->>FE: meta（message_id=0）
+    R-->>FE: step(flow_controller/route, done, reason)
     loop agents（最多 2 个）
         R-->>FE: agent(start)
-        S->>W: 同步执行（线程池）
-        W->>DB: workflow_runs / 会话消息 / 调度上下文
+        S->>W: 同步执行（线程池），经 asyncio.Queue 回传节点进度
+        loop 能力节点
+            R-->>FE: step(agent/node, start)
+            W->>DB: 阶段落库
+            R-->>FE: step(agent/node, done, detail)
+        end
         R-->>FE: task（kind + run_id + payload）
         R-->>FE: agent(done)
     end
     R-->>FE: done
 ```
 
-- 子能力同步执行，异常转成 `error` 事件并结束本轮（已发出的 `meta` / `agent(start)` 保留）。
+- 子能力同步执行，异常转成 `error` 事件并结束本轮（已发出的 `meta` / `agent(start)` 保留），并把所有未完成节点补发 `step(failed)`。
+- 节点上报协议与线程桥接见 5.3.1。
 - 任务消息由子工作流自行写入（Phase 1 保持现状）；笔记额外补一条幂等会话消息
   `request_id="note:{note_id}"`，便于历史回放。
 - 面试准备没有会话消息，`task.payload.message_id` 为 `0`；面试复盘复用已落库的
   `request_id="interview:{id}:evaluation"` 消息，`message_id` 指向该条。
 - 结束面试的自动复盘走路由层 `BackgroundTasks`（`INTERVIEW_EVAL_AUTO` 控制），
   与用户手动触发的复盘共用同一幂等消息，生成中重复触发返回 `409`。
+
+### 5.3.1 节点上报与线程桥接
+
+能力由 `orchestrator_service._run_agent_with_steps()` 放到线程池同步执行，SSE 生成器仍在事件循环；
+进度通过 `asyncio.Queue` 回传：能力线程只把 `("step", ...) / ("result", ...) / ("error", ...)`
+经 `loop.call_soon_threadsafe(queue.put_nowait, ...)` 入队，生成器按 FIFO 取出并逐条下发，
+因此 `step` 一定先于 `task` / `error`。能力线程拿到的回调由 `app/services/agent_progress.emit_step()`
+包装（`on_step` 为空或回调异常都不影响业务）。
+
+各能力上报的节点（`start → done`，异常由最外层兜底补 `failed`，能力内不主动发 `failed`）：
+
+| 能力 | 节点（node / title） |
+| --- | --- |
+| `quiz_generate_workflow` | `prepare/准备测评`、`generate_quiz/生成题目`、`persist_quiz/保存题目` |
+| `difficulty_learner` | `prepare_card/整理知识卡文案`、`generate_media/生成插图与播客`、`save_card/保存知识卡` |
+| `interview_host` | `load_resume/读取简历`、`extract_variables/提取岗位背景`、`merge_background/整理面试背景`、`persist_prepare/保存待确认背景` |
+| `interview_evaluator` | `load_interview/读取面试记录`、`generate_evaluation/生成复盘`、`save_evaluation/保存复盘` |
+| `note_archiver` | `select_source/选择归档来源`、`generate_note/生成笔记`、`save_note/保存笔记` |
+| 路由 / 聊天 | `flow_controller/route/理解请求`、`chat_answer/generate_reply/生成回答` |
+
+> 进度只在最外层能力线程上报；`difficulty_card_workflow` 内部出图 / 播客的 ThreadPoolExecutor
+> 线程不上报，保证事件顺序与节点粒度确定。
 
 ### 5.4 `task.payload` 形状
 

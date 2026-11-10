@@ -1,10 +1,19 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { ChatMessage, MessageSegment } from '@/types/chat'
+import {
+  AgentActivityStatus,
+  type AgentActivityNode,
+  type ChatMessage,
+  type MessageSegment,
+} from '@/types/chat'
 import type { QuizAnswer } from '@/types/quiz'
 import { AgentName } from '@/types/agent'
 import { AgentTaskKind } from '@/api/conversation'
-import type { AgentTaskResult, KnowledgeCardData } from '@/api/conversation'
+import type {
+  AgentStepEvent,
+  AgentTaskResult,
+  KnowledgeCardData,
+} from '@/api/conversation'
 import * as conversationApi from '@/api/conversation'
 import { submitLearningQuiz } from '@/api/learningWorkflow'
 import { buildEvaluationText, quizRunId } from '@/utils/quiz'
@@ -63,8 +72,16 @@ function mergeServerWins(
   incoming: ChatMessage[],
 ): ChatMessage[] {
   const merged = new Map<number, ChatMessage>()
-  // 服务端快照是落库后的最终结果（测评题目 / 评分），同 ID 覆盖本地副本
-  for (const item of [...current, ...incoming]) merged.set(item.id, item)
+  // 已加载更早页的本地消息先保留，再让服务端快照覆盖同 ID 本地副本
+  // （服务端快照是落库后的最终结果，测评题目 / 评分以它为准）
+  for (const item of current) merged.set(item.id, item)
+  for (const item of incoming) {
+    const local = merged.get(item.id)
+    // 服务端快照已带落库时间轴；本地实时节点更完整时优先保留，避免对账丢步骤
+    if (local?.activity?.length) item.activity = local.activity
+    if (local?.errorText) item.errorText = local.errorText
+    merged.set(item.id, item)
+  }
   return [...merged.values()]
 }
 
@@ -102,6 +119,52 @@ function applyKnowledgeCard(
   item.loadingHint = undefined
 }
 
+/** 节点唯一键：同一能力的同名节点重复上报时只更新状态 */
+function activityKey(node: AgentActivityNode): string {
+  return `${node.agent}:${node.node}`
+}
+
+/** 按 (agent, node) 合并 step：先更新已有节点，未出现则追加 */
+function upsertActivity(item: ChatMessage, step: AgentStepEvent): void {
+  const status =
+    step.status === 'failed'
+      ? AgentActivityStatus.Failed
+      : step.status === 'start'
+        ? AgentActivityStatus.Running
+        : AgentActivityStatus.Done
+  const nodes = item.activity ?? []
+  const existing = nodes.find(
+    (node) => activityKey(node) === `${step.agent}:${step.node}`,
+  )
+  if (existing) {
+    existing.status = status
+    if (step.title) existing.title = step.title
+    if (step.detail !== null) existing.detail = step.detail
+    existing.error = step.error
+    return
+  }
+  nodes.push({
+    node: step.node,
+    agent: step.agent,
+    title: step.title,
+    status,
+    detail: step.detail,
+    error: step.error,
+  })
+  item.activity = nodes
+}
+
+/** 流失败：把仍在运行的节点标为失败，并记录服务端错误文案 */
+function failActivity(item: ChatMessage, message: string | null): void {
+  for (const node of item.activity ?? []) {
+    if (node.status === AgentActivityStatus.Running) {
+      node.status = AgentActivityStatus.Failed
+      node.error = node.error ?? message
+    }
+  }
+  if (message) item.errorText = message
+}
+
 export const useChatStore = defineStore('chat', () => {
   /** sessionId -> 消息分页状态 */
   const states = ref<Record<number, MessageState>>({})
@@ -113,6 +176,55 @@ export const useChatStore = defineStore('chat', () => {
       states.value[sessionId] = emptyState()
     }
     return states.value[sessionId]
+  }
+
+  /**
+   * 刷新对账会丢弃负数临时行，按 request_id 把本地时间轴挂回落库消息，
+   * 避免任务完成后执行过程摘要丢失。
+   */
+  function attachActivity(
+    sessionId: number,
+    requestId: string,
+    source: ChatMessage,
+  ): void {
+    const target = stateOf(sessionId).items.find(
+      (item) => item.requestId === requestId,
+    )
+    if (!target || target === source) return
+    if (source.activity?.length) target.activity = source.activity
+    target.errorText = source.errorText ?? target.errorText ?? null
+  }
+
+  /**
+   * 本页面生命周期内新生成的测评：只有它们允许自动弹出答题窗。
+   * 历史 / 刷新后还原的旧试题可能已过期，强制弹窗只会让用户白填一遍。
+   */
+  const autoOpenQuizIds = new Set<string>()
+
+  function markQuizAutoOpen(requestId: string): void {
+    autoOpenQuizIds.add(requestId)
+  }
+
+  /** 每个测评只消费一次自动弹窗资格，避免组件重挂载时重复打扰 */
+  function consumeQuizAutoOpen(requestId: string): boolean {
+    if (!autoOpenQuizIds.delete(requestId)) return false
+    return true
+  }
+
+  /**
+   * 面试准备没有会话产物消息，时间轴只挂在本地临时行上；确认面试时后端用
+   * `{run_id}:interview` 新建入口消息，refresh 丢弃临时行后按 run_id 重新挂回。
+   */
+  const pendingInterviewSources = new Map<
+    number,
+    { runId: string; source: ChatMessage }
+  >()
+
+  function attachInterviewActivity(sessionId: number, runId: string): void {
+    const pending = pendingInterviewSources.get(sessionId)
+    if (!pending || pending.runId !== runId) return
+    pendingInterviewSources.delete(sessionId)
+    attachActivity(sessionId, `${runId}:interview`, pending.source)
   }
 
   /**
@@ -187,14 +299,49 @@ export const useChatStore = defineStore('chat', () => {
     state.initialized = true
   }
 
+  const EVALUATION_POLL_INTERVAL_MS = 2000
+  const EVALUATION_POLL_MAX_ATTEMPTS = 6
+
+  /**
+   * 挂断面试后的自动复盘由后台任务生成：结束接口返回时消息可能尚未落库，
+   * 或仍是「生成中」占位。轮询刷新该会话，直到复盘消息完成 / 失败或尝试耗尽，
+   * 避免用户回到聊天页时看不到复盘卡片。
+   */
+  async function waitForInterviewEvaluation(
+    sessionId: number,
+    interviewId: number,
+  ): Promise<void> {
+    const requestId = `interview:${interviewId}:evaluation`
+    for (let attempt = 0; attempt < EVALUATION_POLL_MAX_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, EVALUATION_POLL_INTERVAL_MS)
+        })
+      }
+      try {
+        await refresh(sessionId)
+      } catch {
+        return
+      }
+      const item = stateOf(sessionId).items.find(
+        (message) => message.requestId === requestId,
+      )
+      // status=0 为生成中占位；完成（1）或失败（2）都停止轮询
+      if (item && item.status !== 0) return
+    }
+  }
+
   function clear(sessionId: number): void {
     delete states.value[sessionId]
+    pendingInterviewSources.delete(sessionId)
   }
 
   /** 退出 / 切换账号时清空消息缓存与发送态，避免串用上一个账号的数据 */
   function reset(): void {
     states.value = {}
     sendingBySession.value = {}
+    pendingInterviewSources.clear()
+    autoOpenQuizIds.clear()
   }
 
   function isSending(sessionId: number): boolean {
@@ -236,6 +383,18 @@ export const useChatStore = defineStore('chat', () => {
         preferredAgent === AgentName.Difficulty
           ? KNOWLEDGE_LOADING_HINT
           : undefined,
+      // 路由规划在建立流之前同步完成，后端无法推送；先本地预置即时反馈
+      activity: [
+        {
+          node: 'route',
+          agent: 'flow_controller',
+          title: '理解请求',
+          status: AgentActivityStatus.Running,
+          detail: null,
+          error: null,
+        },
+      ],
+      errorText: null,
       interviewId: null,
       createdAt,
     })
@@ -269,6 +428,14 @@ export const useChatStore = defineStore('chat', () => {
                 ? KNOWLEDGE_LOADING_HINT
                 : '正在执行任务，请稍等…'
           },
+          onStep: (step) => {
+            // 收到真实节点进度后，替换掉旧的整段等待文案
+            item.loadingHint = undefined
+            upsertActivity(item, step)
+          },
+          onError: (message) => {
+            failActivity(item, message)
+          },
           onDelta: (delta) => {
             item.loadingHint = undefined
             received += delta
@@ -288,6 +455,13 @@ export const useChatStore = defineStore('chat', () => {
 
       // 任务分支：页面可接管（面试背景确认），否则本地渲染后刷新对账
       for (const task of tasks) {
+        if (task.kind === AgentTaskKind.InterviewPrepare) {
+          // 记下时间轴来源，确认面试 refresh 后回挂到 {run_id}:interview 入口消息
+          pendingInterviewSources.set(sessionId, {
+            runId: task.data.runId,
+            source: item,
+          })
+        }
         const handled = options.onTaskResult?.(task) ?? false
         if (handled) continue
 
@@ -296,18 +470,23 @@ export const useChatStore = defineStore('chat', () => {
           applyKnowledgeCard(item, task.data)
           try {
             await refresh(sessionId)
+            attachActivity(sessionId, `${task.data.runId}:card`, item)
           } catch {
             // 重进会话时会重新拉取历史消息
           }
         } else if (task.kind === AgentTaskKind.Quiz) {
+          const requestId = `${task.data.runId}:quiz`
           try {
             await refresh(sessionId)
+            attachActivity(sessionId, requestId, item)
           } catch {
             // 刷新失败保留临时行：测评入口仍可用，下次刷新 / 重进会话自动对账
-            item.requestId = `${task.data.runId}:quiz`
+            item.requestId = requestId
             item.responsePayload = task.data.quiz
             item.responseText = '已完成出题，请完成后提交答案。'
           }
+          // 只给刚生成的测评自动弹窗资格；刷新页面后从历史消息还原的旧试题不再弹
+          markQuizAutoOpen(requestId)
         } else if (task.kind === AgentTaskKind.InterviewEvaluation) {
           // 复盘消息已由后端落库：先本地渲染，再用刷新结果对账
           item.payloadType = 'interview_evaluation'
@@ -315,6 +494,11 @@ export const useChatStore = defineStore('chat', () => {
           item.responseText = `本次面试复盘评分：${task.data.score}/100。`
           try {
             await refresh(sessionId)
+            attachActivity(
+              sessionId,
+              `interview:${task.data.interviewId}:evaluation`,
+              item,
+            )
           } catch {
             // 刷新失败保留本地复盘卡片，重进会话后可看到落库消息
           }
@@ -322,6 +506,7 @@ export const useChatStore = defineStore('chat', () => {
           item.responseText = `已生成笔记「${task.data.title}」，可在笔记本中查看。`
           try {
             await refresh(sessionId)
+            attachActivity(sessionId, `note:${task.data.noteId}`, item)
           } catch {
             // 刷新失败保留本地提示，重进会话后可看到落库消息
           }
@@ -332,6 +517,7 @@ export const useChatStore = defineStore('chat', () => {
       }
     } catch (error) {
       item.status = 2
+      failActivity(item, error instanceof Error ? error.message : null)
       throw error
     } finally {
       sendingBySession.value[sessionId] = false
@@ -365,6 +551,7 @@ export const useChatStore = defineStore('chat', () => {
 
     try {
       await refresh(sessionId)
+      if (target) attachActivity(sessionId, requestId, target)
     } catch {
       // 刷新失败保留本地结果
     }
@@ -376,6 +563,9 @@ export const useChatStore = defineStore('chat', () => {
     loadLatest,
     loadOlder,
     refresh,
+    waitForInterviewEvaluation,
+    attachInterviewActivity,
+    consumeQuizAutoOpen,
     clear,
     reset,
     isSending,

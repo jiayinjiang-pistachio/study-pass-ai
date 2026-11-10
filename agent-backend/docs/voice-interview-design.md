@@ -87,7 +87,7 @@ sequenceDiagram
     Note over FE,API: 阶段一 · 面试准备（文本，走总控）
     FE->>API: POST /api/agent/chat（请求文本命中面试意图）
     API->>DB: 读最新简历切片 + 用户资料
-    API->>LLM: 提取目标岗位/职级/年限/技能/项目/薄弱点/开场问题
+    API->>LLM: 提取目标岗位/职级/年限/技能/项目/薄弱点
     API->>DB: workflow_runs(status=pending_confirmation)
     API-->>FE: run_id + background（7 个可编辑字段）
 
@@ -107,6 +107,7 @@ sequenceDiagram
     FE->>API: POST /api/interviews/{id}/voice/finish（qa_object + 时长）
     API->>RTC: StopVoiceChat
     API->>DB: interviews.qa_object / interview_duration / status=1
+    API->>DB: 同步写入复盘占位消息（status=0），避免与前端刷新竞态
     API->>API: 后台生成面试复盘（INTERVIEW_EVAL_AUTO=true，失败只记日志）
     API-->>FE: 保存成功，返回面试间
 ```
@@ -135,8 +136,8 @@ flowchart TD
 
 要点：
 
-- 这一步**只准备、不创建**，用户还能在弹窗里改 7 个字段。
-- `background` 字段：`target_job / target_level / years_experience / target_skills / project_experience / weak_topics / opening_question`。
+- 这一步**只准备、不创建**，用户还能在弹窗里改 6 个字段。
+- `background` 字段：`target_job / target_level / years_experience / target_skills / project_experience / weak_topics`。
 - 技能、薄弱点用「、」连接；年限格式为「N 年 / 应届/无经验」。
 - 覆盖顺序：本轮明确表述 > `user_profiles.updated_at` 与简历 `create_time` 中较新的一方；未提及的字段由另一方兜底。
 - 详细规则见 [面试准备两阶段流程](interview-host-verification-guide.md)。
@@ -554,7 +555,7 @@ stateDiagram-v2
 
 1. **后端没有实时转写**：想在后端做实时质检 / 打断，需要额外接入字幕回流或录音存储，当前没有。
 2. **`qa_object` 由客户端构建**：后端把它当作可信数据直接保存；如需防篡改，应在服务端重算或增加校验。
-3. **`opening_question` 不参与语音开场**：它只作为会话入口消息的 `response_text` 展示；AI 开口说的是 `VOLC_RTC_WELCOME_MESSAGE`。提示词变量目前注入 `target_job / target_level / years_experience / target_skills / weak_topics`。
+3. **没有「开场问题」字段**：背景只有岗位 / 职级 / 年限 / 技能 / 项目 / 薄弱点六项；AI 开口说的是 `VOLC_RTC_WELCOME_MESSAGE`，提示词变量注入 `target_job / target_level / years_experience / target_skills / weak_topics`。
 4. **关闭页面不自动收尾**：没有 `beforeunload` 自动调用 finish（可靠性差），记录会停在 `status=0`，靠 RTC 空闲超时停 Bot。
 5. **模型密钥下发给云端**：`LLM_API_KEY` 随 `StartVoiceChat` 传给 RTC 云，云端用它调用模型；密钥托管边界需要按安全要求评估。
 6. **打断行为未显式配置**：当前未设置 `InterruptConfig` / `InterruptMode`，使用 RTC 默认（用户开口可打断 AI）。若希望 AI 说完再听，需要后续显式配置。
@@ -595,7 +596,7 @@ profile_is_latest = _profile_is_latest(profile, resume)
 # 资料比简历新时才参与覆盖，否则完全交给简历
 profile_overrides = _user_overrides(profile) if profile_is_latest else {}
 
-# 本轮明确表述优先级最高；opening_question / project_experience 仍取简历
+# 本轮明确表述优先级最高；project_experience 仍取简历
 stated_overrides = {
     field: stated[field]
     for field in (*OVERRIDE_FIELDS, YEARS_FIELD)   # target_job / target_level / target_skills / weak_topics / years_experience
@@ -639,7 +640,7 @@ message = message_repo.insert({
     "select_mode": 4,                                  # 4 = 模拟面试
     "request_id": f"{payload.run_id}:interview",       # 幂等标识
     "request_text": state.get("request_text") or "开始面试",
-    "response_text": background.get("opening_question") or "面试已准备好，请开始回答。",
+    "response_text": "面试已准备好，请开始回答。",
     "status": 1,
 })
 interview = interview_repo.insert({

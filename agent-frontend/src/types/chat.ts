@@ -26,6 +26,25 @@ export interface MessageSource {
   text: string
 }
 
+/** 总控执行节点状态：随消息落库，用于渲染执行时间轴 */
+export const AgentActivityStatus = {
+  Running: 'running',
+  Done: 'done',
+  Failed: 'failed',
+} as const
+export type AgentActivityStatus =
+  (typeof AgentActivityStatus)[keyof typeof AgentActivityStatus]
+
+/** 总控执行节点；来自后端 step 事件，并随消息落库供刷新后回显 */
+export interface AgentActivityNode {
+  node: string
+  agent: string
+  title: string
+  status: AgentActivityStatus
+  detail: string | null
+  error: string | null
+}
+
 /**
  * 面试背景：阶段式面试确认的可编辑字段，统一为字符串。
  * 字段由后端第一阶段根据简历 / 用户资料提取，前端只负责展示与编辑。
@@ -37,7 +56,6 @@ export interface InterviewBackground {
   targetSkills: string
   projectExperience: string
   weakTopics: string
-  openingQuestion: string
 }
 
 /** 第一阶段待确认任务：强制走 JSON 分支，不直接流式输出 */
@@ -120,6 +138,10 @@ export interface ChatMessage {
   interviewEvaluation: InterviewEvaluation | null
   /** 仅本地临时消息使用：生成中的文案提示（如知识卡 + 播客） */
   loadingHint?: string
+  /** 总控执行时间轴：随消息落库，历史消息读取时还原 */
+  activity?: AgentActivityNode[]
+  /** 本轮失败的服务端文案；仅本地保存（失败节点的 error 随节点落库） */
+  errorText?: string | null
   interviewId: number | null
   /** 创建时间（毫秒） */
   createdAt: number

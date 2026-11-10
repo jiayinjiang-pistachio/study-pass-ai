@@ -124,6 +124,9 @@ class ChatMessage(Base):
     response_segments: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     # 工作流结构化结果（当前为学习测评的 quiz 数组），评分完成后清空；普通聊天为 NULL
     response_payload: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    # 总控执行时间轴快照 [{agent, node, title, status, detail, error}]：
+    # 随消息落库，刷新页面后仍能回显；纯文本回复为 NULL
+    activity: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     # 本轮回答参考的知识片段索引：[{chunk_id, score}]；原文留在 knowledge_chunks，
     # 历史消息按 chunk_id 回查即可，避免重复保存知识块全文
     reference_sources: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)

@@ -120,8 +120,8 @@ class InterviewService:
                     "select_mode": INTERVIEW_MESSAGE_SELECT_MODE,
                     "request_id": f"{payload.run_id}:interview",
                     "request_text": state.get("request_text") or "开始面试",
-                    "response_text": background.get("opening_question")
-                    or DEFAULT_INTERVIEW_TEXT,
+                    # 入口消息只提示面试已准备好，具体提问由面试间动态生成
+                    "response_text": DEFAULT_INTERVIEW_TEXT,
                     "status": 1,
                 }
             )

@@ -26,7 +26,7 @@ from app.agent.registry import (
 )
 from app.agent.workflows import learning_quiz
 from app.core.exceptions import BusinessException
-from app.db import message_repo, session_repo
+from app.db import interview_repo, message_repo, session_repo
 from app.schemas.agent import AgentChatIn
 from app.services import chat_service, orchestrator_service
 from app.services.orchestrator_service import OrchestratorService
@@ -274,6 +274,72 @@ def test_plan_note_without_completed_run_is_chat(
     assert plan.is_chat
 
 
+def _add_completed_interview(user_id: int, session_id: int) -> dict:
+    """造一条已结束面试，满足笔记归档 / 复盘的前置数据。"""
+    message = message_repo.insert(
+        {
+            "user_id": user_id,
+            "session_id": session_id,
+            "select_mode": 4,
+            "request_id": f"interview-{user_id}-{session_id}",
+            "request_text": "开始面试",
+            "response_text": "",
+            "status": 1,
+        }
+    )
+    return interview_repo.insert(
+        {
+            "user_id": user_id,
+            "session_id": session_id,
+            "message_id": message["id"],
+            "qa_object": [
+                {
+                    "id": 1,
+                    "question": "讲讲 MySQL 索引。",
+                    "answer": "B+ 树。",
+                    "created_at": 1,
+                }
+            ],
+            "status": 1,
+        }
+    )
+
+
+def test_plan_combines_note_and_difficulty(
+    monkeypatch, auth_user: dict
+) -> None:
+    """明确要求「归档 + 讲解」时，两个追加型能力按原话顺序组合调度。"""
+    _use_classifier(monkeypatch, _FakeClassifier(False))
+    session = _new_session(auth_user["id"], ROOM_INTERVIEW)
+    _add_completed_interview(auth_user["id"], session["id"])
+
+    plan = OrchestratorService().plan(
+        auth_user["id"],
+        _payload(
+            session["id"],
+            "把这次面试的情况进行笔记归档，并对我的薄弱点进行讲解",
+        ),
+    )
+
+    assert plan.tier == 1
+    assert [agent.name for agent in plan.agents] == [NOTE_AGENT, DIFFICULTY_AGENT]
+
+
+def test_plan_does_not_combine_without_archive_action(
+    monkeypatch, auth_user: dict
+) -> None:
+    """「讲解我的笔记」只是讲解，不因出现「笔记」就额外归档。"""
+    _use_classifier(monkeypatch, _FakeClassifier(False))
+    session = _new_session(auth_user["id"], ROOM_INTERVIEW)
+    _add_completed_interview(auth_user["id"], session["id"])
+
+    plan = OrchestratorService().plan(
+        auth_user["id"], _payload(session["id"], "讲解一下我的笔记里的薄弱点")
+    )
+
+    assert [agent.name for agent in plan.agents] == [DIFFICULTY_AGENT]
+
+
 def test_plan_rejects_foreign_session(auth_user: dict, other_auth) -> None:
     """他人会话统一 404，不进入任何路由。"""
     other_user, _ = other_auth
@@ -330,8 +396,63 @@ async def test_agent_chat_routes_to_quiz(
     assert text.index("event: task") < text.index("event: done")
     assert '"kind": "quiz"' in text
 
+    # 路由节点先于 agent(start)，能力节点在 agent(start) 之后逐条下发
+    assert '"node": "route"' in text
+    assert '"node": "prepare"' in text
+    assert '"node": "generate_quiz"' in text
+    assert text.index('"node": "route"') < text.index('"phase": "start"')
+    assert text.index('"phase": "start"') < text.index('"node": "prepare"')
+    assert text.index('"node": "persist_quiz"') < text.index("event: task")
+
     messages = message_repo.list_all_by_session(session["id"])
     assert messages and messages[0]["request_id"].endswith(":quiz")
+    # 时间轴随消息落库：三个能力节点全部完成，刷新页面后仍可回显
+    activity = messages[0]["activity"]
+    assert {node["node"] for node in activity} == {
+        "prepare",
+        "generate_quiz",
+        "persist_quiz",
+    }
+    assert all(node["status"] == "done" for node in activity)
+
+
+async def test_agent_chat_reports_failed_step_and_error(
+    client: httpx.AsyncClient,
+    auth_user: dict,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """能力执行失败：节点标 failed + error 收尾，不再下发 task / done。"""
+    session = _new_session(auth_user["id"])
+
+    class _FailGraph:
+        def invoke(self, *args, **kwargs):
+            raise ValueError("模拟模型异常")
+
+    monkeypatch.setattr(
+        learning_quiz,
+        "build_learning_quiz_graph",
+        lambda: _FailGraph(),
+    )
+
+    resp = await client.post(
+        "/api/agent/chat",
+        headers=auth_headers,
+        json={
+            "session_id": session["id"],
+            "request_text": "来 3 道练习题",
+            "question_count": 1,
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    text = resp.text
+    assert '"node": "generate_quiz"' in text
+    assert '"status": "failed"' in text
+    assert '"error": "学习测评生成失败，请稍后重试"' in text
+    assert "event: task" not in text
+    assert "event: done" not in text
+    assert "event: error" in text
 
 
 async def test_agent_chat_falls_back_to_chat(
@@ -360,10 +481,20 @@ async def test_agent_chat_falls_back_to_chat(
     assert resp.text.index("event: delta") < resp.text.index("event: done")
     assert 'data: {"content": "你好"}' in resp.text
     assert "trace_id" in resp.text
+    # 聊天分支：路由节点 + 生成节点，生成节点先 start，done 之前补 done 状态
+    assert '"node": "route"' in resp.text
+    assert '"node": "generate_reply"' in resp.text
+    assert resp.text.index('"node": "generate_reply"') < resp.text.index(
+        "event: delta"
+    )
 
     messages = message_repo.list_all_by_session(session["id"])
     assert [item["request_text"] for item in messages] == ["你好"]
     assert messages[0]["status"] == 1
+    # 聊天分支同样落库路由 + 回答节点，刷新后时间轴不丢失
+    activity = messages[0]["activity"]
+    assert [node["node"] for node in activity] == ["route", "generate_reply"]
+    assert all(node["status"] == "done" for node in activity)
 
 
 async def test_agent_chat_rejects_foreign_session(

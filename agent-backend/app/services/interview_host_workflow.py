@@ -30,6 +30,7 @@ from ..db import (
     workflow_run_repo,
 )
 from . import prompt_injection_service, prompt_template_service
+from .agent_progress import STEP_DONE, STEP_START, StepCallback, emit_step
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,6 @@ BACKGROUND_FIELDS = (
     "target_skills",
     "project_experience",
     "weak_topics",
-    "opening_question",
 )
 
 __all__ = [
@@ -235,9 +235,6 @@ def _build_background(variables: dict[str, Any]) -> dict[str, str]:
         "weak_topics": "、".join(
             prompt_injection_service.sanitize_items(variables.get("weak_topics"))
         ),
-        "opening_question": _editable_text(
-            variables.get("opening_question"), 500
-        ),
     }
 
 
@@ -275,23 +272,43 @@ def build_interview_prompt(background: dict[str, str], user_id: int) -> str:
             or DEFAULT_LIST,
         }
     )
-    return prompt_injection_service.render_template(combined["final_template"], values)
+    return prompt_injection_service.render_template(
+        combined["final_template"], values
+    )
 
 
 def start_interview_prepare(
-    user_id: int, session_id: int, request_text: str = ""
+    user_id: int,
+    session_id: int,
+    request_text: str = "",
+    *,
+    on_step: StepCallback | None = None,
 ) -> dict:
     """第一阶段：校验 → 取简历 → 提取变量 → 合并 → 生成待确认背景并落库。"""
+    emit_step(on_step, "load_resume", "读取简历", STEP_START)
     _get_interview_session(user_id, session_id)
     resume, resume_text = _load_resume(user_id)
+    emit_step(
+        on_step, "load_resume", "读取简历", STEP_DONE, detail=resume["file_name"]
+    )
+
+    emit_step(on_step, "extract_variables", "提取岗位背景", STEP_START)
     extracted, stated = _extract_variables(
         resume_text, request_text, user_id, resume["id"]
     )
+    emit_step(
+        on_step,
+        "extract_variables",
+        "提取岗位背景",
+        STEP_DONE,
+        detail=extracted["target_job"],
+    )
 
+    emit_step(on_step, "merge_background", "整理面试背景", STEP_START)
     profile = user_profile_repo.get_by_user_id(user_id)
     profile_is_latest = _profile_is_latest(profile, resume)
     profile_overrides = _user_overrides(profile) if profile_is_latest else {}
-    # 本轮明确表述优先级最高；opening_question / project_experience 仍取简历
+    # 本轮明确表述优先级最高；project_experience 仍取简历
     stated_overrides = {
         field: stated[field]
         for field in (*OVERRIDE_FIELDS, YEARS_FIELD)
@@ -315,6 +332,9 @@ def start_interview_prepare(
         )
 
     background = _build_background(variables)
+    emit_step(on_step, "merge_background", "整理面试背景", STEP_DONE)
+
+    emit_step(on_step, "persist_prepare", "保存待确认背景", STEP_START)
     resume_info = {
         "resource_id": resume["id"],
         "file_name": resume["file_name"],
@@ -341,6 +361,7 @@ def start_interview_prepare(
             "state_json": state,
         }
     )
+    emit_step(on_step, "persist_prepare", "保存待确认背景", STEP_DONE)
 
     logger.info(
         "面试背景待确认 | user_id=%s session_id=%s run_id=%s",

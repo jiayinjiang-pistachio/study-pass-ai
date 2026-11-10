@@ -144,8 +144,7 @@ data: {"message_id":0,"status":1,"sources":[],"trace_id":"..."}
     "years_experience": "3 年",
     "target_skills": "Python、MySQL",
     "project_experience": "负责订单系统开发。",
-    "weak_topics": "分布式事务",
-    "opening_question": "请介绍你最近负责的那个订单系统项目。"
+    "weak_topics": "分布式事务"
   },
   "message_id": 0
 }
@@ -153,9 +152,9 @@ data: {"message_id":0,"status":1,"sources":[],"trace_id":"..."}
 
 约定：
 
-- `background` 七个字段**全部是字符串**，可直接绑定单行文本框；
+- `background` 六个字段**全部是字符串**，可在确认弹窗中直接编辑（岗位 / 职级 / 年限 / 技能 / 项目 / 薄弱点）；
 - 技能 / 薄弱点用「、」连接；年限为「N 年」或「应届/无经验」，未知为空字符串；
-- `target_job / target_level / project_experience / opening_question` 中未知项为空字符串；
+- `target_job / target_level / project_experience` 中未知项为空字符串；
 - 第一阶段**不返回**最终提示词，`run_id` 是第二阶段的唯一凭据。
 
 同时已写入 `workflow_runs`：`workflow_type=interview_prepare`、
@@ -174,8 +173,7 @@ data: {"message_id":0,"status":1,"sources":[],"trace_id":"..."}
     "years_experience": "5 年",
     "target_skills": "Vue、TypeScript",
     "project_experience": "负责电商前端重构。",
-    "weak_topics": "性能优化",
-    "opening_question": "请介绍你负责的前端项目。"
+    "weak_topics": "性能优化"
   }
 }
 ```
@@ -204,7 +202,7 @@ data: {"message_id":0,"status":1,"sources":[],"trace_id":"..."}
 3. 原子抢占 `pending_confirmation → confirming`，**同一 `run_id` 只能成功一次**；
 4. 创建入口消息：`chat_messages` 一条记录，`select_mode=4`（模拟面试）、
    `request_id={run_id}:interview`、`request_text` 为用户原话、
-   `response_text` 为确认后的 `opening_question`、`status=1`；
+   `response_text` 固定为「面试已准备好，请开始回答。」、`status=1`；
 5. 创建面试：`interviews.qa_object=[]`、`status=0`、
    `interview_host_prompt` 保存最终提示词；
 6. 回填 `chat_messages.interview_id`，run 状态置为 `confirmed`。
@@ -218,11 +216,11 @@ data: {"message_id":0,"status":1,"sources":[],"trace_id":"..."}
 | 触发方式 | 关键词 / 语义快筛或 Tier 2 规划命中，或 `preferred_agent`；要求 `session_mode=1` + 简历 |
 | 第一阶段事件 | SSE `task(kind=interview_prepare)`，`payload.status=pending_confirmation`，`message_id=0` |
 | 第一阶段状态 | `status=pending_confirmation`，返回 `run_id`，无 `prompt` / `variables` |
-| 背景字段 | 七个字段齐全且均为字符串，技能 / 薄弱点用「、」连接 |
-| 最新输入优先 | 本轮表述 > 较新的资料/简历 > 另一方兜底；`opening_question` 只取简历 |
+| 背景字段 | 六个字段齐全且均为字符串，技能 / 薄弱点用「、」连接 |
+| 最新输入优先 | 本轮表述 > 较新的资料/简历 > 另一方兜底；`project_experience` 只取简历 |
 | run 落库 | `workflow_runs.state_json.background` 与响应一致，状态 `pending_confirmation` |
 | 确认提示词 | `interviews.interview_host_prompt` 只包含确认后的值，占位符已替换 |
-| 入口消息 | `chat_messages.select_mode=4`，`request_id={run_id}:interview`，`interview_id` 已回填 |
+| 入口消息 | `chat_messages.select_mode=4`，`request_id={run_id}:interview`，`response_text` 为固定提示文案，`interview_id` 已回填 |
 | 面试记录 | `interviews.message_id` 等于入口消息 ID，`qa_object=[]`，`status=0` |
 | 幂等 | 同一 `run_id` 第二次确认返回 `409 该面试已确认，请勿重复确认` |
 | 越权 | 确认他人 run 或查询他人 interview 均返回 `404` |

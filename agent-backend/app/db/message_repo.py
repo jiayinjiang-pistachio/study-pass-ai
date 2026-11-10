@@ -162,6 +162,17 @@ def update_task_result(
         return True
 
 
+def update_activity(message_id: int, activity: list[dict]) -> bool:
+    """回写总控执行时间轴快照；消息不存在返回 False。"""
+    with SessionLocal() as session:
+        obj = session.get(ChatMessage, message_id)
+        if obj is None:
+            return False
+        obj.activity = activity
+        session.commit()
+        return True
+
+
 def count_by_session(session_id: int) -> int:
     """统计会话消息总数（分页用）。"""
     with SessionLocal() as session:

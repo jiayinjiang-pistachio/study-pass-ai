@@ -19,9 +19,6 @@ const chatStore = useChatStore()
 const visible = ref(false)
 const submitting = ref(false)
 
-/** 同一测评只自动弹一次：切换会话重新渲染时不再打扰用户 */
-const autoOpened = new Set<string>()
-
 watch(
   () => props.questions.length,
   (length) => {
@@ -30,9 +27,8 @@ watch(
       visible.value = false
       return
     }
-    if (autoOpened.has(props.requestId)) return
-    autoOpened.add(props.requestId)
-    visible.value = true
+    // 只有本页面刚生成的测评会自动弹窗；历史 / 过期试题只保留入口卡片
+    if (chatStore.consumeQuizAutoOpen(props.requestId)) visible.value = true
   },
   { immediate: true },
 )

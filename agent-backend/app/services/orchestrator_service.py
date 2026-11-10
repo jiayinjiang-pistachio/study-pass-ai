@@ -10,9 +10,12 @@
 执行层按能力类型分流：聊天复用 chat_service；工作流复用既有
 learning_workflow / interview_host_workflow；一次性任务复用
 difficulty_card_workflow 与 note_archive_service。事件顺序统一为
-meta → agent(start) → delta / task → done（失败以 error 收尾）。
+meta → step(route) → agent(start) → step*（节点进度）→ delta / task → done
+（失败为 step(failed) → error）。
 """
 
+import asyncio
+import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -63,6 +66,13 @@ from . import (
     note_archive_service,
     session_agent_state,
 )
+from .agent_progress import (
+    STEP_DONE,
+    STEP_FAILED,
+    STEP_START,
+    StepCallback,
+    emit_step,
+)
 from .a2a_handoff_service import A2AHandoffService
 from .note_service import NoteService
 from .semantic_intent import SemanticIntentClassifier
@@ -76,15 +86,32 @@ STATUS_COMPLETED = "completed"
 
 EVENT_META = "meta"
 EVENT_AGENT = "agent"
+EVENT_STEP = "step"
 EVENT_TASK = "task"
 EVENT_DONE = "done"
 EVENT_ERROR = "error"
+
+# 进度节点：聊天分支在总控层维护；任务分支由能力自身上报
+ROUTE_AGENT = "flow_controller"
+ROUTE_NODE = "route"
+ROUTE_TITLE = "理解请求"
+REPLY_NODE = "generate_reply"
+REPLY_TITLE = "生成回答"
+GENERIC_ERROR = "任务执行失败，请稍后重试"
 
 STATUS_MESSAGE_DONE = 1
 # 快筛未命中但消息达到该长度时，才值得调用一次规划模型
 TASK_MIN_CHARS = 10
 # 普通聊天 / 无产物任务的占位 message_id：前端据此知道本轮没有可对账的消息
 NO_MESSAGE_ID = 0
+# 落库的时间轴状态用前端展示态；SSE 仍用 start / done / failed
+ACTIVITY_RUNNING = "running"
+
+# 可在一轮内先后执行的「追加型」能力：只做一次性产物，不打断用户作答。
+# 其它能力（出题等待作答、面试主考官需确认、复盘）命中后仍只取首个。
+COMPOSABLE_AGENTS = frozenset({DIFFICULTY_AGENT, NOTE_AGENT})
+# 归档必须是明确动作；避免「讲解我的笔记」这类句子被误判成归档
+NOTE_ARCHIVE_ACTIONS = ("归档", "整理成笔记", "总结成笔记", "存成笔记", "记录下来")
 
 
 def _run_a2a_handoff(envelope: dict, context: dict) -> None:
@@ -164,17 +191,17 @@ class OrchestratorService:
                 session["id"],
                 capability.name,
             )
-            return self._single_plan(session, trace_id, 0, capability, text)
+            return self._fast_plan(session, trace_id, (capability,), text, tier=0)
 
-        capability = self._fast_match(text, session_mode, user_id, session)
-        if capability is not None:
+        capabilities = self._fast_match(text, session_mode, user_id, session)
+        if capabilities:
             logger.info(
                 "Tier1 快筛命中 | user_id=%s session_id=%s agent=%s",
                 user_id,
                 session["id"],
-                capability.name,
+                ",".join(capability.name for capability in capabilities),
             )
-            return self._single_plan(session, trace_id, 1, capability, text)
+            return self._fast_plan(session, trace_id, capabilities, text)
 
         if len(text.strip()) >= TASK_MIN_CHARS:
             planned = self._plan_with_model(user_id, session, text)
@@ -227,16 +254,34 @@ class OrchestratorService:
 
     def _fast_match(
         self, text: str, session_mode: int, user_id: int, session: dict
-    ) -> AgentCapability | None:
-        """关键词优先，全部落空后再逐能力做语义比较。"""
+    ) -> tuple[AgentCapability, ...] | None:
+        """关键词优先，全部落空后再逐能力做语义比较。
+
+        关键词命中多个能力时：若都属于「追加型」且归档是明确动作，则一并调度
+        （如「归档这次面试，并讲解薄弱点」→ 笔记归档 + 难点学习），按原话提及
+        的先后执行；其余情况保持只取第一个命中，避免出题 / 面试等被打断。
+        """
         candidates = capabilities_for_room(session_mode)
+        keyword_hits: list[tuple[int, AgentCapability]] = []
         for capability in candidates:
             if not self._requires_met(capability, user_id, session):
                 continue
-            if capability.triggers and any(
-                keyword in text for keyword in capability.triggers
-            ):
-                return capability
+            if not capability.triggers:
+                continue
+            positions = [
+                text.find(keyword)
+                for keyword in capability.triggers
+                if keyword in text
+            ]
+            if positions:
+                keyword_hits.append((min(positions), capability))
+
+        if keyword_hits:
+            keyword_hits.sort(key=lambda item: item[0])
+            hits = tuple(capability for _, capability in keyword_hits)
+            if self._is_composable(hits, text):
+                return hits
+            return (hits[0],)
 
         for capability in candidates:
             if not self._requires_met(capability, user_id, session):
@@ -244,8 +289,17 @@ class OrchestratorService:
             if capability.examples and SemanticIntentClassifier.get().classify_intent(
                 text, capability.examples, capability.threshold
             ):
-                return capability
+                return (capability,)
         return None
+
+    @staticmethod
+    def _is_composable(hits: tuple[AgentCapability, ...], text: str) -> bool:
+        """多个关键词命中是否可组合执行：仅限追加型 + 明确归档动作。"""
+        if len(hits) < 2 or not all(hit.name in COMPOSABLE_AGENTS for hit in hits):
+            return False
+        if any(hit.name == NOTE_AGENT for hit in hits):
+            return any(action in text for action in NOTE_ARCHIVE_ACTIONS)
+        return True
 
     def _requires_met(
         self, capability: AgentCapability, user_id: int, session: dict
@@ -320,26 +374,32 @@ class OrchestratorService:
         return {**result, "agents": agents}
 
     @staticmethod
-    def _single_plan(
+    def _fast_plan(
         session: dict,
         trace_id: str,
-        tier: int,
-        capability: AgentCapability,
+        capabilities: tuple[AgentCapability, ...],
         text: str,
+        *,
+        tier: int = 1,
     ) -> AgentPlan:
-        """快筛 / 显式指令命中的单能力计划；出题题量从原话提取。"""
-        slots: dict[str, Any] = {}
-        if capability.name == QUIZ_AGENT:
-            count = learning_workflow.infer_question_count(text)
-            if count is not None:
-                slots["question_count"] = count
+        """快筛 / 显式指令命中的计划；出题题量从原话提取，多能力按顺序执行。"""
+        agents: list[PlannedAgent] = []
+        for capability in capabilities:
+            slots: dict[str, Any] = {}
+            if capability.name == QUIZ_AGENT:
+                count = learning_workflow.infer_question_count(text)
+                if count is not None:
+                    slots["question_count"] = count
+            agents.append(PlannedAgent(name=capability.name, slots=slots))
         return AgentPlan(
             session=session,
             trace_id=trace_id,
             tier=tier,
-            intent=capability.returns,
-            agents=(PlannedAgent(name=capability.name, slots=slots),),
-            reason=f"{capability.title}触发",
+            intent="+".join(capability.returns for capability in capabilities),
+            agents=tuple(agents),
+            reason="、".join(
+                f"{capability.title}触发" for capability in capabilities
+            ),
         )
 
     # ---------- 事件流 ----------
@@ -375,14 +435,58 @@ class OrchestratorService:
                 "trace_id": plan.trace_id,
             },
         )
+        activity: list[dict[str, Any]] = []
+        yield self._record_step(
+            activity,
+            plan.trace_id,
+            ROUTE_AGENT,
+            ROUTE_NODE,
+            ROUTE_TITLE,
+            STEP_DONE,
+            detail=plan.reason,
+        )
         yield self._agent_event(plan, plan.agents[0].name, "start")
-        async for event in chat_service.stream_reply(state, emit_meta=False):
-            yield event
+        yield self._record_step(
+            activity,
+            plan.trace_id,
+            plan.agents[0].name,
+            REPLY_NODE,
+            REPLY_TITLE,
+            STEP_START,
+        )
+
+        # 内层 stream_reply 已把成功 / 失败收尾成 done / error 事件，
+        # 据此补上本轮节点状态，避免前端时间轴停留在 running。
+        try:
+            async for event in chat_service.stream_reply(state, emit_meta=False):
+                if event.startswith("event: done"):
+                    yield self._record_step(
+                        activity,
+                        plan.trace_id,
+                        plan.agents[0].name,
+                        REPLY_NODE,
+                        REPLY_TITLE,
+                        STEP_DONE,
+                    )
+                elif event.startswith("event: error"):
+                    yield self._record_step(
+                        activity,
+                        plan.trace_id,
+                        plan.agents[0].name,
+                        REPLY_NODE,
+                        REPLY_TITLE,
+                        STEP_FAILED,
+                        error=self._sse_error_message(event),
+                    )
+                yield event
+        finally:
+            # 客户端中途断开也会走到这里，保留已执行节点的快照
+            self._persist_activity(state.message["id"], activity)
 
     async def _stream_tasks(
         self, plan: AgentPlan, user_id: int, payload: AgentChatIn
     ) -> AsyncIterator[str]:
-        """任务分支：同步执行子能力，依次下发 agent / task / done。
+        """任务分支：同步执行子能力，依次下发 agent / step / task / done。
 
         任务自身的会话消息由子工作流写入（Phase 1 保持现状），
         meta 的 message_id 先置 0，前端凭 task.payload 对账。
@@ -396,18 +500,20 @@ class OrchestratorService:
                 "trace_id": plan.trace_id,
             },
         )
+        # 路由规划在建立流之前完成，这里补一条「理解请求」的完成节点
+        yield self._step_event(
+            plan.trace_id, ROUTE_AGENT, ROUTE_NODE, ROUTE_TITLE, STEP_DONE, detail=plan.reason
+        )
 
         last_message_id = NO_MESSAGE_ID
         for agent in plan.agents:
             yield self._agent_event(plan, agent.name, "start")
+            outcome: dict[str, Any] = {}
             try:
-                kind, result = await run_in_threadpool(
-                    self._execute_agent,
-                    plan,
-                    agent,
-                    user_id,
-                    payload,
-                )
+                async for event in self._run_agent_with_steps(
+                    plan, agent, user_id, payload, outcome
+                ):
+                    yield event
             except Exception as exc:
                 logger.error(
                     "子 Agent 执行失败 | trace_id=%s agent=%s",
@@ -418,9 +524,12 @@ class OrchestratorService:
                 yield self._error_event(exc)
                 return
 
+            kind, result = outcome["kind"], outcome["value"]
             message_id = result.get("message_id")
             if isinstance(message_id, int) and message_id > 0:
                 last_message_id = message_id
+                # 先落库再下发 task：前端收到 task 立即刷新时即可拿到完整时间轴
+                self._persist_activity(message_id, outcome.get("activity") or [])
             yield chat_service.sse_event(
                 EVENT_TASK,
                 {
@@ -442,12 +551,90 @@ class OrchestratorService:
             },
         )
 
+    async def _run_agent_with_steps(
+        self,
+        plan: AgentPlan,
+        agent: PlannedAgent,
+        user_id: int,
+        payload: AgentChatIn,
+        out: dict[str, Any],
+    ) -> AsyncIterator[str]:
+        """在线程池执行子能力，并把工作线程的节点进度实时转成 SSE。
+
+        生成器跑在事件循环、能力跑在 worker 线程：用 asyncio.Queue +
+        call_soon_threadsafe 桥接，保证 step 事件总是先于 result / error
+        到达；失败时把仍停在 start 的节点统一标记为 failed。
+        """
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+        def put(kind: str, data: Any) -> None:
+            # 客户端断开后事件循环可能已关闭，进度无需再上报
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, (kind, data))
+            except RuntimeError:
+                pass
+
+        def emit(
+            node: str,
+            title: str,
+            status: str,
+            detail: str | None = None,
+            error: str | None = None,
+        ) -> None:
+            put("step", (node, title, status, detail, error))
+
+        def worker() -> None:
+            try:
+                result = self._execute_agent(
+                    plan, agent, user_id, payload, on_step=emit
+                )
+            except Exception as exc:
+                put("error", exc)
+                return
+            put("result", result)
+
+        loop.run_in_executor(None, worker)
+        # 只在本生成器线程维护 active / activity，避免与 worker 并发读写
+        active: list[tuple[str, str]] = []
+        activity: list[dict[str, Any]] = []
+        while True:
+            kind, data = await queue.get()
+            if kind == "result":
+                out["kind"], out["value"] = data
+                out["activity"] = activity
+                return
+            if kind == "error":
+                exc = data
+                message = getattr(exc, "message", None) or GENERIC_ERROR
+                for node, title in active:
+                    yield self._record_step(
+                        activity,
+                        plan.trace_id,
+                        agent.name,
+                        node,
+                        title,
+                        STEP_FAILED,
+                        error=str(message),
+                    )
+                raise exc
+            node, title, status, detail, error = data
+            if status == STEP_START:
+                active.append((node, title))
+            elif status in (STEP_DONE, STEP_FAILED):
+                active = [item for item in active if item[0] != node]
+            yield self._record_step(
+                activity, plan.trace_id, agent.name, node, title, status, detail, error
+            )
+
     def _execute_agent(
         self,
         plan: AgentPlan,
         agent: PlannedAgent,
         user_id: int,
         payload: AgentChatIn,
+        *,
+        on_step: StepCallback | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """按能力名执行；返回 (task.kind, payload)。"""
         session_id = plan.session["id"]
@@ -460,7 +647,9 @@ class OrchestratorService:
                 question_count=self._question_count(agent, payload),
                 provider=payload.provider,
             )
-            result = learning_workflow.start_learning_workflow(user_id, start)
+            result = learning_workflow.start_learning_workflow(
+                user_id, start, on_step=on_step
+            )
             message = message_repo.get_by_request_id(
                 f"{result['run_id']}:quiz", user_id
             )
@@ -477,7 +666,7 @@ class OrchestratorService:
 
         if agent.name == DIFFICULTY_AGENT:
             result = difficulty_card_workflow.start_difficulty_card(
-                user_id, session_id, text
+                user_id, session_id, text, on_step=on_step
             )
             message = message_repo.get_by_request_id(
                 f"{result['run_id']}:card", user_id
@@ -495,7 +684,7 @@ class OrchestratorService:
 
         if agent.name == INTERVIEW_HOST_AGENT:
             result = interview_host_workflow.start_interview_prepare(
-                user_id, session_id, text
+                user_id, session_id, text, on_step=on_step
             )
             result["message_id"] = NO_MESSAGE_ID
             session_agent_state.record_dispatch(
@@ -509,7 +698,7 @@ class OrchestratorService:
 
         if agent.name == INTERVIEW_EVALUATOR_AGENT:
             result = interview_evaluation_service.InterviewEvaluationService().evaluate_session(
-                user_id, session_id
+                user_id, session_id, on_step=on_step
             )
             session_agent_state.record_dispatch(
                 user_id,
@@ -522,6 +711,7 @@ class OrchestratorService:
             return "interview_evaluation", result
 
         if agent.name == NOTE_AGENT:
+            emit_step(on_step, "select_source", "选择归档来源", STEP_START)
             # 优先用已完成的测评；没有测评时退到最近一次已结束的面试
             run_row = self._completed_run(user_id, session_id)
             interview = None
@@ -535,7 +725,15 @@ class OrchestratorService:
                     http_status=status.HTTP_409_CONFLICT,
                     detail=f"session_id={session_id} user_id={user_id}",
                 )
+            emit_step(
+                on_step,
+                "select_source",
+                "选择归档来源",
+                STEP_DONE,
+                detail="学习测评" if run_row is not None else "面试复盘",
+            )
 
+            emit_step(on_step, "generate_note", "生成笔记", STEP_START)
             if run_row is not None:
                 archive = (
                     note_archive_service.NoteArchiveService().archive_from_run(
@@ -556,10 +754,15 @@ class OrchestratorService:
                     user_id, session_id, interview["id"], archive
                 )
                 run_id = f"interview:{interview['id']}"
+            emit_step(
+                on_step, "generate_note", "生成笔记", STEP_DONE, detail=archive["title"]
+            )
 
+            emit_step(on_step, "save_note", "保存笔记", STEP_START)
             message_id = self._save_note_message(
                 user_id, session_id, text, saved["note_id"], archive["title"]
             )
+            emit_step(on_step, "save_note", "保存笔记", STEP_DONE)
             result = {
                 "run_id": run_id,
                 "note_id": saved["note_id"],
@@ -631,6 +834,103 @@ class OrchestratorService:
                 "reason": plan.reason,
             },
         )
+
+    @staticmethod
+    def _step_data(
+        trace_id: str,
+        agent: str,
+        node: str,
+        title: str,
+        status: str,
+        detail: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        """step 事件载荷；同时用作落库快照（状态统一为前端展示态）。"""
+        return {
+            "trace_id": trace_id,
+            "agent": agent,
+            "node": node,
+            "title": title,
+            "status": ACTIVITY_RUNNING if status == STEP_START else status,
+            "detail": detail,
+            "error": error,
+        }
+
+    @classmethod
+    def _step_event(
+        cls,
+        trace_id: str,
+        agent: str,
+        node: str,
+        title: str,
+        status: str,
+        detail: str | None = None,
+        error: str | None = None,
+    ) -> str:
+        """节点级进度事件；前端按 (agent, node) 更新时间轴。"""
+        return chat_service.sse_event(
+            EVENT_STEP,
+            cls._step_data(trace_id, agent, node, title, status, detail, error),
+        )
+
+    @classmethod
+    def _record_step(
+        cls,
+        activity: list[dict[str, Any]],
+        trace_id: str,
+        agent: str,
+        node: str,
+        title: str,
+        status: str,
+        detail: str | None = None,
+        error: str | None = None,
+    ) -> str:
+        """下发 step 并把展示态快照记入本轮时间轴。
+
+        同一 (agent, node) 的 start / done 合并为一条，与前端 upsert 规则一致。
+        """
+        data = cls._step_data(trace_id, agent, node, title, status, detail, error)
+        # 落库载荷去掉仅 SSE 需要的 trace_id，避免消息表存冗余调度信息
+        snapshot = {key: value for key, value in data.items() if key != "trace_id"}
+        existing = next(
+            (
+                item
+                for item in activity
+                if item["agent"] == agent and item["node"] == node
+            ),
+            None,
+        )
+        if existing is None:
+            activity.append(snapshot)
+        else:
+            existing.update(snapshot)
+        return chat_service.sse_event(EVENT_STEP, data)
+
+    @staticmethod
+    def _persist_activity(message_id: int, activity: list[dict[str, Any]]) -> None:
+        """时间轴落库失败只记日志，不影响已完成的业务结果与事件流。"""
+        if message_id <= NO_MESSAGE_ID or not activity:
+            return
+        try:
+            message_repo.update_activity(message_id, activity)
+        except Exception:
+            logger.warning(
+                "执行时间轴落库失败 | message_id=%s", message_id, exc_info=True
+            )
+
+    @staticmethod
+    def _sse_error_message(event: str) -> str:
+        """从内层 error 事件里取出面向用户的文案，供失败节点展示。"""
+        for line in event.splitlines():
+            if not line.startswith("data: "):
+                continue
+            try:
+                payload = json.loads(line[len("data: ") :])
+            except ValueError:
+                continue
+            if isinstance(payload, dict) and isinstance(payload.get("message"), str):
+                return payload["message"]
+        return "AI 服务暂时不可用，请稍后重试"
 
     @staticmethod
     def _error_event(exc: Exception) -> str:

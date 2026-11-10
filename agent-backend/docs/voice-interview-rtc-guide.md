@@ -397,8 +397,7 @@ curl -s -X POST http://127.0.0.1:8000/api/interviews/confirm \
       \"years_experience\": \"5 年\",
       \"target_skills\": \"Java、MySQL、Redis\",
       \"project_experience\": \"高并发订单系统\",
-      \"weak_topics\": \"分布式事务\",
-      \"opening_question\": \"请做一下自我介绍\"
+      \"weak_topics\": \"分布式事务\"
     }
   }" | jq '.data | {interview_id, voice}'
 

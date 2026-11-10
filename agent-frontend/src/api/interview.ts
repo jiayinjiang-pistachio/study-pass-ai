@@ -39,6 +39,7 @@ export interface VoiceFinishPayload {
 
 export interface VoiceFinishResult {
   interviewId: number
+  sessionId: number
   status: number
   interviewDuration: number
   qaCount: number
@@ -46,6 +47,7 @@ export interface VoiceFinishResult {
 
 interface RawVoiceFinishResult {
   interview_id?: number
+  session_id?: number
   status?: number
   interview_duration?: number
   qa_count?: number
@@ -71,6 +73,7 @@ export async function finishVoiceInterview(
   )
   return {
     interviewId: data.interview_id ?? interviewId,
+    sessionId: data.session_id ?? 0,
     status: data.status ?? 0,
     interviewDuration: data.interview_duration ?? payload.interviewDuration,
     qaCount: data.qa_count ?? payload.qaObject.length,
@@ -93,7 +96,6 @@ function toConfirmBackground(background: InterviewBackground): Record<string, st
     target_skills: background.targetSkills,
     project_experience: background.projectExperience,
     weak_topics: background.weakTopics,
-    opening_question: background.openingQuestion,
   }
 }
 

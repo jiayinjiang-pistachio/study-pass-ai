@@ -45,6 +45,7 @@ from ..schemas.learning_workflow import (
     MAX_QUESTION_COUNT,
     LearningWorkflowSubmitIn,
 )
+from .agent_progress import STEP_DONE, STEP_START, StepCallback, emit_step
 
 logger = logging.getLogger(__name__)
 
@@ -185,8 +186,11 @@ def _raise_workflow_error(
     ) from exc
 
 
-def start_learning_workflow(user_id: int, payload) -> dict:
+def start_learning_workflow(
+    user_id: int, payload, *, on_step: StepCallback | None = None
+) -> dict:
     """校验会话归属 → 执行图到 interrupt → 持久化题目并返回 waiting_answer。"""
+    emit_step(on_step, "prepare", "准备测评", STEP_START)
     session = session_repo.get_for_user(payload.session_id, user_id)
     if session is None:
         raise BusinessException(
@@ -228,8 +232,12 @@ def start_learning_workflow(user_id: int, payload) -> dict:
             "state_json": state,
         }
     )
+    emit_step(
+        on_step, "prepare", "准备测评", STEP_DONE, detail=f"计划生成 {question_count} 题"
+    )
 
     graph = learning_quiz.build_learning_quiz_graph()
+    emit_step(on_step, "generate_quiz", "生成题目", STEP_START)
     try:
         graph.invoke(state, config)
         snapshot = graph.get_state(config)
@@ -247,6 +255,11 @@ def start_learning_workflow(user_id: int, payload) -> dict:
         )
 
     quiz = snapshot.values.get("quiz") or []
+    emit_step(
+        on_step, "generate_quiz", "生成题目", STEP_DONE, detail=f"已生成 {len(quiz)} 题"
+    )
+
+    emit_step(on_step, "persist_quiz", "保存题目", STEP_START)
     saved_state = {**snapshot.values, "status": STATUS_WAITING_ANSWER}
     workflow_run_repo.update(
         run_id,
@@ -272,6 +285,7 @@ def start_learning_workflow(user_id: int, payload) -> dict:
         )
     except Exception:
         logger.warning("学习测评分题消息落库失败 | run_id=%s", run_id, exc_info=True)
+    emit_step(on_step, "persist_quiz", "保存题目", STEP_DONE)
 
     logger.info(
         "学习测评已出题 | run_id=%s user_id=%s question_count=%s",
