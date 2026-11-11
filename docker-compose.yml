@@ -1,0 +1,240 @@
+# 学面通 AI · Docker Compose 单机部署
+#
+# 使用方式（所有命令都必须带 --env-file，变量插值只从该文件读取）：
+#   cp .env.docker.example .env.docker
+#   docker compose --env-file .env.docker up -d --build
+#
+# 网关：Caddy 同时承担前端静态资源、/api 反向代理（含 SSE）、MinIO 预签名 URL 回源，
+# 并用 Caddyfile 自动申请 / 续期 HTTPS 证书（无需 certbot）。
+# 约束：后端必须单 worker（LangGraph MemorySaver 为进程内状态），不要给 backend 加副本。
+
+name: study-pass
+
+x-backend-env: &backend-env
+  APP_ENV: ${APP_ENV:-prod}
+  MYSQL_URL: mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE}?charset=utf8mb4
+  LOG_LEVEL: ${LOG_LEVEL:-WARNING}
+  LOG_TO_CONSOLE: ${LOG_TO_CONSOLE:-false}
+  LOG_DIR: /app/logs
+  UPLOAD_DIR: /app/uploads
+  JWT_SECRET: ${JWT_SECRET}
+  JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+  REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+  # MinIO 地址必须是浏览器可达的公开域名：预签名 URL 的 Host 参与签名，
+  # 容器内通过 Caddy 的网络别名把该域名解析到网关，再由网关回源 minio:9000。
+  MINIO_ENDPOINT: ${MINIO_PUBLIC_HOST}
+  MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+  MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+  MINIO_BUCKET: ${MINIO_BUCKET:-ai-resource}
+  MINIO_SECURE: ${MINIO_SECURE:-false}
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  REDIS_DB: ${REDIS_DB:-1}
+  REDIS_PASSWORD: ${REDIS_PASSWORD}
+  RATE_LIMIT_BACKEND: redis
+  QDRANT_HOST: qdrant
+  QDRANT_PORT: 6333
+  LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
+  LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com/v1}
+  LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.7}
+  LLM_TIMEOUT: ${LLM_TIMEOUT:-60}
+  LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-1}
+  INTERVIEW_EVAL_AUTO: ${INTERVIEW_EVAL_AUTO:-true}
+  FILE_MAX_BYTES: ${FILE_MAX_BYTES:-10485760}
+  AVATAR_MAX_BYTES: ${AVATAR_MAX_BYTES:-2097152}
+  MEMORY_MAX_TURNS: ${MEMORY_MAX_TURNS:-8}
+  MEMORY_MESSAGE_MAX_CHARS: ${MEMORY_MESSAGE_MAX_CHARS:-4000}
+  RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+  RATE_LIMIT_REGISTER_MAX: ${RATE_LIMIT_REGISTER_MAX:-5}
+  RATE_LIMIT_CHAT_MAX: ${RATE_LIMIT_CHAT_MAX:-20}
+  RATE_LIMIT_UPLOAD_MAX: ${RATE_LIMIT_UPLOAD_MAX:-10}
+  RATE_LIMIT_WORKFLOW_MAX: ${RATE_LIMIT_WORKFLOW_MAX:-5}
+  DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+  SEEDREAM_API_KEY: ${SEEDREAM_API_KEY:-}
+  SEEDREAM_BASE_URL: ${SEEDREAM_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+  SEEDREAM_MODEL: ${SEEDREAM_MODEL:-doubao-seedream-4-0-250828}
+  SEEDREAM_IMAGE_SIZE: ${SEEDREAM_IMAGE_SIZE:-1728x2304}
+  PODCAST_TTS_APP_ID: ${PODCAST_TTS_APP_ID:-}
+  PODCAST_TTS_ACCESS_KEY: ${PODCAST_TTS_ACCESS_KEY:-}
+  VOLC_ACCESS_KEY: ${VOLC_ACCESS_KEY:-}
+  VOLC_SECRET_KEY: ${VOLC_SECRET_KEY:-}
+  VOLC_REGION: ${VOLC_REGION:-cn-north-1}
+  VOLC_RTC_APP_ID: ${VOLC_RTC_APP_ID:-}
+  VOLC_RTC_APP_KEY: ${VOLC_RTC_APP_KEY:-}
+  # 本地向量模型缓存目录（fastembed 首次使用时下载 BAAI/bge-small-zh-v1.5）
+  FASTEMBED_CACHE_PATH: /app/models/fastembed
+  HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+  HF_HUB_DISABLE_XET: "1"
+
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -u"$${MYSQL_USER}" -p"$${MYSQL_PASSWORD}" --silent
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    # 仅本机排障时按需放开：docker compose port mysql 3306
+    expose:
+      - "3306"
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    expose:
+      - "6379"
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - minio_data:/data
+    # 不在容器内探活：MinIO 精简镜像不保证自带 curl / shell。
+    # 后端 ensure_bucket 失败只告警，后续上传会重新建桶，不影响最终可用性。
+    ports:
+      # 控制台只监听本机，用 SSH 隧道访问：ssh -L 9001:127.0.0.1:9001 <server>
+      - "127.0.0.1:9001:9001"
+    expose:
+      - "9000"
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    expose:
+      - "6333"
+
+  # 一次性迁移：MySQL 健康后执行 alembic upgrade head，成功后容器退出
+  migrate:
+    build:
+      context: ./agent-backend
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *backend-env
+      LOG_TO_CONSOLE: "true"
+      LOG_LEVEL: INFO
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    build:
+      context: ./agent-backend
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    restart: unless-stopped
+    environment: *backend-env
+    volumes:
+      - backend_logs:/app/logs
+      - backend_uploads:/app/uploads
+      - model_cache:/app/models
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    expose:
+      - "8000"
+
+  caddy:
+    build:
+      context: .
+      dockerfile: deploy/caddy/Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # 本地用 http://xxx 前缀关闭自动 HTTPS；生产直接写域名，由 Caddy 自动签证书
+      SITE_APP: ${SITE_APP}
+      SITE_STORAGE: ${SITE_STORAGE}
+    volumes:
+      # 证书与 ACME 账户状态持久化，容器重建后无需重新签发
+      - caddy_data:/data
+      - caddy_config:/config
+      # 挂载 Caddyfile，改完站点配置可热重载，无需重新构建镜像
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      default:
+        # 让 backend 能把 MINIO_ENDPOINT（公开域名）解析到网关，预签名 Host 才能对上
+        aliases:
+          - ${MINIO_PUBLIC_HOST}
+    depends_on:
+      backend:
+        condition: service_started
+      minio:
+        condition: service_started
+    healthcheck:
+      # 直接探 Caddy 管理接口（容器内 localhost:2019），不受站点域名限制
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2019/config/ >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  mysql_data:
+  redis_data:
+  minio_data:
+  qdrant_data:
+  backend_logs:
+  backend_uploads:
+  model_cache:
+  caddy_data:
+  caddy_config:

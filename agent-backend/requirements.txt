@@ -60,7 +60,8 @@ qdrant-client==1.20.0
 dashscope==2.0.1
 
 # PDF 文本层提取 + 扫描件逐页渲染（PDFium）
-pypdfium2==5.14.0
+# 5.15.x 起提供 py3-none-manylinux wheel（5.14.0 无 CPython 3.13 Linux wheel，容器构建会失败）
+pypdfium2==5.15.2
 
 # Word 文本提取：知识库 .docx 文档解析
 python-docx==1.2.0

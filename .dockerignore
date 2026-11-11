@@ -1,0 +1,12 @@
+# 网关镜像构建上下文（仓库根）只保留前端与 Caddy 配置
+.git
+.gitignore
+.claude
+agent-backend
+prepare
+interviews
+**/node_modules
+agent-frontend/dist
+agent-frontend/.env.local
+.env
+.env.docker

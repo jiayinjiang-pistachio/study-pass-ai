@@ -1,3 +1,6 @@
 node_modules
 .env
 interviews
+
+# docker compose 本地环境变量
+.env.docker

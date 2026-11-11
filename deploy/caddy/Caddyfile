@@ -1,0 +1,61 @@
+# 学面通 AI 网关（Caddy）
+#
+# 证书由 Caddy 自动申请与续期（Let's Encrypt / ZeroSSL），无需 certbot。
+# 站点地址通过环境变量注入：
+#   本地试跑：SITE_APP=http://study.localhost   SITE_STORAGE=http://storage.localhost
+#   生产环境：SITE_APP=study.example.com        SITE_STORAGE=storage.example.com
+# 写 http:// 前缀即只提供 HTTP；写纯域名则自动启用 HTTPS 并 301 跳转。
+# 生产前请把 80/443 指向本机，并确保域名已完成备案 / DNS 解析。
+
+# ---- 主站：前端静态资源 + API 反向代理 ----
+{$SITE_APP} {
+    # 文档上传 10MB，另留 multipart 与头部开销
+    request_body {
+        max_size 12MB
+    }
+
+    # API 与 SSE：关闭响应缓冲，长任务节点才能即时到达浏览器
+    handle /api/* {
+        reverse_proxy backend:8000 {
+            flush_interval -1
+        }
+    }
+
+    # 历史本地文件（头像等）静态访问
+    handle /uploads/* {
+        reverse_proxy backend:8000 {
+            flush_interval -1
+        }
+    }
+
+    handle /health {
+        reverse_proxy backend:8000
+    }
+
+    # Vite 产物文件名带内容哈希，可长期缓存
+    handle /assets/* {
+        root * /srv
+        encode zstd gzip
+        header Cache-Control "public, max-age=2592000, immutable"
+        file_server
+    }
+
+    # history 路由：未命中的路径回退 index.html
+    # 只在静态资源上启用压缩，避免压缩缓冲影响 /api 的 SSE 实时性
+    handle {
+        root * /srv
+        encode zstd gzip
+        try_files {path} /index.html
+        header Cache-Control "no-cache"
+        file_server
+    }
+}
+
+# ---- MinIO 预签名 URL 回源 ----
+# Caddy 默认会把 Host 改成上游地址，必须改回原始 Host：
+# 预签名 URL 的 Host 参与签名，后端签名用的就是 MINIO_PUBLIC_HOST。
+{$SITE_STORAGE} {
+    reverse_proxy minio:9000 {
+        header_up Host {host}
+    }
+}
