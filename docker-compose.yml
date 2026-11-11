@@ -113,23 +113,32 @@ services:
     expose:
       - "6379"
 
+  # 之所以用 Bitnami legacy 而非官方 minio/minio：官方镜像在当前网络/镜像源环境常被拒绝
+  # （pull access denied）。Bitnami 镜像内置 curl，保留健康检查与控制台。
+  # 注意：该镜像已进入 legacy 仓库，不再跟随 MinIO 上游更新；长期建议切回官方镜像或自建。
   minio:
-    image: minio/minio:latest
+    image: bitnamilegacy/minio:latest
     restart: unless-stopped
-    command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # 打开 9001 控制台（默认 off，只监 API 端口）
+      MINIO_BROWSER: "on"
+      MINIO_DATA_DIR: /bitnami/minio/data
       TZ: Asia/Shanghai
     volumes:
-      - minio_data:/data
-    # 不在容器内探活：MinIO 精简镜像不保证自带 curl / shell。
-    # 后端 ensure_bucket 失败只告警，后续上传会重新建桶，不影响最终可用性。
+      - minio_data:/bitnami/minio/data
     ports:
       # 控制台只监听本机，用 SSH 隧道访问：ssh -L 9001:127.0.0.1:9001 <server>
       - "127.0.0.1:9001:9001"
     expose:
       - "9000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   qdrant:
     image: qdrant/qdrant:v1.12.5
@@ -145,6 +154,7 @@ services:
       context: ./agent-backend
       args:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        APT_MIRROR: ${APT_MIRROR:-deb.debian.org}
     command: ["alembic", "upgrade", "head"]
     environment:
       <<: *backend-env
@@ -160,6 +170,7 @@ services:
       context: ./agent-backend
       args:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        APT_MIRROR: ${APT_MIRROR:-deb.debian.org}
     restart: unless-stopped
     environment: *backend-env
     volumes:
@@ -172,7 +183,7 @@ services:
       redis:
         condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
       qdrant:
         condition: service_started
       migrate:
@@ -219,7 +230,7 @@ services:
       backend:
         condition: service_started
       minio:
-        condition: service_started
+        condition: service_healthy
     healthcheck:
       # 直接探 Caddy 管理接口（容器内 localhost:2019），不受站点域名限制
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2019/config/ >/dev/null || exit 1"]

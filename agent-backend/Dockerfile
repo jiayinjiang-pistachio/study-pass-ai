@@ -6,6 +6,8 @@ FROM python:3.13-slim-bookworm
 
 # 可选镜像源，便于国内构建：docker compose build 时通过 build.args 覆盖
 ARG PIP_INDEX_URL=https://pypi.org/simple
+# Debian apt 镜像域名（只替换域名，后缀路径保留）：如 mirrors.aliyun.com / mirrors.tuna.tsinghua.edu.cn
+ARG APT_MIRROR=deb.debian.org
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -13,11 +15,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TZ=Asia/Shanghai
 
-# libgomp1：onnxruntime（fastembed）运行时依赖；tzdata 保证容器内时区为东八区
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates tzdata libgomp1 \
- && rm -rf /var/lib/apt/lists/* \
- && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+# libgomp1：onnxruntime（fastembed）运行时依赖；tzdata 保证容器内时区为东八区。
+# Acquire::Retries：弱网 / 镜像源抖动时自动重试，避免单次 5xx 直接构建失败。
+RUN set -eux; \
+    if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
+        sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    apt-get -o Acquire::Retries=3 update; \
+    apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates tzdata libgomp1; \
+    rm -rf /var/lib/apt/lists/*; \
+    ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime; echo "$TZ" > /etc/timezone
 
 WORKDIR /app
 

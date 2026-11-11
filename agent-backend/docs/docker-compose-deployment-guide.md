@@ -30,7 +30,7 @@ backend:8000 ── MySQL 8（业务数据）
 | `migrate` | 与 backend 同镜像 | 无 | 一次性执行 `alembic upgrade head` |
 | `mysql` | `mysql:8.0` | 不暴露 | 首次启动自动建库建用户 |
 | `redis` | `redis:7.4-alpine` | 不暴露 | AOF 持久化 + 密码 |
-| `minio` | `minio/minio` | `127.0.0.1:9001` | 控制台仅本机；S3 API 走 Caddy |
+| `minio` | `bitnamilegacy/minio` | `127.0.0.1:9001` | 控制台仅本机；S3 API 走 Caddy。选 Bitnami legacy 是因为官方 `minio/minio` 在部分网络 / 镜像源下 `pull access denied`，见 §10 |
 | `qdrant` | `qdrant/qdrant` | 不暴露 | 向量库 |
 
 ### 数据卷（`docker volume ls` 可见）
@@ -175,6 +175,8 @@ LOG_TO_CONSOLE=false
 ```dotenv
 PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 NPM_REGISTRY=https://registry.npmmirror.com
+# 只替换域名，镜像脚本会保留 /debian 后缀
+APT_MIRROR=mirrors.aliyun.com
 ```
 
 > 模型下载必须保持 `HF_HUB_DISABLE_XET=1`（compose 已内置）。用 `hf-mirror.com` 时不关闭
@@ -421,7 +423,8 @@ docker compose --env-file .env.docker exec caddy \
 | --- | --- |
 | 构建 backend 失败（`No matching distribution pypdfium2`） | 依赖已锁 `5.15.2` 提供 cp313 Linux wheel；确认拉到了最新 `requirements.txt`，必要时 `docker compose build --no-cache backend` |
 | 拉镜像报 `manifest unknown` / tag 不存在 | 基础镜像 tag 与上游仓库会随时间变化：把 `docker-compose.yml` 中对应镜像改为可用的稳定 tag（如 `qdrant/qdrant:latest`、`caddy:2-alpine`），再重新 `up -d`；升级前先验证 |
-| pip / pnpm 下载很慢或超时 | 在 `.env.docker` 设置 `PIP_INDEX_URL`、`NPM_REGISTRY` 后重新 `build` |
+| 拉镜像报 `pull access denied`（Docker Hub 仓库不可达） | 当前网络 / 镜像源无法访问该仓库。MinIO 已默认改用 `bitnamilegacy/minio` 以兼容受限镜像源（该镜像已停止跟进上游，长期建议换回官方镜像或自建）。若仍需官方镜像：给 Docker 配置可用的 registry mirror，或在一台能访问 Docker Hub 的机器上 `docker pull` 后 `docker save` / `docker load` 导入服务器 |
+| pip / pnpm / apt 下载很慢或报 5xx | 在 `.env.docker` 设置 `PIP_INDEX_URL`、`NPM_REGISTRY`、`APT_MIRROR`（如 `mirrors.aliyun.com`）后重新 `build`；apt 层已内置 `Acquire::Retries=3` 重试 |
 | `/health` 503 / `database: down` | `dc logs backend`；确认 `MYSQL_URL` 用户/口令；`dc exec mysql mysqladmin ping` |
 | MySQL 提示 `Access denied` | 首次启动后改 `.env.docker` 的口令不会自动改库内账号：需在 MySQL 内 `ALTER USER`，或删除 `mysql_data` 卷重建（会丢数据） |
 | Redis `NOAUTH Authentication required` | `REDIS_PASSWORD` 与容器内 `--requirepass` 不一致；同步后 `dc up -d redis backend` |
