@@ -248,8 +248,8 @@ docker compose --env-file .env.docker logs caddy | tail -30
 
 逐项自测清单：
 
-- [ ] `/health` 返回 `database: up`
-- [ ] 注册 / 登录 / 刷新令牌正常
+- [x] `/health` 返回 `database: up`
+- [x] 注册 / 登录 / 刷新令牌正常
 - [ ] 新建会话并发送普通对话，SSE 内容**逐字**出现（不是等结束才整段出现）
 - [ ] 上传 PDF 后提问能检索到参考资料（Qdrant 正常）
 - [ ] 知识卡能出图；配置播客凭证后能生成音频

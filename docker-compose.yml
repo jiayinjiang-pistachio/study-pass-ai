@@ -93,8 +93,10 @@ services:
       retries: 10
       start_period: 40s
     # 仅本机排障时按需放开：docker compose port mysql 3306
-    expose:
-      - "3306"
+    # expose:
+    #   - "3306"
+    ports:
+      - "127.0.0.1:3306:3306"
 
   redis:
     image: redis:7.4-alpine
