@@ -112,8 +112,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    expose:
-      - "6379"
+    # expose:
+    #   - "6379"
+    ports:
+      - "127.0.0.1:6379:6379"
 
   # 之所以用 Bitnami legacy 而非官方 minio/minio：官方镜像在当前网络/镜像源环境常被拒绝
   # （pull access denied）。Bitnami 镜像内置 curl，保留健康检查与控制台。
